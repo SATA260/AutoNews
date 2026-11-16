@@ -76,8 +76,16 @@ export class TtsService {
   async synthesizeSections(
     sections: NarrationSection[],
     outDir: string,
-    signal?: AbortSignal,
+    signalOrOpts?:
+      | AbortSignal
+      | {
+          signal?: AbortSignal;
+          onSectionDone?: (audio: SectionAudio) => Promise<void> | void;
+        },
   ): Promise<SectionAudio[]> {
+    const signal = signalOrOpts && 'aborted' in signalOrOpts ? signalOrOpts : signalOrOpts?.signal;
+    const onSectionDone =
+      signalOrOpts && 'onSectionDone' in signalOrOpts ? signalOrOpts.onSectionDone : undefined;
     const seenKeys = new Set<string>();
     for (const section of sections) {
       if (!SAFE_SECTION_KEY_PATTERN.test(section.key)) {
@@ -174,7 +182,7 @@ export class TtsService {
           signal,
         });
 
-        results.push({
+        const sectionAudio: SectionAudio = {
           key: section.key,
           file: sectionFile,
           speechMs: concatResult.speechMs,
@@ -183,7 +191,9 @@ export class TtsService {
             offsetMs: concatResult.offsetsMs[idx] ?? 0,
             durationMs: sentenceDurationsMs[idx] ?? 0,
           })),
-        });
+        };
+        await onSectionDone?.(sectionAudio);
+        results.push(sectionAudio);
       }
     } catch (err) {
       primaryError = err;

@@ -1,0 +1,895 @@
+import crypto from 'node:crypto';
+import fs from 'node:fs/promises';
+import path from 'node:path';
+import {
+  type ContentLimits,
+  type ErrorCode,
+  PIPELINE_STAGES,
+  RETRYABLE_RUN_STATUSES,
+  type RetryOptions,
+  type Settings,
+  SettingsSchema,
+  type Stage,
+  type Trigger,
+} from '@aidaily/contracts';
+import { TZDate } from '@date-fns/tz';
+import { format } from 'date-fns';
+import type { CoreContext } from '../context.js';
+import { type EditSubStep, retrySingleEditItem } from '../editorial/item-pipeline.js';
+import { PipelineError } from '../errors.js';
+import { inTransaction } from '../storage/db.js';
+import { archiveRunArtifacts, readJsonOrNull, writeJsonAtomic } from '../storage/files.js';
+import { createRunCancelMonitor } from './cancel.js';
+import { emitRunEvent } from './events.js';
+import { startRunHeartbeat } from './heartbeat.js';
+import { acquirePipelineLock, LockBusyError, releasePipelineLock } from './lock.js';
+import {
+  DEFAULT_STAGE_EXECUTORS,
+  type PipelineStage,
+  STAGE_ARTIFACTS,
+  STAGE_CHECKPOINT_REL_PATH,
+  type StageExecutor,
+} from './stages.js';
+
+/** 判断某个步骤名称是否属于自动化生成阶段 */
+function isPipelineStage(stage: Stage): stage is PipelineStage {
+  return (PIPELINE_STAGES as readonly string[]).includes(stage);
+}
+
+/** 校验并收窄步骤名称为自动化阶段类型 */
+function assertPipelineStage(stage: Stage): PipelineStage {
+  if (!isPipelineStage(stage)) {
+    throw new Error(`步骤 ${stage} 不属于可重跑的自动化生成阶段`);
+  }
+  return stage;
+}
+
+/** 根据当前时间与配置时区生成全小写的唯一任务 ID */
+export function generateRunId(now: Date, timezone: string): string {
+  const tzDate = new TZDate(now.getTime(), timezone);
+  const stamp = format(tzDate, 'yyyyMMdd-HHmm');
+  const suffix = crypto.randomBytes(2).toString('hex');
+  return `${stamp}-${suffix}`;
+}
+
+/** 将捕获到的异常归类为标准任务错误码 */
+export function toErrorCode(err: unknown, currentStage?: PipelineStage): ErrorCode {
+  if (err instanceof PipelineError) {
+    return err.code;
+  }
+  if (err instanceof Error && err.name === 'AbortError') {
+    return 'cancelled';
+  }
+  switch (currentStage) {
+    case 'collect':
+      return 'collect_all_failed';
+    case 'narrate':
+      return 'tts_failed';
+    case 'render':
+      return 'render_failed';
+    case 'qa':
+      return 'qa_failed';
+    default:
+      return 'llm_unavailable';
+  }
+}
+
+/** 计算自当前时刻起的重试窗口截止时间（UTC ISO） */
+function computeRetryDeadline(ctx: CoreContext, settings: Settings): string {
+  return new Date(
+    ctx.now().getTime() + settings.retry.reservationHoldHours * 3600_000,
+  ).toISOString();
+}
+
+/** 检查指定步骤的本地检查点文件是否真实存在 */
+async function checkpointExistsOnDisk(
+  ctx: CoreContext,
+  runId: string,
+  relPath: string | null,
+): Promise<boolean> {
+  if (!relPath) {
+    return false;
+  }
+  try {
+    await fs.access(path.join(ctx.paths.runDir(runId), relPath));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** 从配置快照解析当年创建任务时锁定的配置对象 */
+function parseRunSettingsSnapshot(rawJson: string): Settings {
+  const parsed = SettingsSchema.safeParse(JSON.parse(rawJson));
+  if (!parsed.success) {
+    throw new Error(`任务配置快照校验失败: ${parsed.error.message}`);
+  }
+  return parsed.data;
+}
+
+/** 创建一条新的生产任务记录并初始化各步骤状态 */
+export function createRun(
+  ctx: CoreContext,
+  opts: {
+    itemCount: number;
+    trigger?: Trigger;
+    scheduleId?: string | null;
+  },
+): string {
+  if (!Number.isInteger(opts.itemCount) || opts.itemCount <= 0) {
+    throw new RangeError(
+      `每期新闻条数 itemCount 必须为正整数，当前传入: ${String(opts.itemCount)}`,
+    );
+  }
+
+  const now = ctx.now();
+  const nowIso = now.toISOString();
+  const runId = generateRunId(now, ctx.settings.timezone);
+  const trigger = opts.trigger ?? 'manual-cli';
+  const configSnapshotJson = JSON.stringify(ctx.settings);
+
+  inTransaction(ctx.db, () => {
+    ctx.repos.runs.create({
+      id: runId,
+      trigger,
+      scheduleId: opts.scheduleId ?? null,
+      itemCount: opts.itemCount,
+      configSnapshotJson,
+      createdAt: nowIso,
+    });
+    ctx.repos.runStages.initStages(runId);
+    emitRunEvent(ctx, {
+      runId,
+      level: 'info',
+      type: 'run_created',
+      message: `已创建第 ${runId} 期任务（目标 ${opts.itemCount} 条新闻，触发方式：${trigger}）`,
+      data: {
+        itemCount: opts.itemCount,
+        trigger,
+        scheduleId: opts.scheduleId ?? null,
+      },
+    });
+  });
+
+  return runId;
+}
+
+/**
+ * 查询某期任务当前允许的恢复与重跑选项，供命令行或网页界面展示交互入口。
+ */
+export function getRunRetryOptions(ctx: CoreContext, runId: string): RetryOptions {
+  const run = ctx.repos.runs.getById(runId);
+  if (!run) {
+    throw new Error(`未找到任务记录: ${runId}`);
+  }
+
+  if (!RETRYABLE_RUN_STATUSES.includes(run.status)) {
+    return {
+      resumable: false,
+      allowedFromStages: [],
+      retryDeadlineAt: run.retryDeadlineAt ?? undefined,
+    };
+  }
+
+  const stageRecords = ctx.repos.runStages.listByRun(runId);
+  const byStage = new Map(stageRecords.map((r) => [r.stage, r]));
+  const firstIncompleteIdx = PIPELINE_STAGES.findIndex((s) => byStage.get(s)?.status !== 'done');
+
+  if (firstIncompleteIdx === -1) {
+    return {
+      resumable: true,
+      allowedFromStages: [...PIPELINE_STAGES],
+      retryDeadlineAt: run.retryDeadlineAt ?? undefined,
+    };
+  }
+
+  return {
+    resumable: true,
+    resumeFrom: PIPELINE_STAGES[firstIncompleteIdx],
+    allowedFromStages: PIPELINE_STAGES.slice(0, firstIncompleteIdx + 1),
+    retryDeadlineAt: run.retryDeadlineAt ?? undefined,
+  };
+}
+
+/**
+ * 作废从指定阶段开始及其之后的全部检查点与产物目录，
+ * 将旧文件归档保留至 `archive/` 目录下，并在数据库重置受影响的步骤与稿件进度。
+ */
+async function invalidateStagesAndArchive(
+  ctx: CoreContext,
+  runId: string,
+  fromStage: PipelineStage,
+  attempt: number,
+): Promise<void> {
+  const fromIdx = PIPELINE_STAGES.indexOf(fromStage);
+  const stagesToInvalidate = PIPELINE_STAGES.slice(fromIdx);
+  const runDir = ctx.paths.runDir(runId);
+
+  const relArtifacts = stagesToInvalidate.flatMap((s) => STAGE_ARTIFACTS[s]);
+  await archiveRunArtifacts(runDir, `attempt-${attempt}-${fromStage}`, relArtifacts);
+
+  if (stagesToInvalidate.includes('edit')) {
+    const watermarkFile = path.join(runDir, 'edit-watermark.json');
+    const existingWatermark =
+      (await readJsonOrNull<{ versionFloorByItemId?: Record<string, number> }>(watermarkFile)) ??
+      {};
+    const nextFloor: Record<string, number> = { ...(existingWatermark.versionFloorByItemId ?? {}) };
+    for (const item of ctx.repos.runItems.listByRun(runId)) {
+      const versions = ctx.repos.runItems.listVersions(item.id);
+      const maxId = versions.reduce((acc, v) => Math.max(v.id, acc), 0);
+      if (maxId > 0) {
+        nextFloor[item.id] = maxId;
+      }
+    }
+    await writeJsonAtomic(watermarkFile, { versionFloorByItemId: nextFloor });
+  }
+
+  const nowIso = ctx.now().toISOString();
+  inTransaction(ctx.db, () => {
+    ctx.repos.runStages.markStaleFrom(runId, stagesToInvalidate);
+
+    if (fromStage === 'collect' || fromStage === 'select') {
+      ctx.repos.articles.releaseByRun(runId);
+      ctx.repos.events.deleteByRun(runId);
+    } else if (stagesToInvalidate.includes('edit')) {
+      for (const item of ctx.repos.runItems.listByRun(runId)) {
+        ctx.repos.runItems.updateItem(item.id, {
+          status: 'queued',
+          position: null,
+          revision: 0,
+          dropReason: null,
+          finalJson: null,
+          updatedAt: nowIso,
+        });
+      }
+    } else if (stagesToInvalidate.includes('package')) {
+      for (const item of ctx.repos.runItems.listByRun(runId)) {
+        if (item.position !== null) {
+          ctx.repos.runItems.updateItem(item.id, {
+            position: null,
+            updatedAt: nowIso,
+          });
+        }
+      }
+    }
+  });
+}
+
+/** 内部持锁后的主流程顺序执行器 */
+async function executePipelineStagesLocked(opts: {
+  ctx: CoreContext;
+  runId: string;
+  settings: Settings;
+  startStage: PipelineStage;
+  stopAfterStage?: PipelineStage;
+  stageOverrides?: Partial<Record<PipelineStage, StageExecutor>>;
+  limitsOverride?: Partial<ContentLimits>;
+  onAwaitingReview?: (opts: {
+    ctx: CoreContext;
+    runId: string;
+    settings: Settings;
+  }) => Promise<void>;
+}): Promise<void> {
+  const { ctx, runId, settings, startStage, stopAfterStage, stageOverrides, limitsOverride } = opts;
+
+  const startIdx = PIPELINE_STAGES.indexOf(startStage);
+  const stopIdx = stopAfterStage
+    ? PIPELINE_STAGES.indexOf(stopAfterStage)
+    : PIPELINE_STAGES.length - 1;
+  if (stopIdx < startIdx) {
+    throw new Error(`非法的步骤范围：起始 ${startStage} 晚于终止 ${stopAfterStage}`);
+  }
+
+  const stagesToRun = PIPELINE_STAGES.slice(startIdx, stopIdx + 1);
+  const hb = startRunHeartbeat(ctx, runId);
+  const cancelMonitor = createRunCancelMonitor(ctx, runId);
+
+  const runRow = ctx.repos.runs.getById(runId);
+  const nowStartIso = ctx.now().toISOString();
+  ctx.repos.runs.updateStatus(runId, 'running', {
+    currentStage: startStage,
+    pid: process.pid,
+    startedAt: runRow?.startedAt ?? nowStartIso,
+    finishedAt: null,
+    errorCode: null,
+    error: null,
+    retryDeadlineAt: null,
+    cancelRequested: 0,
+    heartbeatAt: nowStartIso,
+  });
+
+  let activeStage: PipelineStage = startStage;
+
+  try {
+    for (const stage of stagesToRun) {
+      activeStage = stage;
+      if (cancelMonitor.checkNow()) {
+        throw new DOMException('任务已取消', 'AbortError');
+      }
+
+      const stageRecs = ctx.repos.runStages.listByRun(runId);
+      const existingRec = stageRecs.find((s) => s.stage === stage);
+      if (
+        existingRec?.status === 'done' &&
+        (await checkpointExistsOnDisk(ctx, runId, existingRec.checkpointPath))
+      ) {
+        continue;
+      }
+
+      const stageStartIso = ctx.now().toISOString();
+      ctx.repos.runs.updateStatus(runId, 'running', { currentStage: stage });
+      ctx.repos.runStages.markStage(runId, stage, 'running', {
+        incrementAttempt: true,
+        startedAt: stageStartIso,
+        finishedAt: null,
+        error: null,
+      });
+
+      emitRunEvent(ctx, {
+        runId,
+        level: 'info',
+        stage,
+        type: 'stage_started',
+        message: `开始执行阶段：${stage}`,
+      });
+
+      let stageOut: unknown;
+      try {
+        const executor = stageOverrides?.[stage] ?? DEFAULT_STAGE_EXECUTORS[stage];
+        stageOut = await executor({
+          ctx,
+          runId,
+          settings,
+          signal: cancelMonitor.signal,
+          limitsOverride,
+        });
+      } catch (stageErr) {
+        const errIso = ctx.now().toISOString();
+        const isAbort = stageErr instanceof Error && stageErr.name === 'AbortError';
+        ctx.repos.runStages.markStage(runId, stage, isAbort ? 'interrupted' : 'failed', {
+          finishedAt: errIso,
+          error: stageErr instanceof Error ? stageErr.message : String(stageErr),
+        });
+        throw stageErr;
+      }
+
+      const relCheckpoint = STAGE_CHECKPOINT_REL_PATH[stage];
+      const absCheckpoint = path.join(ctx.paths.runDir(runId), relCheckpoint);
+      await writeJsonAtomic(absCheckpoint, stageOut);
+
+      const stageDoneIso = ctx.now().toISOString();
+      ctx.repos.runStages.markStage(runId, stage, 'done', {
+        finishedAt: stageDoneIso,
+        checkpointPath: relCheckpoint,
+        error: null,
+      });
+
+      emitRunEvent(ctx, {
+        runId,
+        level: 'info',
+        stage,
+        type: 'stage_done',
+        message: `阶段执行完成：${stage}`,
+      });
+    }
+
+    const finishedIso = ctx.now().toISOString();
+    const lastStage = stagesToRun[stagesToRun.length - 1];
+    if (lastStage === 'qa') {
+      ctx.repos.runs.updateStatus(runId, 'awaiting_review', {
+        currentStage: 'review',
+        pid: null,
+        finishedAt: finishedIso,
+        retryDeadlineAt: null,
+      });
+      emitRunEvent(ctx, {
+        runId,
+        level: 'info',
+        stage: 'review',
+        type: 'awaiting_review',
+        message: '成片制作与质检已全部完成，等待人工审核发布',
+      });
+      await ctx.notifier.notify({
+        type: 'awaiting_review',
+        runId,
+        message: `第 ${runId} 期成片已完成，等待人工审核发布`,
+      });
+      if (settings.publish.mode === 'auto' && opts.onAwaitingReview) {
+        await opts.onAwaitingReview({ ctx, runId, settings });
+      }
+    } else {
+      ctx.repos.runs.updateStatus(runId, 'interrupted', {
+        currentStage: lastStage ?? null,
+        pid: null,
+        finishedAt: finishedIso,
+        retryDeadlineAt: computeRetryDeadline(ctx, settings),
+      });
+    }
+  } catch (err) {
+    const errIso = ctx.now().toISOString();
+    const code = toErrorCode(err, activeStage);
+    const deadlineIso = computeRetryDeadline(ctx, settings);
+    const errMsg = err instanceof Error ? err.message : String(err);
+
+    if (code === 'cancelled') {
+      ctx.repos.runs.updateStatus(runId, 'cancelled', {
+        errorCode: 'cancelled',
+        error: '任务已被用户取消',
+        cancelRequested: 0,
+        pid: null,
+        finishedAt: errIso,
+        retryDeadlineAt: deadlineIso,
+      });
+      emitRunEvent(ctx, {
+        runId,
+        level: 'warn',
+        stage: activeStage,
+        type: 'run_cancelled',
+        message: '任务已按要求取消，已完成工作与选材已保留以便随时继续',
+      });
+    } else {
+      ctx.repos.runs.updateStatus(runId, 'failed', {
+        errorCode: code,
+        error: errMsg,
+        pid: null,
+        finishedAt: errIso,
+        retryDeadlineAt: deadlineIso,
+      });
+      emitRunEvent(ctx, {
+        runId,
+        level: 'error',
+        stage: activeStage,
+        type: 'run_failed',
+        message: `任务执行失败（${code}）：${errMsg}`,
+        data: { errorCode: code },
+      });
+      await ctx.notifier.notify({
+        type: 'failed',
+        runId,
+        message: `第 ${runId} 期任务失败（${code}）：${errMsg}`,
+        data: { errorCode: code, stage: activeStage },
+      });
+    }
+    throw err;
+  } finally {
+    cancelMonitor.stop();
+    hb.stop();
+  }
+}
+
+/**
+ * 执行指定任务：申请全局锁、按阶段依次运行流水线并实时保存检查点，支持从指定起始阶段进入。
+ */
+export async function executeRun(
+  ctx: CoreContext,
+  runId: string,
+  opts?: {
+    startStage?: Stage;
+    stopAfterStage?: PipelineStage;
+    stageOverrides?: Partial<Record<PipelineStage, StageExecutor>>;
+    limitsOverride?: Partial<ContentLimits>;
+    onAwaitingReview?: (opts: {
+      ctx: CoreContext;
+      runId: string;
+      settings: Settings;
+    }) => Promise<void>;
+  },
+): Promise<void> {
+  const run = ctx.repos.runs.getById(runId);
+  if (!run) {
+    throw new Error(`未找到任务记录: ${runId}`);
+  }
+  if (run.status === 'published' || run.status === 'abandoned') {
+    throw new Error(`任务 ${runId} 状态为 ${run.status}，不允许再次执行`);
+  }
+
+  const settings = parseRunSettingsSnapshot(run.configSnapshotJson);
+  const startStage = assertPipelineStage(opts?.startStage ?? 'collect');
+
+  acquirePipelineLock(ctx, runId, settings);
+  try {
+    await executePipelineStagesLocked({
+      ctx,
+      runId,
+      settings,
+      startStage,
+      stopAfterStage: opts?.stopAfterStage,
+      stageOverrides: opts?.stageOverrides,
+      limitsOverride: opts?.limitsOverride,
+      onAwaitingReview: opts?.onAwaitingReview,
+    });
+  } finally {
+    releasePipelineLock(ctx, runId);
+  }
+}
+
+/**
+ * 恢复或从指定阶段重跑既有任务：
+ * 不传 `fromStage` 时自动定位首个未完成阶段续跑已完成之外的余下工作；
+ * 传入 `fromStage` 时将该阶段及之后的所有阶段作废归档并从头重新执行；
+ * 支持通过 `useLatestConfig` 刷新当前最新全局配置快照。
+ */
+export async function resumeRun(
+  ctx: CoreContext,
+  runId: string,
+  opts?: {
+    fromStage?: Stage;
+    useLatestConfig?: boolean;
+    stopAfterStage?: PipelineStage;
+    stageOverrides?: Partial<Record<PipelineStage, StageExecutor>>;
+    limitsOverride?: Partial<ContentLimits>;
+    onAwaitingReview?: (opts: {
+      ctx: CoreContext;
+      runId: string;
+      settings: Settings;
+    }) => Promise<void>;
+  },
+): Promise<void> {
+  const run = ctx.repos.runs.getById(runId);
+  if (!run) {
+    throw new Error(`未找到任务记录: ${runId}`);
+  }
+  if (run.status === 'running' || run.status === 'publishing') {
+    const holder = ctx.repos.locks.get('pipeline');
+    if (holder) {
+      throw new LockBusyError(holder);
+    }
+    throw new Error(`任务 ${runId} 正在执行中（状态：${run.status}），无法同时重跑`);
+  }
+
+  const retryOpts = getRunRetryOptions(ctx, runId);
+  if (!retryOpts.resumable) {
+    throw new Error(`任务 ${runId} 当前状态为 ${run.status}，不允许继续或重跑`);
+  }
+
+  let startStage: PipelineStage;
+  if (opts?.fromStage) {
+    const candidate = assertPipelineStage(opts.fromStage);
+    if (!retryOpts.allowedFromStages.includes(candidate)) {
+      throw new Error(
+        `当前任务仅允许从 [${retryOpts.allowedFromStages.join(', ')}] 重跑，不能直接从 ${candidate} 开始`,
+      );
+    }
+    startStage = candidate;
+  } else {
+    if (!retryOpts.resumeFrom) {
+      throw new Error(`任务 ${runId} 的全部自动阶段已完成，请显式指定要重跑的阶段（fromStage）`);
+    }
+    startStage = assertPipelineStage(retryOpts.resumeFrom);
+  }
+
+  let settings = parseRunSettingsSnapshot(run.configSnapshotJson);
+  acquirePipelineLock(ctx, runId, settings);
+
+  try {
+    if (opts?.useLatestConfig) {
+      await ctx.reloadConfig();
+      const nextJson = JSON.stringify(ctx.settings);
+      ctx.repos.runs.updateStatus(runId, run.status, { configSnapshotJson: nextJson });
+      settings = ctx.settings;
+      emitRunEvent(ctx, {
+        runId,
+        level: 'info',
+        type: 'config_snapshot_refreshed',
+        message: '已按要求使用最新系统配置刷新本期运行快照',
+      });
+    }
+
+    const attempt = ctx.repos.runs.incrementAttempt(runId);
+    if (opts?.fromStage) {
+      await invalidateStagesAndArchive(ctx, runId, startStage, attempt);
+    }
+
+    emitRunEvent(ctx, {
+      runId,
+      level: 'info',
+      stage: startStage,
+      type: 'retry_started',
+      message: opts?.fromStage
+        ? `开始第 ${attempt} 次尝试：从阶段 ${startStage} 重新执行（旧产物已归档）`
+        : `开始第 ${attempt} 次尝试：从断点阶段 ${startStage} 继续执行`,
+      data: {
+        granularity: opts?.fromStage ? 'stage' : 'resume',
+        startStage,
+        attempt,
+        useLatestConfig: Boolean(opts?.useLatestConfig),
+      },
+    });
+
+    await executePipelineStagesLocked({
+      ctx,
+      runId,
+      settings,
+      startStage,
+      stopAfterStage: opts?.stopAfterStage,
+      stageOverrides: opts?.stageOverrides,
+      limitsOverride: opts?.limitsOverride,
+      onAwaitingReview: opts?.onAwaitingReview,
+    });
+  } finally {
+    releasePipelineLock(ctx, runId);
+  }
+}
+
+/**
+ * 单独重做某期任务中的一条新闻（可指定从总结、润色或核查步骤开始），
+ * 完成后自动作废整期编排及之后的阶段并重新向后生成成片。
+ */
+export async function retryRunItem(
+  ctx: CoreContext,
+  runId: string,
+  itemId: string,
+  opts?: {
+    fromStep?: EditSubStep;
+    useLatestConfig?: boolean;
+    stopAfterStage?: PipelineStage;
+    stageOverrides?: Partial<Record<PipelineStage, StageExecutor>>;
+    limitsOverride?: Partial<ContentLimits>;
+    onAwaitingReview?: (opts: {
+      ctx: CoreContext;
+      runId: string;
+      settings: Settings;
+    }) => Promise<void>;
+  },
+): Promise<void> {
+  const run = ctx.repos.runs.getById(runId);
+  if (!run) {
+    throw new Error(`未找到任务记录: ${runId}`);
+  }
+  if (run.status === 'running' || run.status === 'publishing') {
+    const holder = ctx.repos.locks.get('pipeline');
+    if (holder) {
+      throw new LockBusyError(holder);
+    }
+    throw new Error(`任务 ${runId} 正在运行中，无法重做单条新闻`);
+  }
+  if (!RETRYABLE_RUN_STATUSES.includes(run.status)) {
+    throw new Error(`任务 ${runId} 状态为 ${run.status}，不允许重做单条新闻`);
+  }
+
+  const stageRecs = ctx.repos.runStages.listByRun(runId);
+  const selectRec = stageRecs.find((s) => s.stage === 'select');
+  if (selectRec?.status !== 'done') {
+    throw new Error(`任务 ${runId} 的选题阶段尚未完成，无法重做单条新闻`);
+  }
+
+  const item = ctx.repos.runItems.getById(itemId);
+  if (!item || item.runId !== runId) {
+    throw new Error(`任务 ${runId} 中未找到新闻条目: ${itemId}`);
+  }
+
+  let settings = parseRunSettingsSnapshot(run.configSnapshotJson);
+  acquirePipelineLock(ctx, runId, settings);
+
+  const hb = startRunHeartbeat(ctx, runId);
+  const cancelMonitor = createRunCancelMonitor(ctx, runId);
+
+  try {
+    if (opts?.useLatestConfig) {
+      await ctx.reloadConfig();
+      const nextJson = JSON.stringify(ctx.settings);
+      ctx.repos.runs.updateStatus(runId, run.status, { configSnapshotJson: nextJson });
+      settings = ctx.settings;
+      emitRunEvent(ctx, {
+        runId,
+        level: 'info',
+        type: 'config_snapshot_refreshed',
+        message: '已按要求使用最新系统配置刷新本期运行快照',
+      });
+    }
+
+    const fromStep = opts?.fromStep ?? 'summarize';
+    const attempt = ctx.repos.runs.incrementAttempt(runId);
+    await invalidateStagesAndArchive(ctx, runId, 'package', attempt);
+
+    const nowIso = ctx.now().toISOString();
+    ctx.repos.runs.updateStatus(runId, 'running', {
+      currentStage: 'edit',
+      pid: process.pid,
+      finishedAt: null,
+      errorCode: null,
+      error: null,
+      retryDeadlineAt: null,
+      cancelRequested: 0,
+      heartbeatAt: nowIso,
+    });
+    ctx.repos.runStages.markStage(runId, 'edit', 'running', {
+      incrementAttempt: true,
+      startedAt: nowIso,
+      finishedAt: null,
+      error: null,
+    });
+
+    emitRunEvent(ctx, {
+      runId,
+      level: 'info',
+      stage: 'edit',
+      itemId,
+      type: 'retry_started',
+      message: `开始单独重试新闻条目 ${itemId}（起始步骤：${fromStep}）`,
+      data: { granularity: 'item', itemId, fromStep, attempt },
+    });
+
+    if (fromStep === 'summarize') {
+      const watermarkFile = path.join(ctx.paths.runDir(runId), 'edit-watermark.json');
+      const existingWatermark =
+        (await readJsonOrNull<{ versionFloorByItemId?: Record<string, number> }>(watermarkFile)) ??
+        {};
+      const versions = ctx.repos.runItems.listVersions(itemId);
+      const maxId = versions.reduce((acc, v) => Math.max(v.id, acc), 0);
+      if (maxId > 0) {
+        const nextFloor = { ...(existingWatermark.versionFloorByItemId ?? {}), [itemId]: maxId };
+        await writeJsonAtomic(watermarkFile, { versionFloorByItemId: nextFloor });
+      }
+    }
+
+    let editOut: unknown;
+    try {
+      editOut = await retrySingleEditItem({
+        ctx,
+        settings,
+        runId,
+        itemId,
+        fromStep,
+        limitsOverride: opts?.limitsOverride,
+        signal: cancelMonitor.signal,
+      });
+    } catch (itemErr) {
+      const errIso = ctx.now().toISOString();
+      const code = toErrorCode(itemErr, 'edit');
+      const deadlineIso = computeRetryDeadline(ctx, settings);
+      const isAbort = code === 'cancelled';
+
+      ctx.repos.runStages.markStage(runId, 'edit', isAbort ? 'interrupted' : 'failed', {
+        finishedAt: errIso,
+        error: itemErr instanceof Error ? itemErr.message : String(itemErr),
+      });
+      ctx.repos.runs.updateStatus(runId, isAbort ? 'cancelled' : 'failed', {
+        errorCode: code,
+        error: isAbort
+          ? '任务已被用户取消'
+          : itemErr instanceof Error
+            ? itemErr.message
+            : String(itemErr),
+        cancelRequested: 0,
+        pid: null,
+        finishedAt: errIso,
+        retryDeadlineAt: deadlineIso,
+      });
+      if (isAbort) {
+        emitRunEvent(ctx, {
+          runId,
+          level: 'warn',
+          stage: 'edit',
+          itemId,
+          type: 'run_cancelled',
+          message: '单条新闻重试已被取消',
+        });
+      } else {
+        const msg = itemErr instanceof Error ? itemErr.message : String(itemErr);
+        emitRunEvent(ctx, {
+          runId,
+          level: 'error',
+          stage: 'edit',
+          itemId,
+          type: 'run_failed',
+          message: `单条新闻重试失败（${code}）：${msg}`,
+          data: { errorCode: code },
+        });
+        await ctx.notifier.notify({
+          type: 'failed',
+          runId,
+          message: `第 ${runId} 期单条重试失败（${code}）：${msg}`,
+          data: { errorCode: code, stage: 'edit', itemId },
+        });
+      }
+      throw itemErr;
+    }
+
+    await writeJsonAtomic(
+      path.join(ctx.paths.runDir(runId), STAGE_CHECKPOINT_REL_PATH.edit),
+      editOut,
+    );
+    ctx.repos.runStages.markStage(runId, 'edit', 'done', {
+      finishedAt: ctx.now().toISOString(),
+      checkpointPath: STAGE_CHECKPOINT_REL_PATH.edit,
+      error: null,
+    });
+
+    hb.stop();
+    cancelMonitor.stop();
+
+    await executePipelineStagesLocked({
+      ctx,
+      runId,
+      settings,
+      startStage: 'package',
+      stopAfterStage: opts?.stopAfterStage,
+      stageOverrides: opts?.stageOverrides,
+      limitsOverride: opts?.limitsOverride,
+      onAwaitingReview: opts?.onAwaitingReview,
+    });
+  } finally {
+    cancelMonitor.stop();
+    hb.stop();
+    releasePipelineLock(ctx, runId);
+  }
+}
+
+/**
+ * 主动放弃某期中断或未发布的任务，释放它锁定的全部文章回到待选池。
+ */
+export function abandonRun(ctx: CoreContext, runId: string): void {
+  const run = ctx.repos.runs.getById(runId);
+  if (!run) {
+    throw new Error(`未找到任务记录: ${runId}`);
+  }
+  if (
+    run.status === 'running' ||
+    run.status === 'publishing' ||
+    run.status === 'published' ||
+    run.status === 'abandoned'
+  ) {
+    throw new Error(`任务 ${runId} 状态为 ${run.status}，不允许执行放弃操作`);
+  }
+
+  const nowIso = ctx.now().toISOString();
+  inTransaction(ctx.db, () => {
+    const released = ctx.repos.articles.releaseByRun(runId);
+    ctx.repos.runs.updateStatus(runId, 'abandoned', {
+      finishedAt: nowIso,
+      pid: null,
+    });
+    emitRunEvent(ctx, {
+      runId,
+      level: 'info',
+      type: 'run_abandoned',
+      message: `已放弃本期任务并释放 ${released} 篇占用新闻回到候选池`,
+      data: { releasedArticles: released, autoExpired: false },
+    });
+  });
+}
+
+/**
+ * 请求取消正在执行的任务：对排队中的任务直接标记取消，对运行中的任务写入取消标志由执行器中止子进程。
+ */
+export function cancelRun(ctx: CoreContext, runId: string): void {
+  const run = ctx.repos.runs.getById(runId);
+  if (!run) {
+    throw new Error(`未找到任务记录: ${runId}`);
+  }
+
+  if (run.status === 'queued') {
+    const settings = parseRunSettingsSnapshot(run.configSnapshotJson);
+    const nowIso = ctx.now().toISOString();
+    inTransaction(ctx.db, () => {
+      ctx.repos.runs.updateStatus(runId, 'cancelled', {
+        errorCode: 'cancelled',
+        error: '任务尚未启动即被取消',
+        cancelRequested: 0,
+        finishedAt: nowIso,
+        retryDeadlineAt: computeRetryDeadline(ctx, settings),
+      });
+      emitRunEvent(ctx, {
+        runId,
+        level: 'warn',
+        type: 'run_cancelled',
+        message: '排队中的任务已被取消',
+      });
+    });
+    return;
+  }
+
+  if (run.status !== 'running') {
+    throw new Error(`任务 ${runId} 当前状态为 ${run.status}，无法取消`);
+  }
+
+  ctx.repos.runs.requestCancel(runId);
+  emitRunEvent(ctx, {
+    runId,
+    level: 'warn',
+    stage: run.currentStage,
+    type: 'cancel_requested',
+    message: '已发出任务取消请求，正在安全停止当前步骤',
+  });
+}
