@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { AiStageNameSchema } from './config.js';
 import { EventRecordSchema, RunItemRecordSchema } from './editorial.js';
 import { PublishRecordSchema } from './publish.js';
 
@@ -131,10 +132,13 @@ export const LlmCallStatusSchema = z.enum([
 ]);
 export type LlmCallStatus = z.infer<typeof LlmCallStatusSchema>;
 
+export const LlmStageSchema = z.union([StageSchema, AiStageNameSchema]);
+export type LlmStage = z.infer<typeof LlmStageSchema>;
+
 export const LlmCallRecordSchema = z.object({
   id: z.number().int().positive(),
   runId: z.string().nullable(),
-  stage: StageSchema.nullable(),
+  stage: LlmStageSchema.nullable(),
   itemId: z.string().nullable(),
   cli: z.string().min(1),
   model: z.string().nullable(),

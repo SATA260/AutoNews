@@ -5,10 +5,10 @@ import type {
   ItemVersionKind,
   LlmCallRecord,
   LlmCallStatus,
+  LlmStage,
   PolishedItem,
   RunItemRecord,
   RunItemStatus,
-  Stage,
 } from '@aidaily/contracts';
 import type { DatabaseSync } from '../db.js';
 
@@ -51,7 +51,7 @@ interface ItemVersionRow {
 interface LlmCallRow {
   id: number;
   run_id: string | null;
-  stage: Stage | null;
+  stage: LlmStage | null;
   item_id: string | null;
   cli: string;
   model: string | null;
@@ -274,7 +274,7 @@ export function createLlmCallsRepo(db: DatabaseSync) {
   return {
     insert(input: {
       runId?: string | null;
-      stage?: Stage | null;
+      stage?: LlmStage | null;
       itemId?: string | null;
       cli: string;
       model?: string | null;
