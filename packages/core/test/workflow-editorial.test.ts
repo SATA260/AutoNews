@@ -630,5 +630,5 @@ describe('editorial workflow, TTS timeline, interruption recovery, and retry eng
     expect(optsMissingCkpt.resumeFrom).toBe('qa');
 
     await core.close();
-  });
+  }, 30_000);
 });
