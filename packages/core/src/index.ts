@@ -11,6 +11,7 @@ export * from './collector/index.js';
 export * from './config/loader.js';
 export * from './config/writer.js';
 export * from './context.js';
+export * from './editorial/index.js';
 export * from './errors.js';
 export * from './notify/index.js';
 export * from './paths.js';

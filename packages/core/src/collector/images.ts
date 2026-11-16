@@ -16,7 +16,7 @@ const MIME_TO_EXT: Record<string, string> = {
   'image/svg+xml': 'svg',
 };
 
-/** 从响应头 Content-Type 中识别安全图片文件后缀名，不支持的类型返回 null */
+/** 从响应头 Content-Type 中识别安全图片文件后缀名（接受所有 `image/*`，未知子类型使用通用 `.img` 后缀） */
 function resolveImageExtension(contentType: string | null): string | null {
   if (!contentType) {
     return null;
@@ -25,7 +25,7 @@ function resolveImageExtension(contentType: string | null): string | null {
   if (!mime.startsWith('image/')) {
     return null;
   }
-  return MIME_TO_EXT[mime] ?? null;
+  return MIME_TO_EXT[mime] ?? 'img';
 }
 
 /** 按字节上限流式读取图片响应体，超出上限立即中止读取并返回 null */

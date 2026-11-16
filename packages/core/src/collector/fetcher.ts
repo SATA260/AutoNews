@@ -83,6 +83,7 @@ export async function fetchFeedWithRetry(
     retries?: number;
     retryDelayMs?: number;
     useConditionalHeaders?: boolean;
+    timezone?: string;
     signal?: AbortSignal;
   },
 ): Promise<FetchFeedResult> {
@@ -140,7 +141,7 @@ export async function fetchFeedWithRetry(
       }
 
       const xml = await readFeedXmlWithLimit(res, MAX_FEED_BYTES);
-      const items = parseFeedXml(xml, source.url);
+      const items = parseFeedXml(xml, source.url, opts.timezone);
       return {
         notModified: false,
         statusCode: res.status,

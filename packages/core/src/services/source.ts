@@ -55,13 +55,14 @@ export function createSourceService(ctx: CoreContext): SourceService {
         };
       }
 
-      const startedAt = Date.now();
+      const startedAt = ctx.now().getTime();
       try {
         const res = await fetchFeedWithRetry(source, null, {
           fetchImpl: ctx.fetchImpl,
           timeoutMs: 15_000,
           retries: 1,
           useConditionalHeaders: false,
+          timezone: ctx.settings.timezone,
         });
         return {
           sourceId: source.id,
@@ -69,7 +70,7 @@ export function createSourceService(ctx: CoreContext): SourceService {
           statusCode: res.statusCode,
           itemCount: res.items.length,
           sampleTitles: res.items.slice(0, 5).map((item) => item.title),
-          durationMs: Math.max(0, Date.now() - startedAt),
+          durationMs: Math.max(0, ctx.now().getTime() - startedAt),
         };
       } catch (err) {
         return {
@@ -77,7 +78,7 @@ export function createSourceService(ctx: CoreContext): SourceService {
           ok: false,
           itemCount: 0,
           sampleTitles: [],
-          durationMs: Math.max(0, Date.now() - startedAt),
+          durationMs: Math.max(0, ctx.now().getTime() - startedAt),
           error: err instanceof Error ? err.message : String(err),
         };
       }

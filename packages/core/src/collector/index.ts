@@ -1,3 +1,4 @@
+import fs from 'node:fs/promises';
 import path from 'node:path';
 import type { Settings, SourceDef, SourcePool } from '@aidaily/contracts';
 import pLimit from 'p-limit';
@@ -30,6 +31,16 @@ export interface CollectCheckpoint {
   expiredCount: number;
 }
 
+/** 构造标准取消异常 */
+function createAbortError(): DOMException {
+  return new DOMException('已取消', 'AbortError');
+}
+
+/** 判断异常是否为外部触发的取消信号 */
+function isAbortError(err: unknown): boolean {
+  return err instanceof Error && err.name === 'AbortError';
+}
+
 /** 抓取单个启用信源、提取新增文章正文与配图、落盘并推进信源抓取进度 */
 async function collectSingleSource(
   ctx: CoreContext,
@@ -40,14 +51,20 @@ async function collectSingleSource(
     runId?: string;
     signal?: AbortSignal;
     retryDelayMs?: number;
+    timezone: string;
   },
 ): Promise<string[]> {
   const prevState = ctx.repos.sourceState.get(source.id);
   const feedResult = await fetchFeedWithRetry(source, prevState, {
     fetchImpl: ctx.fetchImpl,
     retryDelayMs: opts.retryDelayMs,
+    timezone: opts.timezone,
     signal: opts.signal,
   });
+
+  if (opts.signal?.aborted) {
+    throw createAbortError();
+  }
 
   const nowIso = ctx.now().toISOString();
   if (feedResult.notModified) {
@@ -65,33 +82,24 @@ async function collectSingleSource(
   const prevCursorMs = prevState?.lastItemPublishedAt
     ? Date.parse(prevState.lastItemPublishedAt)
     : Number.NaN;
-  const overlapStartMs = Number.isNaN(prevCursorMs)
-    ? Number.NEGATIVE_INFINITY
-    : prevCursorMs - OVERLAP_WINDOW_MS;
+  const hasPrevCursor = !Number.isNaN(prevCursorMs);
+  const overlapStartMs = hasPrevCursor
+    ? prevCursorMs - OVERLAP_WINDOW_MS
+    : Number.NEGATIVE_INFINITY;
 
-  let maxItemPublishedMs = Number.NaN;
+  let confirmedMaxMs = Number.NaN;
   const pendingItems: Array<{
     articleId: string;
     canonicalUrl: string;
     title: string;
     publishedAt: string | null;
+    itemMs: number | null;
     summary: string | null;
     content: string | null;
   }> = [];
 
   for (const item of feedResult.items) {
-    if (item.publishedAt !== null) {
-      const itemMs = Date.parse(item.publishedAt);
-      if (!Number.isNaN(itemMs)) {
-        if (Number.isNaN(maxItemPublishedMs) || itemMs > maxItemPublishedMs) {
-          maxItemPublishedMs = itemMs;
-        }
-        if (itemMs < overlapStartMs) {
-          continue;
-        }
-      }
-    }
-
+    // 先校验链接有效性；链接不合法的条目不得推进抓取时间游标
     let canonicalUrl: string;
     try {
       canonicalUrl = canonicalizeUrl(item.url, source.url);
@@ -99,8 +107,27 @@ async function collectSingleSource(
       continue;
     }
 
+    const parsedMs = item.publishedAt !== null ? Date.parse(item.publishedAt) : Number.NaN;
+    const itemMs = Number.isNaN(parsedMs) ? null : parsedMs;
+
+    if (itemMs === null) {
+      // 已建立时间游标时忽略无发布时间条目，防止无日期旧闻换链后反复入库
+      if (hasPrevCursor) {
+        continue;
+      }
+    } else if (itemMs < overlapStartMs) {
+      continue;
+    }
+
     const articleId = computeArticleId(canonicalUrl);
-    if (seenCanonicalIds.has(articleId) || ctx.repos.articles.getById(articleId)) {
+    const existingArticle = ctx.repos.articles.getById(articleId);
+    if (existingArticle) {
+      if (itemMs !== null && (Number.isNaN(confirmedMaxMs) || itemMs > confirmedMaxMs)) {
+        confirmedMaxMs = itemMs;
+      }
+      continue;
+    }
+    if (seenCanonicalIds.has(articleId)) {
       continue;
     }
     seenCanonicalIds.add(articleId);
@@ -109,22 +136,27 @@ async function collectSingleSource(
       articleId,
       canonicalUrl,
       title: item.title,
-      publishedAt: item.publishedAt,
+      publishedAt: itemMs !== null ? item.publishedAt : null,
+      itemMs,
       summary: item.summary,
       content: item.content,
     });
   }
 
-  const createdIds = await Promise.all(
+  const processed = await Promise.all(
     pendingItems.map((entry) =>
       articleLimit(async () => {
         if (opts.signal?.aborted) {
-          throw new DOMException('已取消', 'AbortError');
+          throw createAbortError();
         }
 
         const html = await fetchArticleHtml(entry.canonicalUrl, ctx.fetchImpl, {
           signal: opts.signal,
         });
+        if (opts.signal?.aborted) {
+          throw createAbortError();
+        }
+
         const extracted = extractArticleContent({
           url: entry.canonicalUrl,
           html,
@@ -132,62 +164,104 @@ async function collectSingleSource(
           feedSummary: entry.summary,
         });
 
+        if (opts.signal?.aborted) {
+          throw createAbortError();
+        }
+
         const firstSeenAt = ctx.now().toISOString();
         const publishedAt = entry.publishedAt ?? firstSeenAt;
 
         let contentPath: string | null = null;
+        let writtenContentFile: string | null = null;
         let imagePath: string | null = null;
+        let writtenImageFile: string | null = null;
 
-        if (extracted.extractStatus !== 'failed') {
-          const contentFile = path.join(ctx.paths.articlesDir, `${entry.articleId}.json`);
-          const storedPayload: StoredArticleContent = {
-            url: entry.canonicalUrl,
+        try {
+          if (extracted.extractStatus !== 'failed') {
+            const contentFile = path.join(ctx.paths.articlesDir, `${entry.articleId}.json`);
+            const storedPayload: StoredArticleContent = {
+              url: entry.canonicalUrl,
+              title: entry.title,
+              lang: source.lang,
+              publishedAt,
+              text: extracted.text,
+              feedContent: entry.content ?? entry.summary,
+            };
+            await writeJsonAtomic(contentFile, storedPayload);
+            writtenContentFile = contentFile;
+            contentPath = path.relative(ctx.paths.rootDir, contentFile);
+
+            if (extracted.ogImageUrl) {
+              if (opts.signal?.aborted) {
+                throw createAbortError();
+              }
+              imagePath = await downloadArticleImage({
+                articleId: entry.articleId,
+                imageUrl: extracted.ogImageUrl,
+                imagesDir: ctx.paths.imagesDir,
+                rootDir: ctx.paths.rootDir,
+                fetchImpl: ctx.fetchImpl,
+                signal: opts.signal,
+              });
+              if (imagePath) {
+                writtenImageFile = path.join(ctx.paths.rootDir, imagePath);
+              }
+            }
+          }
+
+          if (opts.signal?.aborted) {
+            throw createAbortError();
+          }
+
+          const inserted = ctx.repos.articles.insertIfAbsent({
+            id: entry.articleId,
+            sourceId: source.id,
+            canonicalUrl: entry.canonicalUrl,
             title: entry.title,
+            titleNorm: normalizeTitle(entry.title),
             lang: source.lang,
             publishedAt,
-            text: extracted.text,
-            feedContent: entry.content ?? entry.summary,
+            firstSeenAt,
+            excerpt: extracted.excerpt || null,
+            contentPath,
+            contentChars: extracted.contentChars,
+            imagePath,
+            extractStatus: extracted.extractStatus,
+          });
+
+          return {
+            articleId: inserted && extracted.extractStatus !== 'failed' ? entry.articleId : null,
+            itemMs: entry.itemMs,
           };
-          await writeJsonAtomic(contentFile, storedPayload);
-          contentPath = path.relative(ctx.paths.rootDir, contentFile);
-
-          if (extracted.ogImageUrl) {
-            imagePath = await downloadArticleImage({
-              articleId: entry.articleId,
-              imageUrl: extracted.ogImageUrl,
-              imagesDir: ctx.paths.imagesDir,
-              rootDir: ctx.paths.rootDir,
-              fetchImpl: ctx.fetchImpl,
-              signal: opts.signal,
-            });
+        } catch (err) {
+          if (isAbortError(err)) {
+            if (writtenContentFile) {
+              await fs.rm(writtenContentFile, { force: true }).catch(() => undefined);
+            }
+            if (writtenImageFile) {
+              await fs.rm(writtenImageFile, { force: true }).catch(() => undefined);
+            }
           }
+          throw err;
         }
-
-        const inserted = ctx.repos.articles.insertIfAbsent({
-          id: entry.articleId,
-          sourceId: source.id,
-          canonicalUrl: entry.canonicalUrl,
-          title: entry.title,
-          titleNorm: normalizeTitle(entry.title),
-          lang: source.lang,
-          publishedAt,
-          firstSeenAt,
-          excerpt: extracted.excerpt || null,
-          contentPath,
-          contentChars: extracted.contentChars,
-          imagePath,
-          extractStatus: extracted.extractStatus,
-        });
-
-        return inserted && extracted.extractStatus !== 'failed' ? entry.articleId : null;
       }),
     ),
   );
 
-  // 所有新文章正文与记录安全落盘后，再推进该信源的抓取时间游标
-  const latestItemIso = Number.isNaN(maxItemPublishedMs)
+  if (opts.signal?.aborted) {
+    throw createAbortError();
+  }
+
+  for (const res of processed) {
+    if (res.itemMs !== null && (Number.isNaN(confirmedMaxMs) || res.itemMs > confirmedMaxMs)) {
+      confirmedMaxMs = res.itemMs;
+    }
+  }
+
+  // 本信源文章任务全部确认落盘且未收到取消信号后，再推进该信源的抓取时间游标
+  const latestItemIso = Number.isNaN(confirmedMaxMs)
     ? null
-    : new Date(maxItemPublishedMs).toISOString();
+    : new Date(confirmedMaxMs).toISOString();
   ctx.repos.sourceState.upsertSuccess({
     sourceId: source.id,
     lastFetchedAt: ctx.now().toISOString(),
@@ -197,13 +271,13 @@ async function collectSingleSource(
     preserveConditionalHeaders: false,
   });
 
-  return createdIds.filter((id): id is string => id !== null);
+  return processed.map((entry) => entry.articleId).filter((id): id is string => id !== null);
 }
 
 /**
  * 执行新闻信源增量采集流程：
  * 并发拉取指定分组的启用信源，过滤重抓重叠窗口与重复链接，提取正文与配图落盘，
- * 更新信源健康状态并在全部主力信源失败时返回明确错误。
+ * 更新信源健康状态并在全部主力信源失败时返回明确错误；若收到取消信号，会等待正在进行的信源安全收尾后再退出。
  */
 export async function collectSources(
   ctx: CoreContext,
@@ -215,6 +289,10 @@ export async function collectSources(
     retryDelayMs?: number;
   },
 ): Promise<CollectCheckpoint> {
+  if (opts?.signal?.aborted) {
+    throw createAbortError();
+  }
+
   const pool = opts?.pool ?? 'primary';
   const effectiveSettings = opts?.settings ?? ctx.settings;
   const targetSources = ctx.sources.filter((s) => s.enabled && s.kind === 'rss' && s.pool === pool);
@@ -227,23 +305,24 @@ export async function collectSources(
   const sourcesFailed: Array<{ sourceId: string; error: string }> = [];
   const newArticleIds: string[] = [];
 
-  await Promise.all(
+  const settled = await Promise.allSettled(
     targetSources.map((source) =>
       feedLimit(async () => {
         if (opts?.signal?.aborted) {
-          throw new DOMException('已取消', 'AbortError');
+          throw createAbortError();
         }
         try {
           const added = await collectSingleSource(ctx, source, seenCanonicalIds, articleLimit, {
             runId: opts?.runId,
             signal: opts?.signal,
             retryDelayMs: opts?.retryDelayMs,
+            timezone: effectiveSettings.timezone,
           });
           sourcesOk.push(source.id);
           newArticleIds.push(...added);
         } catch (err) {
-          if (err instanceof Error && err.name === 'AbortError') {
-            throw err;
+          if (isAbortError(err) || opts?.signal?.aborted) {
+            throw isAbortError(err) ? err : createAbortError();
           }
           const msg = err instanceof Error ? err.message : String(err);
           sourcesFailed.push({ sourceId: source.id, error: msg });
@@ -272,6 +351,15 @@ export async function collectSources(
       }),
     ),
   );
+
+  for (const outcome of settled) {
+    if (outcome.status === 'rejected') {
+      throw outcome.reason;
+    }
+  }
+  if (opts?.signal?.aborted) {
+    throw createAbortError();
+  }
 
   if (targetSources.length > 0 && sourcesOk.length === 0) {
     throw new PipelineError(

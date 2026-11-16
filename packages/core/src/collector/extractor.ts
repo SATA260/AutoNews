@@ -221,8 +221,7 @@ export async function fetchArticleHtml(
 /**
  * 提取文章可用正文与代表配图：
  * 优先解析原网页正文（满 400 字标记为 ok）；
- * 原网页抓取失败或正文不足 400 字时回退使用订阅全文或摘要（满 200 字标记为 feed_only）；
- * 两者均不足 200 字则标记为 failed，不进入后续候选池。
+ * 原网页抓取失败或正文不足 400 字时改用订阅正文或摘要（正文优先，不足再用摘要；满 200 字标记为 feed_only，不足 200 字则标记为 failed）。
  */
 export function extractArticleContent(opts: {
   url: string;
@@ -270,10 +269,8 @@ export function extractArticleContent(opts: {
 
   const feedContentText = opts.feedContent ? htmlToPlainText(opts.feedContent, opts.url) : '';
   const feedSummaryText = opts.feedSummary ? htmlToPlainText(opts.feedSummary, opts.url) : '';
-  const bestFeedText =
-    feedContentText.length >= feedSummaryText.length ? feedContentText : feedSummaryText;
   const fallbackText =
-    bestFeedText.length >= readabilityText.length ? bestFeedText : readabilityText;
+    feedContentText.length >= feedSummaryText.length ? feedContentText : feedSummaryText;
 
   if (fallbackText.length >= 200) {
     const excerpt = normalizeSingleLineText(fallbackText).slice(0, 300);

@@ -116,20 +116,23 @@ describe('collector module and SourceService', () => {
     expect(rssItems[0]?.content).toContain('Detailed content paragraph.');
 
     const atomXml = `<?xml version="1.0" encoding="utf-8"?>
-<feed xmlns="http://www.w3.org/2005/Atom">
-  <title>Research Blog</title>
-  <entry>
-    <title>New Inference Engine</title>
-    <link rel="self" href="https://lab.example.com/feed.xml" />
-    <link rel="alternate" href="https://lab.example.com/posts/engine" />
-    <updated>2026-11-16T09:30:00+08:00</updated>
-    <summary>Engine summary</summary>
-  </entry>
-</feed>`;
-    const atomItems = parseFeedXml(atomXml);
+<atom:feed xmlns:atom="http://www.w3.org/2005/Atom" xml:base="https://lab.example.com/blog/">
+  <atom:title>Research Blog</atom:title>
+  <atom:entry>
+    <atom:title>Tom&#8217;s &amp; &mdash; <b>Inference</b> Engine</atom:title>
+    <atom:link rel="alternate" type="application/atom+xml" href="https://lab.example.com/atom.xml" />
+    <atom:link rel="alternate" type="text/html" href="posts/engine" />
+    <atom:updated>2026-11-16 09:30:00</atom:updated>
+    <atom:summary type="xhtml"><div xmlns="http://www.w3.org/1999/xhtml"><p>Engine <b>summary</b> text</p></div></atom:summary>
+  </atom:entry>
+</atom:feed>`;
+    const atomItems = parseFeedXml(atomXml, 'https://lab.example.com/feed.xml', 'Asia/Shanghai');
     expect(atomItems).toHaveLength(1);
-    expect(atomItems[0]?.url).toBe('https://lab.example.com/posts/engine');
+    expect(atomItems[0]?.title).toBe('Tom’s & — Inference Engine');
+    expect(atomItems[0]?.url).toBe('https://lab.example.com/blog/posts/engine');
     expect(atomItems[0]?.publishedAt).toBe('2026-11-16T01:30:00.000Z');
+    expect(atomItems[0]?.summary).toContain('Engine');
+    expect(atomItems[0]?.summary).toContain('summary');
 
     expect(
       parseFeedXml('<rss version="2.0"><channel><title>Empty</title></channel></rss>'),
@@ -178,6 +181,22 @@ describe('collector module and SourceService', () => {
     });
     expect(tooShortExtract.extractStatus).toBe('failed');
 
+    // 验证网页抽取在 200-399 字之间但订阅内容不足 200 字时，仍应按订阅正文字数标为 failed
+    const midHtmlShortFeed = extractArticleContent({
+      url: 'https://example.com/article/4',
+      html: buildHtmlPage({
+        title: '半截网页正文',
+        bodyParagraphs: [
+          '这是网页抽出来的一段两百多字但不到四百字的正文介绍内容，用于测试严格遵循阈值规则。'.repeat(
+            6,
+          ),
+        ],
+      }),
+      feedContent: '<p>订阅摘要很短。</p>',
+      feedSummary: null,
+    });
+    expect(midHtmlShortFeed.extractStatus).toBe('failed');
+
     const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'aidaily-img-'));
     tempDirs.push(tmpDir);
     const imagesDir = path.join(tmpDir, 'storage', 'images');
@@ -194,6 +213,19 @@ describe('collector module and SourceService', () => {
         }),
     });
     expect(okImgPath).toBe(path.join('storage', 'images', 'art-ok.png'));
+
+    const bmpImgPath = await downloadArticleImage({
+      articleId: 'art-bmp',
+      imageUrl: 'https://cdn.example.com/hero.bmp',
+      imagesDir,
+      rootDir: tmpDir,
+      fetchImpl: async () =>
+        new Response(Buffer.from([0x42, 0x4d, 0x10, 0x00]), {
+          status: 200,
+          headers: { 'content-type': 'image/bmp' },
+        }),
+    });
+    expect(bmpImgPath).toBe(path.join('storage', 'images', 'art-bmp.img'));
 
     const nonImage = await downloadArticleImage({
       articleId: 'art-html',
@@ -303,6 +335,18 @@ describe('collector module and SourceService', () => {
       <link>https://feed-a.example.com/post-2</link>
       <pubDate>Mon, 16 Nov 2026 09:30:00 GMT</pubDate>
       <description>增量新条目</description>
+    </item>
+    <item>
+      <title>早于重叠窗口的新链接</title>
+      <link>https://feed-a.example.com/outside-window</link>
+      <pubDate>Mon, 16 Nov 2026 05:00:00 GMT</pubDate>
+      <description>不应入库</description>
+    </item>
+    <item>
+      <title>非法协议未来时间条目</title>
+      <link>ftp://feed-a.example.com/invalid-proto</link>
+      <pubDate>Mon, 16 Nov 2026 23:00:00 GMT</pubDate>
+      <description>不能抬高游标</description>
     </item>
   </channel>
 </rss>`,
@@ -437,10 +481,18 @@ describe('collector module and SourceService', () => {
     expect(second.newArticleIds).toEqual([]);
     expect(core.context.repos.sourceState.get('primary-rss')?.etag).toBe('"etag-p1"');
 
-    // 第三、四轮采集：HTTP 200 下验证 2 小时重叠窗口对已有链接去重、仅入库新文章，并让 flaky-rss 达到连续 3 次失败告警阈值
+    // 第三、四轮采集：验证 2 小时重叠窗口跳过更早新链接、非法链接不抬高游标、仅入库新文章，并触发连续 3 次失败告警
     phase = 3;
     const third = await collectSources(core.context, { runId: 'run-collect-1', retryDelayMs: 5 });
     expect(third.newArticleIds).toEqual([computeArticleId('https://feed-a.example.com/post-2')]);
+    expect(
+      core.context.repos.articles.getById(
+        computeArticleId('https://feed-a.example.com/outside-window'),
+      ),
+    ).toBeNull();
+    expect(core.context.repos.sourceState.get('primary-rss')?.lastItemPublishedAt).toBe(
+      '2026-11-16T09:30:00.000Z',
+    );
     const fourth = await collectSources(core.context, { runId: 'run-collect-1', retryDelayMs: 5 });
     expect(fourth.newArticleIds).toEqual([]);
 
@@ -452,7 +504,7 @@ describe('collector module and SourceService', () => {
 
     const testPrimary = await core.sources.test('primary-rss');
     expect(testPrimary.ok).toBe(true);
-    expect(testPrimary.itemCount).toBe(2);
+    expect(testPrimary.itemCount).toBe(3);
     expect(testPrimary.sampleTitles[0]).toBe('主力新文章一');
 
     const testMissing = await core.sources.test('nonexistent');
@@ -484,6 +536,56 @@ describe('collector module and SourceService', () => {
       name: 'PipelineError',
       code: 'collect_all_failed',
     } satisfies Partial<PipelineError>);
+
+    await core.close();
+  });
+
+  it('aborts cleanly mid-collection without writing partial articles or advancing cursor', async () => {
+    const rootDir = await setupWorkspaceWithSources([
+      {
+        id: 'slow-rss',
+        name: '慢速信源',
+        lang: 'zh',
+        tier: 1,
+        kind: 'rss',
+        pool: 'primary',
+        url: 'https://slow.example.com/rss.xml',
+        enabled: true,
+      },
+    ]);
+
+    const ac = new AbortController();
+    const longBody =
+      '这是非常详尽的正文段落，包含完整的背景信息、关键数字与具体发布节奏说明。'.repeat(12);
+
+    const core = await createCore({
+      rootDir,
+      fetchImpl: async (input) => {
+        const url = typeof input === 'string' ? input : input.toString();
+        if (url === 'https://slow.example.com/rss.xml') {
+          return new Response(
+            `<?xml version="1.0" encoding="utf-8"?>
+<rss version="2.0"><channel><item>
+  <title>中断文章测试</title>
+  <link>https://slow.example.com/post-abort</link>
+  <pubDate>Mon, 16 Nov 2026 09:00:00 GMT</pubDate>
+</item></channel></rss>`,
+            { status: 200 },
+          );
+        }
+        // 在抓正文时触发任务取消信号
+        ac.abort();
+        return new Response(buildHtmlPage({ title: '中断文章测试', bodyParagraphs: [longBody] }), {
+          status: 200,
+          headers: { 'content-type': 'text/html' },
+        });
+      },
+    });
+
+    await expect(collectSources(core.context, { signal: ac.signal })).rejects.toThrow();
+    const articleId = computeArticleId('https://slow.example.com/post-abort');
+    expect(core.context.repos.articles.getById(articleId)).toBeNull();
+    expect(core.context.repos.sourceState.get('slow-rss')).toBeNull();
 
     await core.close();
   });

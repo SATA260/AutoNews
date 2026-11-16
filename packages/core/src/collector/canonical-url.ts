@@ -52,7 +52,9 @@ export function canonicalizeUrl(rawUrl: string, baseUrl?: string): string {
       keptParams.push([key, value]);
     }
   }
-  keptParams.sort((a, b) => a[0].localeCompare(b[0]) || a[1].localeCompare(b[1]));
+  keptParams.sort((a, b) =>
+    a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : a[1] < b[1] ? -1 : a[1] > b[1] ? 1 : 0,
+  );
 
   url.search = '';
   for (const [key, value] of keptParams) {
