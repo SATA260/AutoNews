@@ -211,9 +211,12 @@ export async function startTemplateHttpServer(
       if (!res.headersSent) {
         res.writeHead(500);
       }
-      res.end();
+      if (!res.writableEnded) {
+        res.end();
+      }
     });
   });
+  server.requestTimeout = 30_000;
 
   await new Promise<void>((resolve, reject) => {
     const onError = (err: Error) => {

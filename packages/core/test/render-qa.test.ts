@@ -460,6 +460,40 @@ describe('template rendering, Playwright capture, ffmpeg composition, and QA', (
     expect(qa.width).toBe(1920);
     expect(qa.height).toBe(1080);
 
+    // 验证缺失音轨及损坏 PNG 文件头时，质检阶段仍会把失败明细写入 qa.json 再抛出异常
+    const qaFile = path.join(runDir, 'qa.json');
+    await fs.rm(qaFile, { force: true });
+    await fs.writeFile(path.join(runDir, 'frames', 'page-00.png'), 'x'.repeat(2048), 'utf8');
+    await runMediaCommand('ffmpeg', [
+      '-y',
+      '-f',
+      'lavfi',
+      '-i',
+      'color=c=blue:s=1920x1080:d=1',
+      '-an',
+      '-c:v',
+      'libx264',
+      '-pix_fmt',
+      'yuv420p',
+      path.join(runDir, 'output', 'video.mp4'),
+    ]);
+    await expect(
+      runQaStage({
+        ctx: core.context,
+        runId,
+        settings: core.context.settings,
+        timeline,
+      }),
+    ).rejects.toThrow(/成片质检未通过/);
+
+    const damagedReport = await readJsonOrNull<QaReport>(qaFile);
+    expect(damagedReport?.passed).toBe(false);
+    expect(damagedReport?.checks.find((c) => c.name === 'streams_present')?.passed).toBe(false);
+    expect(damagedReport?.checks.find((c) => c.name === 'audio_volume')?.passed).toBe(false);
+    expect(damagedReport?.checks.find((c) => c.name === 'frame_screenshots')?.detail).toContain(
+      '文件头非PNG',
+    );
+
     await core.close();
   }, 60_000);
 });

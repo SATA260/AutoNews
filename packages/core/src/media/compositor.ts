@@ -142,6 +142,8 @@ export async function resolveChromiumExecutablePath(): Promise<string | undefine
   return undefined;
 }
 
+const ALLOWED_IMAGE_EXTENSIONS = new Set(['.png', '.jpg', '.jpeg', '.webp', '.gif', '.avif']);
+
 /** 安全地把已下载的新闻配图复制到本期任务独立素材目录下，保障模板预览服务只暴露任务目录 */
 async function stageArticleAssetIntoRunDir(opts: {
   ctx: CoreContext;
@@ -150,7 +152,7 @@ async function stageArticleAssetIntoRunDir(opts: {
   itemIndex: number;
 }): Promise<string | undefined> {
   const { ctx, runDir, relImagePath, itemIndex } = opts;
-  if (!relImagePath) {
+  if (!relImagePath || relImagePath.includes('\0')) {
     return undefined;
   }
   const resolvedRoot = path.resolve(ctx.paths.rootDir);
@@ -169,7 +171,10 @@ async function stageArticleAssetIntoRunDir(opts: {
     if (!realSrc.startsWith(`${rootReal}${path.sep}`)) {
       return undefined;
     }
-    const ext = path.extname(realSrc) || '.jpg';
+    const ext = path.extname(realSrc).toLowerCase();
+    if (!ALLOWED_IMAGE_EXTENSIONS.has(ext)) {
+      return undefined;
+    }
     const fileName = `item-${String(itemIndex + 1).padStart(2, '0')}${ext}`;
     const relDest = path.posix.join('assets', fileName);
     const absDest = path.join(runDir, relDest);
@@ -326,8 +331,8 @@ export async function runRenderStage(opts: {
     prevProgress.height === settings.render.height;
 
   if (!digestMatched) {
-    // 模板数据或尺寸变更时清理旧帧，避免混用前后两次内容截屏
-    await fs.rm(framesDir, { recursive: true, force: true }).catch(() => undefined);
+    // 模板数据或尺寸变更时彻底清理旧帧目录，禁止吞掉权限错误导致新旧截屏混用
+    await fs.rm(framesDir, { recursive: true, force: true });
   }
   await fs.mkdir(framesDir, { recursive: true });
   await writeJsonAtomic(progressFile, {
@@ -354,12 +359,24 @@ export async function runRenderStage(opts: {
       throw new DOMException('已取消', 'AbortError');
     }
 
-    const server = await adapter.prepare({ dir: resolvedTemplate.dir, runDir });
     const exePath = await resolveChromiumExecutablePath();
+    const server = await adapter.prepare({ dir: resolvedTemplate.dir, runDir });
     let browser: Awaited<ReturnType<typeof chromium.launch>> | null = null;
+    const onAbort = () => {
+      void browser?.close().catch(() => undefined);
+      void server.close().catch(() => undefined);
+    };
+    signal?.addEventListener('abort', onAbort, { once: true });
+
     try {
+      if (signal?.aborted) {
+        throw new DOMException('已取消', 'AbortError');
+      }
       browser = await chromium.launch({
         headless: true,
+        handleSIGINT: false,
+        handleSIGTERM: false,
+        handleSIGHUP: false,
         ...(exePath ? { executablePath: exePath } : {}),
       });
       const browserCtx = await browser.newContext({
@@ -376,9 +393,12 @@ export async function runRenderStage(opts: {
         timeout: 30_000,
       });
       await adapter.capture(page, templateData, pendingPlan, framesDir);
+      if (signal?.aborted) {
+        throw new DOMException('已取消', 'AbortError');
+      }
     } catch (err) {
-      if (err instanceof Error && err.name === 'AbortError') {
-        throw err;
+      if (signal?.aborted || (err instanceof Error && err.name === 'AbortError')) {
+        throw new DOMException('已取消', 'AbortError');
       }
       throw new PipelineError(
         'render_failed',
@@ -386,8 +406,17 @@ export async function runRenderStage(opts: {
         { cause: err },
       );
     } finally {
-      await browser?.close().catch(() => undefined);
-      await server.close().catch(() => undefined);
+      signal?.removeEventListener('abort', onAbort);
+      try {
+        if (browser) {
+          await Promise.race([
+            browser.close().catch(() => undefined),
+            new Promise<void>((r) => setTimeout(r, 5000)),
+          ]);
+        }
+      } finally {
+        await server.close().catch(() => undefined);
+      }
     }
   }
 

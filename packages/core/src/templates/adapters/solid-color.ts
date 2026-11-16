@@ -1,3 +1,4 @@
+import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import type {
@@ -240,18 +241,36 @@ export function createSolidColorAdapter(): TemplateAdapter {
 
       const capturedFiles: string[] = [];
       for (const item of plan) {
-        await page.evaluate(async (pageIdx) => {
+        const landed = await page.evaluate(async (pageIdx) => {
           const win = window as unknown as {
             __SOLID_DECK__?: { goToPage: (idx: number) => number };
           };
-          win.__SOLID_DECK__?.goToPage(pageIdx);
+          if (!win.__SOLID_DECK__) {
+            throw new Error('纯色模板翻页时控制接口丢失');
+          }
+          const idx = win.__SOLID_DECK__.goToPage(pageIdx);
           await new Promise<void>((resolve) => {
             requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
           });
+          return idx;
         }, item.index);
 
+        if (landed !== item.index) {
+          throw new Error(`纯色模板翻页偏移：期望页 ${item.index}，实际停留 ${landed}`);
+        }
+
         const outFile = path.join(outDir, `page-${String(item.index).padStart(2, '0')}.png`);
-        await page.screenshot({ path: outFile, type: 'png', fullPage: false });
+        const tmpFile = path.join(
+          outDir,
+          `.page-${String(item.index).padStart(2, '0')}.${process.pid}.${crypto.randomBytes(4).toString('hex')}.tmp.png`,
+        );
+        try {
+          await page.screenshot({ path: tmpFile, type: 'png', fullPage: false });
+          await fs.rename(tmpFile, outFile);
+        } catch (err) {
+          await fs.rm(tmpFile, { force: true }).catch(() => undefined);
+          throw err;
+        }
         capturedFiles.push(outFile);
       }
       return capturedFiles;

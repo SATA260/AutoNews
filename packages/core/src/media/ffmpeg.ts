@@ -83,21 +83,53 @@ interface LoudnormStats {
 
 /** 从 ffmpeg 双遍响度测量日志中提取标准 JSON 测量数据 */
 function parseLoudnormStats(stderr: string): LoudnormStats | null {
-  const start = stderr.lastIndexOf('{');
-  const end = stderr.lastIndexOf('}');
-  if (start === -1 || end === -1 || end <= start) {
-    return null;
-  }
-  try {
-    const parsed = JSON.parse(stderr.slice(start, end + 1)) as LoudnormStats;
-    const vals = [parsed.input_i, parsed.input_tp, parsed.input_lra, parsed.input_thresh];
-    if (vals.some((v) => !v || v === '-inf' || !Number.isFinite(Number(v)))) {
-      return null;
+  let end = stderr.lastIndexOf('}');
+  while (end !== -1) {
+    let start = stderr.lastIndexOf('{', end);
+    while (start !== -1) {
+      const candidate = stderr.slice(start, end + 1);
+      if (candidate.includes('"input_i"')) {
+        try {
+          const parsed = JSON.parse(candidate) as LoudnormStats;
+          const vals = [
+            parsed.input_i,
+            parsed.input_tp,
+            parsed.input_lra,
+            parsed.input_thresh,
+            parsed.target_offset ?? '0',
+          ];
+          if (vals.every((v) => v && v !== '-inf' && Number.isFinite(Number(v)))) {
+            return parsed;
+          }
+        } catch {
+          // 继续向上寻找合法 JSON 片段
+        }
+      }
+      start = stderr.lastIndexOf('{', start - 1);
     }
-    return parsed;
-  } catch {
-    return null;
+    end = stderr.lastIndexOf('}', end - 1);
   }
+  return null;
+}
+
+/** 将路径安全限定在允许的基准目录之内，防止读取目录外的文件 */
+async function assertConfinedMediaPath(
+  baseDir: string,
+  relOrAbs: string,
+  label: string,
+): Promise<string> {
+  const resolvedBase = path.resolve(baseDir);
+  const candidate = path.resolve(resolvedBase, relOrAbs);
+  if (candidate !== resolvedBase && !candidate.startsWith(`${resolvedBase}${path.sep}`)) {
+    throw new Error(`${label}超出允许目录范围: ${relOrAbs}`);
+  }
+  await fs.access(candidate);
+  const realBase = await fs.realpath(resolvedBase).catch(() => resolvedBase);
+  const realTarget = await fs.realpath(candidate);
+  if (!realTarget.startsWith(`${realBase}${path.sep}`)) {
+    throw new Error(`${label}指向目录外软链接: ${relOrAbs}`);
+  }
+  return realTarget;
 }
 
 /** 合成与视频页时间轴精确对齐的全片主音轨（含响度平衡和可选背景音乐闪避混音） */
@@ -132,8 +164,11 @@ export async function buildMasterAudioWav(opts: {
       if (!sec) {
         continue;
       }
-      const absAudio = path.resolve(opts.runDir, sec.audioFile);
-      await fs.access(absAudio);
+      const absAudio = await assertConfinedMediaPath(
+        opts.runDir,
+        sec.audioFile,
+        `口播音频文件 ${sec.key}`,
+      );
       inputArgs.push('-i', absAudio);
 
       const delayMs = Math.max(0, Math.round(sec.startMs));
@@ -225,9 +260,29 @@ export async function buildMasterAudioWav(opts: {
     // 3. 若配置了背景音乐，循环铺满全片并挂载人声侧链压低混音
     const bgmRel = opts.bgm.file.trim();
     if (bgmRel) {
+      if (!Number.isFinite(opts.bgm.volumeDb) || !Number.isFinite(opts.bgm.duckDb)) {
+        throw new Error('背景音乐音量与避让增益配置必须为合法有限数字');
+      }
       const bgmPath = path.isAbsolute(bgmRel) ? bgmRel : path.resolve(opts.rootDir, bgmRel);
       await fs.access(bgmPath);
-      const duckRatio = Math.max(2, Math.min(20, Math.round(Math.abs(opts.bgm.duckDb) / 2) || 5));
+
+      const duckMagnitude = Math.abs(opts.bgm.duckDb);
+      const bgmFilter =
+        `[0:a]aresample=${opts.sampleRate},aformat=sample_fmts=s16:channel_layouts=stereo,` +
+        `atrim=0:${totalSec},asetpts=PTS-STARTPTS,volume=${opts.bgm.volumeDb}dB[bgm_lvl];`;
+
+      const filterComplex =
+        duckMagnitude === 0
+          ? `${bgmFilter}[1:a][bgm_lvl]amix=inputs=2:duration=first:normalize=0,atrim=0:${totalSec},alimiter=limit=0.95[out]`
+          : (() => {
+              const duckRatio = Math.max(2, Math.min(20, Math.round(duckMagnitude / 2) || 2));
+              return (
+                `[1:a]asplit=2[voice_main][voice_sc];` +
+                bgmFilter +
+                `[bgm_lvl][voice_sc]sidechaincompress=threshold=0.02:ratio=${duckRatio}:attack=40:release=350[bgm_ducked];` +
+                `[voice_main][bgm_ducked]amix=inputs=2:duration=first:normalize=0,atrim=0:${totalSec},alimiter=limit=0.95[out]`
+              );
+            })();
 
       await withAtomicMediaWrite(opts.outWav, '.wav', async (tmpOut) => {
         await runMediaCommand(
@@ -241,10 +296,7 @@ export async function buildMasterAudioWav(opts: {
             '-i',
             voiceWav,
             '-filter_complex',
-            `[1:a]asplit=2[voice_main][voice_sc];` +
-              `[0:a]aresample=${opts.sampleRate},aformat=sample_fmts=s16:channel_layouts=stereo,atrim=0:${totalSec},volume=${opts.bgm.volumeDb}dB[bgm_lvl];` +
-              `[bgm_lvl][voice_sc]sidechaincompress=threshold=0.02:ratio=${duckRatio}:attack=40:release=350[bgm_ducked];` +
-              `[voice_main][bgm_ducked]amix=inputs=2:duration=first:normalize=0,atrim=0:${totalSec}[out]`,
+            filterComplex,
             '-map',
             '[out]',
             '-ar',
@@ -269,9 +321,9 @@ export async function buildMasterAudioWav(opts: {
   }
 }
 
-/** 转义 ffmpeg concat 列表文件里的路径单引号 */
+/** 转义 ffmpeg concat 列表文件里的反斜杠与单引号 */
 function escapeConcatPath(filePath: string): string {
-  return filePath.replaceAll("'", "'\\''");
+  return filePath.replaceAll('\\', '\\\\').replaceAll("'", "'\\''");
 }
 
 /**
@@ -313,10 +365,10 @@ export async function composeSlidesVideoMp4(opts: {
     const lines = ['ffconcat version 1.0'];
     for (let i = 0; i < opts.frameFiles.length; i++) {
       const frame = opts.frameFiles[i];
-      const durMs = opts.pageDurationsMs[i] ?? 1000;
       if (!frame) {
-        continue;
+        throw new Error(`第 ${i} 页渲染截图路径为空，无法合成视频`);
       }
+      const durMs = opts.pageDurationsMs[i] ?? 1000;
       lines.push(`file '${escapeConcatPath(path.resolve(frame))}'`);
       lines.push(`duration ${(durMs / 1000).toFixed(3)}`);
     }
@@ -335,6 +387,8 @@ export async function composeSlidesVideoMp4(opts: {
         ffmpegBin,
         [
           '-y',
+          '-fflags',
+          '+genpts',
           '-f',
           'concat',
           '-safe',

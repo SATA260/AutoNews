@@ -1,3 +1,4 @@
+import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import type {
@@ -220,7 +221,7 @@ export function createDailyDeckAdapter(): TemplateAdapter {
         }
         const res = win.__NEWS_DECK__.setNewsData(payload);
         if (document.fonts?.ready) {
-          await document.fonts.ready;
+          await Promise.race([document.fonts.ready, new Promise((r) => setTimeout(r, 3000))]);
         }
         return res;
       }, data);
@@ -242,7 +243,7 @@ export function createDailyDeckAdapter(): TemplateAdapter {
           }
           await win.__NEWS_DECK__.goToPage(pageIdx);
           if (document.fonts?.ready) {
-            await document.fonts.ready;
+            await Promise.race([document.fonts.ready, new Promise((r) => setTimeout(r, 3000))]);
           }
         }, item.index);
 
@@ -264,7 +265,17 @@ export function createDailyDeckAdapter(): TemplateAdapter {
         }
 
         const outFile = path.join(outDir, `page-${String(item.index).padStart(2, '0')}.png`);
-        await page.screenshot({ path: outFile, type: 'png', fullPage: false });
+        const tmpFile = path.join(
+          outDir,
+          `.page-${String(item.index).padStart(2, '0')}.${process.pid}.${crypto.randomBytes(4).toString('hex')}.tmp.png`,
+        );
+        try {
+          await page.screenshot({ path: tmpFile, type: 'png', fullPage: false });
+          await fs.rename(tmpFile, outFile);
+        } catch (err) {
+          await fs.rm(tmpFile, { force: true }).catch(() => undefined);
+          throw err;
+        }
         capturedFiles.push(outFile);
       }
 
