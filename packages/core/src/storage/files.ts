@@ -2,17 +2,17 @@ import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 
+/** 确保目录存在，不存在时递归创建 */
 export async function ensureDir(dirPath: string): Promise<void> {
   await fs.mkdir(dirPath, { recursive: true });
 }
 
+/** 创建仅当前用户可读写访问的私密目录（用于存放平台 Cookie 等凭证） */
 export async function ensurePrivateDir(dirPath: string): Promise<void> {
   await fs.mkdir(dirPath, { recursive: true, mode: 0o700 });
 }
 
-/**
- * Write a file atomically using a temporary file in the same directory followed by rename.
- */
+/** 通过“写同目录临时文件 + 原子重命名”的方式安全写文件，防止程序崩溃留下残缺文件 */
 export async function writeFileAtomic(
   filePath: string,
   content: string | Uint8Array,
@@ -30,10 +30,12 @@ export async function writeFileAtomic(
   }
 }
 
+/** 将对象格式化为 JSON 并原子写入磁盘文件 */
 export async function writeJsonAtomic(filePath: string, data: unknown): Promise<void> {
   await writeFileAtomic(filePath, `${JSON.stringify(data, null, 2)}\n`);
 }
 
+/** 读取并解析 JSON 文件，若文件不存在则返回 null */
 export async function readJsonOrNull<T>(filePath: string): Promise<T | null> {
   try {
     const raw = await fs.readFile(filePath, 'utf8');
@@ -46,9 +48,7 @@ export async function readJsonOrNull<T>(filePath: string): Promise<T | null> {
   }
 }
 
-/**
- * Move existing invalidated artifacts into `runs/<id>/archive/<archiveName>/` instead of deleting them.
- */
+/** 将重跑后作废的旧阶段产物移动归档到 `archive/` 子目录，保留历史现场不直接删除 */
 export async function archiveRunArtifacts(
   runDir: string,
   archiveName: string,

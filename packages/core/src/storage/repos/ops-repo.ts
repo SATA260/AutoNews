@@ -1,6 +1,7 @@
 import type { PublishRecord, PublishStatus, ScheduleJob } from '@aidaily/contracts';
 import type { DatabaseSync } from '../db.js';
 
+/** 数据库 `schedules` 表行结构 */
 interface ScheduleRow {
   id: string;
   name: string;
@@ -13,6 +14,7 @@ interface ScheduleRow {
   updated_at: string;
 }
 
+/** 数据库 `publish_records` 表行结构 */
 interface PublishRow {
   run_id: string;
   platform: 'bilibili';
@@ -26,6 +28,7 @@ interface PublishRow {
   updated_at: string;
 }
 
+/** 将定时任务数据库行映射为基础定时任务对象 */
 function mapSchedule(row: ScheduleRow): Omit<ScheduleJob, 'installed' | 'nextRunAt'> {
   return {
     id: row.id,
@@ -40,6 +43,7 @@ function mapSchedule(row: ScheduleRow): Omit<ScheduleJob, 'installed' | 'nextRun
   };
 }
 
+/** 将发布记录数据库行映射为业务对象 */
 function mapPublishRecord(row: PublishRow): PublishRecord {
   return {
     runId: row.run_id,
@@ -55,8 +59,10 @@ function mapPublishRecord(row: PublishRow): PublishRecord {
   };
 }
 
+/** 创建定时任务数据库操作对象，负责定时配置的增删改查 */
 export function createSchedulesRepo(db: DatabaseSync) {
   return {
+    /** 列出所有手动创建的定时任务，按每日执行时间升序排列 */
     list(): Array<Omit<ScheduleJob, 'installed' | 'nextRunAt'>> {
       const rows = db
         .prepare('SELECT * FROM schedules ORDER BY time_expr ASC, created_at ASC')
@@ -64,6 +70,7 @@ export function createSchedulesRepo(db: DatabaseSync) {
       return rows.map(mapSchedule);
     },
 
+    /** 按定时任务 ID 查询单条记录 */
     getById(id: string): Omit<ScheduleJob, 'installed' | 'nextRunAt'> | null {
       const row = db.prepare('SELECT * FROM schedules WHERE id = ?').get(id) as
         | ScheduleRow
@@ -71,6 +78,7 @@ export function createSchedulesRepo(db: DatabaseSync) {
       return row ? mapSchedule(row) : null;
     },
 
+    /** 新增一条定时任务（必须显式传入执行时间与每期条数） */
     create(input: {
       id: string;
       name: string;
@@ -98,6 +106,7 @@ export function createSchedulesRepo(db: DatabaseSync) {
       return created;
     },
 
+    /** 更新指定定时任务的名称、执行时间、条数、启停状态或最近运行记录 */
     update(
       id: string,
       patch: {
@@ -146,6 +155,7 @@ export function createSchedulesRepo(db: DatabaseSync) {
       return this.getById(id);
     },
 
+    /** 按 ID 删除指定定时任务 */
     remove(id: string): boolean {
       const res = db.prepare('DELETE FROM schedules WHERE id = ?').run(id);
       return Number(res.changes) > 0;
@@ -153,8 +163,10 @@ export function createSchedulesRepo(db: DatabaseSync) {
   };
 }
 
+/** 创建 B 站投稿发布记录操作对象，管理草稿保存与发布结果追踪 */
 export function createPublishRepo(db: DatabaseSync) {
   return {
+    /** 写入或重置一期任务的视频投稿草稿（标题、简介、标签） */
     upsertDraft(input: {
       runId: string;
       title: string;
@@ -186,6 +198,7 @@ export function createPublishRepo(db: DatabaseSync) {
       return record;
     },
 
+    /** 查询指定任务对应的投稿记录 */
     getByRun(runId: string): PublishRecord | null {
       const row = db.prepare('SELECT * FROM publish_records WHERE run_id = ?').get(runId) as
         | PublishRow
@@ -193,6 +206,7 @@ export function createPublishRepo(db: DatabaseSync) {
       return row ? mapPublishRecord(row) : null;
     },
 
+    /** 局部更新人工修改后的投稿标题、简介或标签列表 */
     updateDraftFields(
       runId: string,
       patch: { title?: string; description?: string; tags?: string[]; updatedAt: string },
@@ -218,6 +232,7 @@ export function createPublishRepo(db: DatabaseSync) {
       return this.getByRun(runId);
     },
 
+    /** 更新投稿状态、记录上传尝试次数或写入成功后的 B 站 BV 号 */
     updateStatus(
       runId: string,
       status: PublishStatus,

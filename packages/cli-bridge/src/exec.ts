@@ -4,6 +4,7 @@ import type { ExecOptions, ExecResult } from './types.js';
 
 const MAX_BUFFER_BYTES = 16 * 1024 * 1024;
 
+/** 启动并管理子进程，统一处理超时强杀、取消中断以及找不到命令的错误转换 */
 export async function runSubprocess(
   bin: string,
   args: string[],

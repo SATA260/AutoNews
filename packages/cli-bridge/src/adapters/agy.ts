@@ -19,6 +19,7 @@ const AUTH_ERROR_PATTERNS = [
   /认证失败/,
 ];
 
+/** Antigravity CLI 返回的标准 JSON 包装结构 */
 interface AgyEnvelope {
   conversation_id?: string;
   status?: string;
@@ -31,18 +32,25 @@ interface AgyEnvelope {
   };
 }
 
+/** 检查错误输出或返回文本中是否包含未登录、Token 过期等鉴权提示 */
 function hasAuthFailure(text: string): boolean {
   return AUTH_ERROR_PATTERNS.some((pattern) => pattern.test(text));
 }
 
+/** 去除命令行加载动画里的终端颜色码与回车控制字符 */
 function stripAnsiAndSpinner(raw: string): string {
   // biome-ignore lint/suspicious/noControlCharactersInRegex: strip ANSI escape codes from CLI TTY output
   return raw.replace(/\x1b\[[0-9;?]*[ -/]*[@-~]/g, '').replace(/\r/g, '\n');
 }
 
+/**
+ * Antigravity 命令行工具（`agy`）适配器：将提示词通过 `-p` 参数传入，
+ * 并要求输出结构化 JSON，从中抽取结果主体与 Token 用量。
+ */
 export const agyAdapter: CliAdapter = {
   id: 'agy',
 
+  /** 构造调用 `agy` 所需的参数列表，并校验提示词长度不超过命令行安全上限 */
   buildCommand(req: InvokeRequest<unknown>, cfg: CliConfig): AdapterCommand {
     const promptBytes = Buffer.byteLength(req.prompt, 'utf8');
     if (promptBytes > MAX_PROMPT_BYTES) {
@@ -76,6 +84,7 @@ export const agyAdapter: CliAdapter = {
     };
   },
 
+  /** 解析 `agy` 返回的 JSON 响应信封，提取结构化输出并识别认证异常或执行错误 */
   parse(
     stdout: string,
     stderr: string,
@@ -145,6 +154,7 @@ export const agyAdapter: CliAdapter = {
     };
   },
 
+  /** 运行 `--help` 检查本机 `agy` 可执行文件是否正常响应 */
   async healthcheck(cfg: CliConfig): Promise<{ ok: boolean; detail: string }> {
     try {
       const res = await runSubprocess(cfg.bin, ['--help'], { timeoutMs: 10_000 });
@@ -163,6 +173,7 @@ export const agyAdapter: CliAdapter = {
     }
   },
 
+  /** 运行 `agy models` 并过滤终端加载字符，提取当前可用模型名称列表 */
   async listModels(cfg: CliConfig): Promise<string[]> {
     const res = await runSubprocess(cfg.bin, ['models'], { timeoutMs: 30_000 });
     if (res.exitCode !== 0) {

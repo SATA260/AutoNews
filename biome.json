@@ -10,6 +10,7 @@
       "**",
       "!templates",
       "!storage",
+      "!tmp",
       "!docs",
       "!config",
       "!AGENTS.md",
@@ -51,9 +52,9 @@
               "level": "error",
               "options": {
                 "paths": {
-                  "@aidaily/cli-bridge": "apps/* 必须保持薄壳，禁止直接导入 @aidaily/cli-bridge，请通过 @aidaily/core 调用",
-                  "@aidaily/tts": "apps/* 必须保持薄壳，禁止直接导入 @aidaily/tts，请通过 @aidaily/core 调用",
-                  "@aidaily/core/src": "禁止跨层导入 @aidaily/core 内部源码，请从 @aidaily/core 公开入口导入"
+                  "@aidaily/cli-bridge": "apps/* 只负责界面与命令行交互，禁止直接导入外部命令行桥接包，请通过 @aidaily/core 调用",
+                  "@aidaily/tts": "apps/* 只负责界面与命令行交互，禁止直接导入语音合成包，请通过 @aidaily/core 调用",
+                  "@aidaily/core/src": "禁止直接导入 @aidaily/core 内部源码，请从 @aidaily/core 公开入口导入"
                 },
                 "patterns": [
                   {

@@ -14,14 +14,15 @@ export * from './storage/files.js';
 export * from './storage/migrate.js';
 export * from './storage/repos/index.js';
 
+/** 对命令行和网页后台暴露的核心业务引擎实例 */
 export interface Core {
   context: CoreContext;
+  /** 关闭数据库连接并释放底层资源 */
   close(): Promise<void>;
 }
 
 /**
- * Initialize the core engine runtime (config, WAL SQLite DB, migrations, repositories).
- * Service layers (tasks, publish, config, scheduler, sources, system) attach in M8.
+ * 创建并初始化核心业务引擎（供命令行工具和网页后台共用）。
  */
 export async function createCore(opts?: {
   rootDir?: string;
@@ -31,6 +32,7 @@ export async function createCore(opts?: {
   const context = await createCoreContext(opts);
   return {
     context,
+    /** 安全关闭核心引擎持有的 SQLite 数据库连接 */
     async close() {
       context.db.close();
     },

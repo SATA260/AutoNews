@@ -1,3 +1,6 @@
+/**
+ * CLI 桥接层统一异常基类，通过 `retryable` 标记调用方是否允许自动重试。
+ */
 export class CliBridgeError extends Error {
   readonly retryable: boolean;
 
@@ -8,6 +11,7 @@ export class CliBridgeError extends Error {
   }
 }
 
+/** 指定的命令行可执行文件不存在或未安装（不可重试） */
 export class CliNotFoundError extends CliBridgeError {
   readonly bin: string;
 
@@ -17,12 +21,14 @@ export class CliNotFoundError extends CliBridgeError {
   }
 }
 
+/** 命令行工具未登录或鉴权凭证失效（不可重试，需人工重新登录） */
 export class CliAuthError extends CliBridgeError {
   constructor(message: string, cause?: unknown) {
     super(message, false, { cause });
   }
 }
 
+/** 单次输入 Prompt 超出命令行或适配器字节上限（不可重试） */
 export class PromptTooLargeError extends CliBridgeError {
   readonly bytes: number;
   readonly limitBytes: number;
@@ -34,6 +40,7 @@ export class PromptTooLargeError extends CliBridgeError {
   }
 }
 
+/** 子进程执行超出设定时长已被强杀（可重试） */
 export class CliTimeoutError extends CliBridgeError {
   readonly timeoutMs: number;
 
@@ -43,6 +50,7 @@ export class CliTimeoutError extends CliBridgeError {
   }
 }
 
+/** 子进程退出码非零或返回非 SUCCESS 状态（可重试） */
 export class CliExitError extends CliBridgeError {
   readonly exitCode: number | undefined;
   readonly stderr: string;
@@ -54,6 +62,7 @@ export class CliExitError extends CliBridgeError {
   }
 }
 
+/** 模型输出非合法 JSON 或未通过 Zod Schema 校验（可携带错误提示重试） */
 export class CliOutputError extends CliBridgeError {
   readonly issuesSummary: string;
   readonly rawOutput: string;

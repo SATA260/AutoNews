@@ -7,6 +7,7 @@ import type {
 } from '@aidaily/contracts';
 import type { DatabaseSync } from '../db.js';
 
+/** 数据库 `source_state` 表行结构 */
 interface SourceStateRow {
   source_id: string;
   last_fetched_at: string | null;
@@ -17,6 +18,7 @@ interface SourceStateRow {
   last_error: string | null;
 }
 
+/** 数据库 `articles` 表行结构 */
 interface ArticleRow {
   id: string;
   source_id: string;
@@ -35,6 +37,7 @@ interface ArticleRow {
   reserved_by_run: string | null;
 }
 
+/** 曾经制作并播报过的历史事件记录，用于跨天避免重复播报 */
 export interface PublishedHistoryRecord {
   eventId: string;
   runId: string;
@@ -45,6 +48,7 @@ export interface PublishedHistoryRecord {
   publishedAt: string;
 }
 
+/** 将数据库行转换为信源状态业务对象 */
 function mapSourceState(row: SourceStateRow): SourceState {
   return {
     sourceId: row.source_id,
@@ -57,6 +61,7 @@ function mapSourceState(row: SourceStateRow): SourceState {
   };
 }
 
+/** 将数据库行转换为文章业务对象 */
 function mapArticle(row: ArticleRow): Article {
   return {
     id: row.id,
@@ -77,8 +82,10 @@ function mapArticle(row: ArticleRow): Article {
   };
 }
 
+/** 创建信源抓取进度读写对象，管理各信源游标、缓存标识与失败次数 */
 export function createSourceStateRepo(db: DatabaseSync) {
   return {
+    /** 查询单个信源的抓取状态 */
     get(sourceId: string): SourceState | null {
       const row = db.prepare('SELECT * FROM source_state WHERE source_id = ?').get(sourceId) as
         | SourceStateRow
@@ -86,11 +93,13 @@ export function createSourceStateRepo(db: DatabaseSync) {
       return row ? mapSourceState(row) : null;
     },
 
+    /** 查询全部信源的抓取状态 */
     listAll(): SourceState[] {
       const rows = db.prepare('SELECT * FROM source_state').all() as unknown as SourceStateRow[];
       return rows.map(mapSourceState);
     },
 
+    /** 信源抓取成功后更新其最新抓取时间、最新文章发布时间并清零连续失败计数 */
     upsertSuccess(input: {
       sourceId: string;
       lastFetchedAt: string;
@@ -124,6 +133,7 @@ export function createSourceStateRepo(db: DatabaseSync) {
       );
     },
 
+    /** 记录一次信源抓取失败并返回累加后的连续失败次数 */
     recordFailure(sourceId: string, errorMsg: string): number {
       db.prepare(`
         INSERT INTO source_state (source_id, consecutive_failures, last_error)
@@ -140,8 +150,10 @@ export function createSourceStateRepo(db: DatabaseSync) {
   };
 }
 
+/** 创建文章数据库操作对象，负责去重入库、候选检索与占用消费状态流转 */
 export function createArticlesRepo(db: DatabaseSync) {
   return {
+    /** 若标准化链接尚未入库则插入新文章，已存在时静默跳过并返回 false */
     insertIfAbsent(article: Omit<Article, 'status' | 'reservedByRun'>): boolean {
       const res = db
         .prepare(`
@@ -168,6 +180,7 @@ export function createArticlesRepo(db: DatabaseSync) {
       return Number(res.changes) > 0;
     },
 
+    /** 按文章 ID 查询单篇文章 */
     getById(id: string): Article | null {
       const row = db.prepare('SELECT * FROM articles WHERE id = ?').get(id) as
         | ArticleRow
@@ -175,6 +188,7 @@ export function createArticlesRepo(db: DatabaseSync) {
       return row ? mapArticle(row) : null;
     },
 
+    /** 按文章 ID 列表批量查询文章 */
     getByIds(ids: string[]): Article[] {
       if (ids.length === 0) {
         return [];
@@ -186,6 +200,7 @@ export function createArticlesRepo(db: DatabaseSync) {
       return rows.map(mapArticle);
     },
 
+    /** 按发布时间窗口筛选可供选题使用的候选文章列表 */
     listCandidates(sinceIso: string, includeExpired = false): Article[] {
       const allowedStatuses = includeExpired ? "('new', 'expired')" : "('new')";
       const rows = db
@@ -200,6 +215,7 @@ export function createArticlesRepo(db: DatabaseSync) {
       return rows.map(mapArticle);
     },
 
+    /** 将选中的文章标记为被指定期次占用，避免被其他期次重复挑选 */
     markReserved(articleIds: string[], runId: string): void {
       if (articleIds.length === 0) {
         return;
@@ -212,6 +228,7 @@ export function createArticlesRepo(db: DatabaseSync) {
       `).run(runId, ...articleIds);
     },
 
+    /** 释放某期任务占用的全部文章，使其重新回到待选池 */
     releaseByRun(runId: string): number {
       const res = db
         .prepare(`
@@ -223,6 +240,7 @@ export function createArticlesRepo(db: DatabaseSync) {
       return Number(res.changes);
     },
 
+    /** 在确认发布或人工标记已消费后，将对应文章正式标记为已播出 */
     markConsumed(articleIds: string[], runId: string): void {
       if (articleIds.length === 0) {
         return;
@@ -235,6 +253,7 @@ export function createArticlesRepo(db: DatabaseSync) {
       `).run(...articleIds, runId);
     },
 
+    /** 将超出最久回溯时效仍未入选的待选文章标记为已过期 */
     expireOlderThan(cutoffIso: string): number {
       const res = db
         .prepare(`
@@ -248,8 +267,10 @@ export function createArticlesRepo(db: DatabaseSync) {
   };
 }
 
+/** 创建历史已播事件库读写对象，用于防止跨天播报同一条旧闻 */
 export function createHistoryRepo(db: DatabaseSync) {
   return {
+    /** 写入一条已发布或已确认播报的事件记录 */
     insert(record: PublishedHistoryRecord): void {
       db.prepare(`
         INSERT OR REPLACE INTO published_history (
@@ -266,6 +287,7 @@ export function createHistoryRepo(db: DatabaseSync) {
       );
     },
 
+    /** 查询指定时间点之后的近期已播事件记录 */
     listRecent(sinceIso: string, limit = 200): PublishedHistoryRecord[] {
       const rows = db
         .prepare(`

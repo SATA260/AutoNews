@@ -3,6 +3,7 @@ import { MIGRATION_001, type Migration } from './migrations/001_init.js';
 
 const MIGRATIONS: readonly Migration[] = [MIGRATION_001];
 
+/** 按版本号顺序幂等地执行尚未应用的数据库表结构迁移脚本 */
 export function runMigrations(db: DatabaseSync): void {
   db.exec(`
     CREATE TABLE IF NOT EXISTS schema_migrations (

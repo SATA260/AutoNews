@@ -6,6 +6,7 @@ import { runSubprocess } from '../exec.js';
 import { extractJsonFromText } from '../json.js';
 import type { AdapterCommand, AdapterParsedOutput, CliAdapter, InvokeRequest } from '../types.js';
 
+/** 按点分隔字段名从嵌套对象中读取指定路径的值 */
 function getByDotPath(obj: unknown, dotPath: string): unknown {
   let curr: unknown = obj;
   for (const key of dotPath.split('.')) {
@@ -17,9 +18,13 @@ function getByDotPath(obj: unknown, dotPath: string): unknown {
   return curr;
 }
 
+/**
+ * 通用命令行模板适配器：通过配置里的参数模板与输出提取规则兼容其他任意命令行工具。
+ */
 export const genericAdapter: CliAdapter = {
   id: 'generic',
 
+  /** 按参数模板替换 `{prompt}`、`{model}`、`{schemaFile}`、`{out}` 等占位符 */
   async buildCommand(
     req: InvokeRequest<unknown>,
     cfg: CliConfig,
@@ -53,6 +58,7 @@ export const genericAdapter: CliAdapter = {
     };
   },
 
+  /** 按配置的解析模式（纯文本、完整 JSON 或指定 JSON 字段）解析命令行产出 */
   parse(
     stdout: string,
     stderr: string,
@@ -81,6 +87,7 @@ export const genericAdapter: CliAdapter = {
     return { payload: json };
   },
 
+  /** 运行 `--help` 检查自定义命令行工具是否安装可用 */
   async healthcheck(cfg: CliConfig): Promise<{ ok: boolean; detail: string }> {
     try {
       const res = await runSubprocess(cfg.bin, ['--help'], { timeoutMs: 10_000 });
@@ -98,6 +105,7 @@ export const genericAdapter: CliAdapter = {
   },
 };
 
+/** 结合具体工具配置生成绑定了解析规则的通用适配器实例 */
 export function createConfiguredGenericAdapter(cfg: CliConfig): CliAdapter {
   const parseMode = cfg.parse ?? 'json';
   return {

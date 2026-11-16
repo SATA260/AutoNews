@@ -33,6 +33,7 @@ export * from './json.js';
 export * from './semaphore.js';
 export * from './types.js';
 
+/** 命令行调用调度中心（CliBridge）的初始化选项 */
 export interface CliBridgeOptions {
   configs: Record<string, CliConfig>;
   tmpDir: string;
@@ -43,6 +44,7 @@ export interface CliBridgeOptions {
 
 const DEFAULT_RETRY_DELAYS_MS = [2000, 8000, 20000] as const;
 
+/** 支持被外部取消信号提前唤醒并中断的延时等待 */
 async function sleepWithAbort(ms: number, signal?: AbortSignal): Promise<void> {
   if (ms <= 0) {
     return;
@@ -63,6 +65,7 @@ async function sleepWithAbort(ms: number, signal?: AbortSignal): Promise<void> {
   });
 }
 
+/** 将运行过程中抛出的错误对象归类为日志记录使用的标准调用状态码 */
 function classifyErrorStatus(err: unknown): LlmCallStatus {
   if (err instanceof CliTimeoutError) {
     return 'timeout';
@@ -76,6 +79,9 @@ function classifyErrorStatus(err: unknown): LlmCallStatus {
   return 'exit_error';
 }
 
+/**
+ * 通用外部命令行统一调度器：负责适配器分发、并发数限制、临时空目录隔离、失败自动重试与调用日志记录。
+ */
 export class CliBridge {
   private readonly configs: Record<string, CliConfig>;
   private readonly tmpDir: string;
@@ -96,10 +102,12 @@ export class CliBridge {
     this.register(genericAdapter);
   }
 
+  /** 注册或替换命令行适配器 */
   register(adapter: CliAdapter): void {
     this.adapters.set(adapter.id, adapter);
   }
 
+  /** 查找已注册的命令行配置，未找到则抛出 CliNotFoundError */
   private getCliConfig(cliName: string): CliConfig {
     const cfg = this.configs[cliName];
     if (!cfg) {
@@ -108,6 +116,7 @@ export class CliBridge {
     return cfg;
   }
 
+  /** 根据命令行配置选取并组装对应的适配器实例 */
   private resolveAdapter(cfg: CliConfig): CliAdapter {
     if (cfg.adapter === 'generic' && (cfg.argsTemplate || cfg.parse)) {
       return createConfiguredGenericAdapter(cfg);
@@ -119,6 +128,7 @@ export class CliBridge {
     return adapter;
   }
 
+  /** 获取或创建指定命令行工具对应的并发控制信号量 */
   private getSemaphore(cliName: string): Semaphore {
     let sem = this.semaphores.get(cliName);
     if (!sem) {
@@ -128,6 +138,7 @@ export class CliBridge {
     return sem;
   }
 
+  /** 发起一次大模型命令行调用，自动执行临时目录隔离、输出格式校验与失败重试 */
   async invoke<T>(req: InvokeRequest<T>): Promise<InvokeResult<T>> {
     const cfg = this.getCliConfig(req.cli);
     const adapter = this.resolveAdapter(cfg);
@@ -266,11 +277,13 @@ export class CliBridge {
     throw new Error('invoke 循环意外结束');
   }
 
+  /** 直接执行通用非大模型外部命令（例如 B 站投稿工具、系统定时任务管理命令等） */
   async exec(cli: string, args: string[], opts: ExecOptions = {}): Promise<ExecResult> {
     const cfg = this.getCliConfig(cli);
     return runSubprocess(cfg.bin, [...cfg.extraArgs, ...args], opts);
   }
 
+  /** 检查指定命令行工具的健康可用状态 */
   async health(cli: string): Promise<{ ok: boolean; detail: string }> {
     const cfg = this.configs[cli];
     if (!cfg) {
@@ -280,6 +293,7 @@ export class CliBridge {
     return adapter.healthcheck(cfg);
   }
 
+  /** 获取指定命令行工具支持的模型名称列表 */
   async listModels(cli: string): Promise<string[]> {
     const cfg = this.getCliConfig(cli);
     const adapter = this.resolveAdapter(cfg);

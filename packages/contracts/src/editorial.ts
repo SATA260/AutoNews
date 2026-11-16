@@ -1,12 +1,15 @@
 import { z } from 'zod';
 
+/** 原文依据条目：把总结中的某句事实陈述对应到原始文章和原文逐字摘录 */
 export const EvidenceSchema = z.object({
   claim: z.string().min(1),
   articleId: z.string().min(1),
   quote: z.string().min(1),
 });
+/** 原文依据条目类型 */
 export type Evidence = z.infer<typeof EvidenceSchema>;
 
+/** 将多篇报道同一事件的文章合并后得到的新闻候选事件 */
 export const SelectedEventCandidateSchema = z.object({
   title: z.string().min(1),
   articleIds: z.array(z.string().min(1)).min(1),
@@ -17,13 +20,17 @@ export const SelectedEventCandidateSchema = z.object({
   reason: z.string().min(1),
   duplicateOfHistory: z.boolean(),
 });
+/** 新闻候选事件类型 */
 export type SelectedEventCandidate = z.infer<typeof SelectedEventCandidateSchema>;
 
+/** 新闻选题与合并阶段的完整输出结构 */
 export const SelectionResultSchema = z.object({
   events: z.array(SelectedEventCandidateSchema),
 });
+/** 新闻选题输出结果类型 */
 export type SelectionResult = z.infer<typeof SelectionResultSchema>;
 
+/** 产品或技术的可用范围标记，用于区分现在能否直接用、还是仅有预览或预告 */
 export const AvailabilitySchema = z.enum([
   'available_now',
   'paid_only',
@@ -33,8 +40,10 @@ export const AvailabilitySchema = z.enum([
   'research',
   'unknown',
 ]);
+/** 可用范围标记类型 */
 export type Availability = z.infer<typeof AvailabilitySchema>;
 
+/** 对同一新闻事件提炼出的客观事实摘要草稿 */
 export const SummaryDraftSchema = z.object({
   facts: z.array(z.string().min(1)).min(1).max(6),
   relevance: z.string().min(1),
@@ -42,14 +51,18 @@ export const SummaryDraftSchema = z.object({
   availabilityNote: z.string().min(1),
   evidence: z.array(EvidenceSchema).min(1),
 });
+/** 事实摘要草稿类型 */
 export type SummaryDraft = z.infer<typeof SummaryDraftSchema>;
 
+/** 画面展示用的关键数据指标键值对 */
 export const MetricPairSchema = z.object({
   label: z.string().min(1),
   value: z.string().min(1),
 });
+/** 关键数据指标类型 */
 export type MetricPair = z.infer<typeof MetricPairSchema>;
 
+/** 经过中文口播润色后的单条新闻定稿（包含屏幕展示文案和语音播报分句） */
 export const PolishedItemSchema = z.object({
   title: z.string().min(1),
   shortTitle: z.string().min(1),
@@ -64,8 +77,10 @@ export const PolishedItemSchema = z.object({
   officialQuote: z.string().optional(),
   metrics: z.array(MetricPairSchema).max(4).optional(),
 });
+/** 中文润色定稿类型 */
 export type PolishedItem = z.infer<typeof PolishedItemSchema>;
 
+/** 事实审核员对单句陈述给出的核验状态（有依据、无依据、曲解、夸大或过时） */
 export const ClaimStatusSchema = z.enum([
   'supported',
   'unsupported',
@@ -73,23 +88,29 @@ export const ClaimStatusSchema = z.enum([
   'exaggerated',
   'outdated',
 ]);
+/** 事实核验状态类型 */
 export type ClaimStatus = z.infer<typeof ClaimStatusSchema>;
 
+/** 事实审核中对单条陈述的具体检查结果与说明 */
 export const FactCheckClaimSchema = z.object({
   text: z.string().min(1),
   status: ClaimStatusSchema,
   note: z.string(),
 });
+/** 单条事实检查结果类型 */
 export type FactCheckClaim = z.infer<typeof FactCheckClaimSchema>;
 
+/** 独立事实审核员返回的最终处理意见（通过、打回修改措辞或剔除） */
 export const FactCheckResultSchema = z.object({
   verdict: z.enum(['pass', 'revise', 'drop']),
   claims: z.array(FactCheckClaimSchema),
   revisionNotes: z.array(z.string()),
   dropReason: z.string().optional(),
 });
+/** 事实审核结果类型 */
 export type FactCheckResult = z.infer<typeof FactCheckResultSchema>;
 
+/** 整期节目编排产出：包括新闻顺序、开场白、动态片尾及投稿标题简介 */
 export const IssuePackageSchema = z.object({
   order: z.array(z.string().min(1)).min(1),
   headlineItemId: z.string().min(1),
@@ -110,11 +131,15 @@ export const IssuePackageSchema = z.object({
     tags: z.array(z.string().min(1)),
   }),
 });
+/** 整期节目编排结果类型 */
 export type IssuePackage = z.infer<typeof IssuePackageSchema>;
 
+/** 候选新闻事件在队列中的分工：主选（优先制作）或替补（主选被剔除时顶上） */
 export const EventRoleSchema = z.enum(['primary', 'reserve']);
+/** 候选事件分工类型 */
 export type EventRole = z.infer<typeof EventRoleSchema>;
 
+/** 存入数据库的新闻事件聚类记录 */
 export const EventRecordSchema = z.object({
   id: z.string().min(1),
   runId: z.string().min(1),
@@ -129,8 +154,10 @@ export const EventRecordSchema = z.object({
   reason: z.string().nullable(),
   refillRound: z.number().int().nonnegative(),
 });
+/** 数据库事件聚类记录类型 */
 export type EventRecord = z.infer<typeof EventRecordSchema>;
 
+/** 单条新闻在写稿与审核过程中的当前状态 */
 export const RunItemStatusSchema = z.enum([
   'queued',
   'summarizing',
@@ -141,8 +168,10 @@ export const RunItemStatusSchema = z.enum([
   'passed',
   'dropped',
 ]);
+/** 单条新闻处理状态类型 */
 export type RunItemStatus = z.infer<typeof RunItemStatusSchema>;
 
+/** 某期任务中单条新闻的完整处理记录 */
 export const RunItemRecordSchema = z.object({
   id: z.string().min(1),
   runId: z.string().min(1),
@@ -154,8 +183,10 @@ export const RunItemRecordSchema = z.object({
   finalJson: PolishedItemSchema.nullable(),
   updatedAt: z.string(),
 });
+/** 单条新闻处理记录类型 */
 export type RunItemRecord = z.infer<typeof RunItemRecordSchema>;
 
+/** 单条新闻历史上保存过的稿件与核查记录种类 */
 export const ItemVersionKindSchema = z.enum([
   'summary',
   'polish',
@@ -163,8 +194,10 @@ export const ItemVersionKindSchema = z.enum([
   'precheck',
   'factcheck',
 ]);
+/** 条目历史版本种类 */
 export type ItemVersionKind = z.infer<typeof ItemVersionKindSchema>;
 
+/** 单条新闻某一轮次生成的草稿或核查历史快照 */
 export const ItemVersionSchema = z.object({
   id: z.number().int().positive(),
   itemId: z.string().min(1),
@@ -173,4 +206,5 @@ export const ItemVersionSchema = z.object({
   payload: z.unknown(),
   createdAt: z.string(),
 });
+/** 条目历史版本记录类型 */
 export type ItemVersion = z.infer<typeof ItemVersionSchema>;

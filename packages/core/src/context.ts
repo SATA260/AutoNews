@@ -9,6 +9,7 @@ import { ensureDir, ensurePrivateDir } from './storage/files.js';
 import { runMigrations } from './storage/migrate.js';
 import { createRepositories, type Repositories } from './storage/repos/index.js';
 
+/** 核心运行上下文，集中管理配置、数据库连接、数据读写对象、日志、时钟和通知能力 */
 export interface CoreContext {
   paths: RepoPaths;
   settings: Settings;
@@ -18,9 +19,11 @@ export interface CoreContext {
   logger: Logger;
   notifier: Notifier;
   now: () => Date;
+  /** 从磁盘重新读取并校验运行配置和信源清单 */
   reloadConfig: () => Promise<void>;
 }
 
+/** 初始化项目运行时环境：准备存储目录、加载校验配置、连接数据库并执行建表迁移 */
 export async function createCoreContext(opts?: {
   rootDir?: string;
   notifier?: Notifier;
@@ -65,6 +68,7 @@ export async function createCoreContext(opts?: {
     logger,
     notifier,
     now,
+    /** 重新读取最新配置与信源列表并更新内存快照 */
     async reloadConfig() {
       settings = await loadSettings(paths.settingsFile);
       sources = await loadSources(paths.sourcesFile);

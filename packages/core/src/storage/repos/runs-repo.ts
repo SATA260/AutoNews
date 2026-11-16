@@ -12,6 +12,7 @@ import {
 } from '@aidaily/contracts';
 import type { DatabaseSync } from '../db.js';
 
+/** 数据库 `runs` 表原始行结构 */
 interface RunRow {
   id: string;
   trigger: Trigger;
@@ -32,6 +33,7 @@ interface RunRow {
   retry_deadline_at: string | null;
 }
 
+/** 包含配置快照、取消标志与进程心跳的单期任务完整表记录 */
 export interface RunRowDetail extends RunSummary {
   configSnapshotJson: string;
   cancelRequested: boolean;
@@ -39,6 +41,7 @@ export interface RunRowDetail extends RunSummary {
   heartbeatAt: string | null;
 }
 
+/** 数据库 `run_stages` 表行结构 */
 interface RunStageRow {
   run_id: string;
   stage: Stage;
@@ -50,6 +53,7 @@ interface RunStageRow {
   checkpoint_path: string | null;
 }
 
+/** 数据库 `run_events` 表行结构 */
 interface RunEventRow {
   id: number;
   run_id: string;
@@ -62,6 +66,7 @@ interface RunEventRow {
   data: string | null;
 }
 
+/** 任务互斥运行锁的数据库行结构 */
 export interface LockRow {
   name: string;
   ownerRun: string | null;
@@ -70,6 +75,7 @@ export interface LockRow {
   heartbeatAt: string | null;
 }
 
+/** 将任务表原始行映射为列表摘要对象 */
 function mapRunSummary(row: RunRow): RunSummary {
   return {
     id: row.id,
@@ -88,6 +94,7 @@ function mapRunSummary(row: RunRow): RunSummary {
   };
 }
 
+/** 将任务表原始行映射为包含配置快照的完整对象 */
 function mapRunRowDetail(row: RunRow): RunRowDetail {
   return {
     ...mapRunSummary(row),
@@ -98,6 +105,7 @@ function mapRunRowDetail(row: RunRow): RunRowDetail {
   };
 }
 
+/** 将步骤状态行映射为业务对象 */
 function mapRunStage(row: RunStageRow): RunStageRecord {
   return {
     runId: row.run_id,
@@ -111,6 +119,7 @@ function mapRunStage(row: RunStageRow): RunStageRecord {
   };
 }
 
+/** 将事件日志行映射为业务对象并反序列化附加 JSON 数据 */
 function mapRunEvent(row: RunEventRow): RunEvent {
   return {
     id: row.id,
@@ -125,8 +134,10 @@ function mapRunEvent(row: RunEventRow): RunEvent {
   };
 }
 
+/** 创建任务主表操作对象，管理任务创建、状态流转、心跳与重试期限检查 */
 export function createRunsRepo(db: DatabaseSync) {
   return {
+    /** 新建一期任务记录，初始状态为排队中 */
     create(input: {
       id: string;
       trigger: Trigger;
@@ -149,11 +160,13 @@ export function createRunsRepo(db: DatabaseSync) {
       );
     },
 
+    /** 按任务 ID 查询完整任务信息 */
     getById(id: string): RunRowDetail | null {
       const row = db.prepare('SELECT * FROM runs WHERE id = ?').get(id) as RunRow | undefined;
       return row ? mapRunRowDetail(row) : null;
     },
 
+    /** 按状态和游标分页查询任务摘要列表 */
     list(q?: { status?: RunStatus[]; limit?: number; before?: string }): RunSummary[] {
       const conditions: string[] = [];
       const params: Array<string | number> = [];
@@ -178,6 +191,7 @@ export function createRunsRepo(db: DatabaseSync) {
       return rows.map(mapRunSummary);
     },
 
+    /** 更新任务状态及相关时间戳、错误码或配置快照 */
     updateStatus(
       id: string,
       status: RunStatus,
@@ -242,14 +256,17 @@ export function createRunsRepo(db: DatabaseSync) {
       db.prepare(`UPDATE runs SET ${sets.join(', ')} WHERE id = ?`).run(...params);
     },
 
+    /** 更新运行中任务的最新存活心跳时间 */
     setHeartbeat(id: string, ts: string): void {
       db.prepare('UPDATE runs SET heartbeat_at = ? WHERE id = ?').run(ts, id);
     },
 
+    /** 标记用户请求取消该任务，供运行中的执行器安全停止 */
     requestCancel(id: string): void {
       db.prepare('UPDATE runs SET cancel_requested = 1 WHERE id = ?').run(id);
     },
 
+    /** 检查该任务是否收到取消请求 */
     isCancelRequested(id: string): boolean {
       const row = db.prepare('SELECT cancel_requested FROM runs WHERE id = ?').get(id) as
         | { cancel_requested: number }
@@ -257,6 +274,7 @@ export function createRunsRepo(db: DatabaseSync) {
       return row?.cancel_requested === 1;
     },
 
+    /** 将任务的总执行尝试次数加一并返回最新次数 */
     incrementAttempt(id: string): number {
       db.prepare('UPDATE runs SET attempt = attempt + 1 WHERE id = ?').run(id);
       const row = db.prepare('SELECT attempt FROM runs WHERE id = ?').get(id) as {
@@ -265,6 +283,7 @@ export function createRunsRepo(db: DatabaseSync) {
       return row.attempt;
     },
 
+    /** 找出已超出重试保留窗口、需要自动放弃并释放新闻的任务列表 */
     listExpiredRetryable(nowIso: string): RunSummary[] {
       const rows = db
         .prepare(`
@@ -279,8 +298,10 @@ export function createRunsRepo(db: DatabaseSync) {
   };
 }
 
+/** 创建任务步骤记录操作对象，管理各步骤的完成情况与作废标记 */
 export function createRunStagesRepo(db: DatabaseSync) {
   return {
+    /** 为新建任务初始化所有自动处理步骤记录 */
     initStages(runId: string): void {
       const stmt = db.prepare(`
         INSERT OR IGNORE INTO run_stages (run_id, stage, status, attempt)
@@ -291,6 +312,7 @@ export function createRunStagesRepo(db: DatabaseSync) {
       }
     },
 
+    /** 查询指定任务下全部步骤的执行记录 */
     listByRun(runId: string): RunStageRecord[] {
       const rows = db
         .prepare('SELECT * FROM run_stages WHERE run_id = ?')
@@ -298,6 +320,7 @@ export function createRunStagesRepo(db: DatabaseSync) {
       return rows.map(mapRunStage);
     },
 
+    /** 更新指定步骤的状态、耗时时间戳、检查点文件路径或错误信息 */
     markStage(
       runId: string,
       stage: Stage,
@@ -339,6 +362,7 @@ export function createRunStagesRepo(db: DatabaseSync) {
       );
     },
 
+    /** 从指定步骤重跑时，把受影响的后续步骤标记为作废并清除旧检查点引用 */
     markStaleFrom(runId: string, stagesToInvalidate: Stage[]): void {
       if (stagesToInvalidate.length === 0) {
         return;
@@ -353,8 +377,10 @@ export function createRunStagesRepo(db: DatabaseSync) {
   };
 }
 
+/** 创建任务事件流读写对象，供实时日志输出与界面进度追踪使用 */
 export function createRunEventsRepo(db: DatabaseSync) {
   return {
+    /** 追加写入一条任务运行事件，返回自增事件 ID */
     append(input: {
       runId: string;
       ts: string;
@@ -383,6 +409,7 @@ export function createRunEventsRepo(db: DatabaseSync) {
       return Number(res.lastInsertRowid);
     },
 
+    /** 按自增游标增量拉取某个任务的新事件列表 */
     listAfter(runId: string, afterId = 0, limit = 200): RunEvent[] {
       const rows = db
         .prepare(`
@@ -397,8 +424,10 @@ export function createRunEventsRepo(db: DatabaseSync) {
   };
 }
 
+/** 创建进程互斥锁读写对象，保证同一时间只有一个生成任务在运行 */
 export function createLocksRepo(db: DatabaseSync) {
   return {
+    /** 查询当前锁的持有任务、进程号与心跳时间 */
     get(name: string): LockRow | null {
       const row = db.prepare('SELECT * FROM locks WHERE name = ?').get(name) as
         | {
@@ -421,6 +450,7 @@ export function createLocksRepo(db: DatabaseSync) {
       };
     },
 
+    /** 写入或接管指定名称的互斥锁记录 */
     upsertLock(input: {
       name: string;
       ownerRun: string;
@@ -439,6 +469,7 @@ export function createLocksRepo(db: DatabaseSync) {
       `).run(input.name, input.ownerRun, input.pid, input.acquiredAt, input.heartbeatAt);
     },
 
+    /** 刷新当前持锁任务的最新心跳时间 */
     updateHeartbeat(name: string, ownerRun: string, heartbeatAt: string): void {
       db.prepare('UPDATE locks SET heartbeat_at = ? WHERE name = ? AND owner_run = ?').run(
         heartbeatAt,
@@ -447,6 +478,7 @@ export function createLocksRepo(db: DatabaseSync) {
       );
     },
 
+    /** 释放当前任务持有的互斥锁 */
     releaseLock(name: string, ownerRun: string): void {
       db.prepare('DELETE FROM locks WHERE name = ? AND owner_run = ?').run(name, ownerRun);
     },

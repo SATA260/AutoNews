@@ -11,6 +11,7 @@ next-env.d.ts
 
 # Runtime data & secrets
 /storage/
+/tmp/
 .env
 .env.*
 !.env.example

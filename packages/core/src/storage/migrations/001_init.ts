@@ -1,9 +1,11 @@
+/** 单次数据库结构迁移脚本描述 */
 export interface Migration {
   version: number;
   name: string;
   sql: string;
 }
 
+/** 初始建表迁移脚本：建立抓取游标、文章池、任务与步骤状态、事件审计、定时及独占锁全部表 */
 export const MIGRATION_001: Migration = {
   version: 1,
   name: '001_init',

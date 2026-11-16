@@ -7,6 +7,7 @@ export const metadata: Metadata = {
   description: 'AI 每日报自动化视频工作流后台管理与审校平台',
 };
 
+/** 网页后台全局根布局组件 */
 export default function RootLayout({ children }: { children: ReactNode }) {
   return (
     <html lang="zh-CN">

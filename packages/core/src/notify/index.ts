@@ -1,3 +1,4 @@
+/** 通知系统支持的事件类型 */
 export type NotifyEventType =
   | 'awaiting_review'
   | 'failed'
@@ -6,6 +7,7 @@ export type NotifyEventType =
   | 'source_unhealthy'
   | 'schedule_skipped';
 
+/** 派发外部通知时携带的事件内容 */
 export interface NotifyEvent {
   type: NotifyEventType;
   runId?: string;
@@ -13,19 +15,17 @@ export interface NotifyEvent {
   data?: unknown;
 }
 
+/** 外部消息通知抽象接口，后期可接入飞书等具体通知渠道 */
 export interface Notifier {
   id: string;
+  /** 发送一条通知消息 */
   notify(event: NotifyEvent): Promise<void>;
 }
 
-/**
- * Default v1 notifier: leaves external notifications unimplemented while
- * upstream workflow persists every event into `run_events`.
- */
+/** 默认的空通知实现：不向外部发送消息，所有事件均已保存在数据库日志中 */
 export class NoopNotifier implements Notifier {
   readonly id = 'none';
 
-  async notify(_event: NotifyEvent): Promise<void> {
-    // v1 仅保留抽象接口，后期可按需接入飞书等通知渠道
-  }
+  /** 空实现方法，预留给后期接入飞书等实际通知渠道时替换 */
+  async notify(_event: NotifyEvent): Promise<void> {}
 }

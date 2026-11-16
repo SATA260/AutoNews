@@ -9,8 +9,10 @@ import {
   createRunsRepo,
 } from './runs-repo.js';
 
+/** 集中汇总的全部数据库读写对象集合类型 */
 export type Repositories = ReturnType<typeof createRepositories>;
 
+/** 基于已打开的 SQLite 数据库连接实例化全部数据表读写对象 */
 export function createRepositories(db: DatabaseSync) {
   return {
     sourceState: createSourceStateRepo(db),

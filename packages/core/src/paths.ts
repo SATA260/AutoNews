@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 
+/** 项目中各类配置文件、数据库与任务运行产物的标准路径集合 */
 export interface RepoPaths {
   rootDir: string;
   configDir: string;
@@ -15,14 +16,13 @@ export interface RepoPaths {
   secretsDir: string;
   logsDir: string;
   runsDir: string;
+  /** 根据任务 ID 生成该期任务专属产物目录的绝对路径 */
   runDir: (runId: string) => string;
 }
 
 const SAFE_ID_PATTERN = /^[a-zA-Z0-9._-]+$/;
 
-/**
- * Walk upward from `startDir` until a directory containing `config/settings.yaml` is found.
- */
+/** 从指定目录向上逐级查找包含 `config/settings.yaml` 的项目根目录 */
 export function findRepoRoot(startDir: string = process.cwd()): string {
   let current = path.resolve(startDir);
   while (true) {
@@ -38,6 +38,7 @@ export function findRepoRoot(startDir: string = process.cwd()): string {
   }
 }
 
+/** 根据项目根目录拼装配置、数据库、缓存与任务目录的完整路径映射 */
 export function resolveRepoPaths(rootDir: string): RepoPaths {
   const resolvedRoot = path.resolve(rootDir);
   const configDir = path.join(resolvedRoot, 'config');
@@ -67,9 +68,7 @@ export function resolveRepoPaths(rootDir: string): RepoPaths {
   };
 }
 
-/**
- * Resolve an artifact path inside `runsDir/<runId>` safely, blocking directory traversal.
- */
+/** 安全解析某期任务目录内部的产物文件路径，防止通过 `../` 越界访问外部文件 */
 export function resolveSafeArtifactPath(runsDir: string, runId: string, relPath: string): string {
   if (!SAFE_ID_PATTERN.test(runId) || runId === '.' || runId === '..') {
     throw new Error(`非法的任务 ID: ${runId}`);

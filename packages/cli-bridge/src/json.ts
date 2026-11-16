@@ -1,9 +1,7 @@
 import type { z } from 'zod';
 import { CliOutputError } from './errors.js';
 
-/**
- * Extract JSON value from a string that may contain markdown code fences or surrounding prose.
- */
+/** 从可能夹杂解释文字或 Markdown 代码块的模型输出中提取并解析 JSON */
 export function extractJsonFromText(raw: string): unknown {
   const trimmed = raw.trim();
   if (!trimmed) {
@@ -13,7 +11,7 @@ export function extractJsonFromText(raw: string): unknown {
   try {
     return JSON.parse(trimmed);
   } catch {
-    // try fenced block first
+    // 尝试提取 Markdown 代码块
   }
 
   const fenceMatch = /```(?:json)?\s*([\s\S]*?)\s*```/i.exec(trimmed);
@@ -21,7 +19,7 @@ export function extractJsonFromText(raw: string): unknown {
     try {
       return JSON.parse(fenceMatch[1].trim());
     } catch {
-      // fall through to balanced brace search
+      // 若代码块内部非合法 JSON，则继续尝试大括号匹配
     }
   }
 
@@ -73,6 +71,7 @@ export function extractJsonFromText(raw: string): unknown {
   throw new CliOutputError('无法从输出中解析有效 JSON', '输出不是合法 JSON 格式', raw);
 }
 
+/** 用 Zod 规则校验解析结果，不通过时整理字段错误摘要并抛出输出异常 */
 export function validateWithSchema<T>(
   payload: unknown,
   schema: z.ZodType<T>,
