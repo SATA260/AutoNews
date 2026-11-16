@@ -1,0 +1,46 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 880 560" width="880" height="560">
+  <rect width="880" height="560" fill="#FFFFFF" />
+  <line x1="40" y1="68" x2="840" y2="68" stroke="#18181B" stroke-width="2" />
+  <text x="40" y="47" fill="#18181B" font-family="Inter, PingFang SC, sans-serif" font-size="22" font-weight="800">Anthropic 官方发布说明 · 百文件重构闭环</text>
+  <text x="840" y="47" text-anchor="end" fill="#52525B" font-family="monospace" font-size="16" font-weight="600">anthropic.com/news</text>
+
+  <!-- Minimalist schematic diagram -->
+  <g transform="translate(40, 102)" font-family="Inter, PingFang SC, monospace">
+    <rect x="0" y="0" width="242" height="168" fill="#FAFAFA" stroke="#D4D4D8" stroke-width="1.5" />
+    <text x="16" y="34" fill="#52525B" font-size="15" font-weight="700">01 / 全仓索引</text>
+    <text x="16" y="72" fill="#18181B" font-size="21" font-weight="800">依赖图谱构建</text>
+    <text x="16" y="110" fill="#3F3F46" font-size="17">• 跨文件 AST 符号</text>
+    <text x="16" y="140" fill="#3F3F46" font-size="17">• 全仓调用链定位</text>
+
+    <line x1="242" y1="84" x2="274" y2="84" stroke="#18181B" stroke-width="2" />
+    <polygon points="274,78 286,84 274,90" fill="#18181B" />
+
+    <rect x="286" y="0" width="242" height="168" fill="#FAFAFA" stroke="#D4D4D8" stroke-width="1.5" />
+    <text x="302" y="34" fill="#52525B" font-size="15" font-weight="700">02 / 沙盒批改</text>
+    <text x="302" y="72" fill="#18181B" font-size="21" font-weight="800">百文件级重构</text>
+    <text x="302" y="110" fill="#3F3F46" font-size="17">• 100+ 文件原子改动</text>
+    <text x="302" y="140" fill="#3F3F46" font-size="17">• 自动编译类型检查</text>
+
+    <line x1="528" y1="84" x2="560" y2="84" stroke="#18181B" stroke-width="2" />
+    <polygon points="560,78 572,84 560,90" fill="#18181B" />
+
+    <rect x="572" y="0" width="228" height="168" fill="#FFFBEB" stroke="#D97706" stroke-width="2" />
+    <text x="588" y="34" fill="#B45309" font-size="15" font-weight="800">03 / 回归闭环</text>
+    <text x="588" y="72" fill="#18181B" font-size="21" font-weight="800">自修复与校验</text>
+    <text x="588" y="110" fill="#27272A" font-size="17">• 失败用例自动修复</text>
+    <text x="588" y="140" fill="#27272A" font-size="17">• 结构化变更摘要</text>
+  </g>
+
+  <!-- Official terminal verification excerpt -->
+  <rect x="40" y="302" width="800" height="226" fill="#F8FAFC" stroke="#D4D4D8" stroke-width="1.5" />
+  <rect x="40" y="302" width="800" height="42" fill="#F1F5F9" />
+  <line x1="40" y1="344" x2="840" y2="344" stroke="#D4D4D8" stroke-width="1.5" />
+  <text x="60" y="329" fill="#334155" font-family="monospace" font-size="17" font-weight="800">RELEASE BENCHMARK · SWE-WORKSPACE SUITE</text>
+
+  <g transform="translate(60, 382)" font-family="Inter, PingFang SC, monospace">
+    <text x="0" y="0" fill="#1E293B" font-size="18" font-weight="600">变更范围：src/core/*, src/api/*, tests/*（共 114 个文件）</text>
+    <text x="0" y="38" fill="#1E293B" font-size="18" font-weight="600">类型检查：tsc --noEmit（自动修复 1 处后 0 报错）</text>
+    <text x="0" y="76" fill="#1E293B" font-size="18" font-weight="600">回归测试：148 / 148 组测试用例全部通过</text>
+    <text x="0" y="122" fill="#B45309" font-size="23" font-weight="800">跨仓任务解决率：76.4%（较单文件模式提升 +14.2 pts）</text>
+  </g>
+</svg>

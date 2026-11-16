@@ -1,0 +1,32 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 880 560" width="880" height="560">
+  <rect width="880" height="560" fill="#FFFFFF" />
+  <line x1="40" y1="68" x2="840" y2="68" stroke="#18181B" stroke-width="2" />
+  <text x="40" y="47" fill="#18181B" font-family="Inter, PingFang SC, sans-serif" font-size="22" font-weight="800">Google DeepMind · 2M 上下文长视频逐帧直检</text>
+  <text x="840" y="47" text-anchor="end" fill="#52525B" font-family="monospace" font-size="16" font-weight="600">deepmind.google</text>
+
+  <text x="40" y="114" fill="#27272A" font-family="Inter, PingFang SC, sans-serif" font-size="19" font-weight="700">2 小时原始视频流直读（~1.85M 多模态 Tokens，免字幕转写）</text>
+
+  <g transform="translate(40, 144)">
+    <rect x="0" y="0" width="800" height="106" fill="#FAFAFA" stroke="#D4D4D8" stroke-width="1.5" />
+    <rect x="18" y="18" width="136" height="70" fill="#E4E4E7" />
+    <rect x="168" y="18" width="136" height="70" fill="#E4E4E7" />
+    <rect x="318" y="18" width="164" height="70" fill="#EEF2FF" stroke="#4F46E5" stroke-width="2.5" />
+    <rect x="496" y="18" width="136" height="70" fill="#E4E4E7" />
+    <rect x="646" y="18" width="136" height="70" fill="#E4E4E7" />
+    <text x="86" y="59" text-anchor="middle" fill="#3F3F46" font-family="monospace" font-size="16" font-weight="600">00:00</text>
+    <text x="236" y="59" text-anchor="middle" fill="#3F3F46" font-family="monospace" font-size="16" font-weight="600">00:40</text>
+    <text x="400" y="49" text-anchor="middle" fill="#4338CA" font-family="monospace" font-size="18" font-weight="800">命中 01:14:28</text>
+    <text x="400" y="72" text-anchor="middle" fill="#4F46E5" font-family="Inter, PingFang SC, sans-serif" font-size="15" font-weight="700">目标画面精确锚点</text>
+    <text x="564" y="59" text-anchor="middle" fill="#3F3F46" font-family="monospace" font-size="16" font-weight="600">01:30</text>
+    <text x="714" y="59" text-anchor="middle" fill="#3F3F46" font-family="monospace" font-size="16" font-weight="600">02:00</text>
+  </g>
+
+  <g transform="translate(40, 286)" font-family="Inter, PingFang SC, monospace">
+    <rect x="0" y="0" width="800" height="224" fill="#F8FAFC" stroke="#D4D4D8" stroke-width="1.5" />
+    <text x="24" y="40" fill="#52525B" font-size="17" font-weight="800">官方基准评估 · NEEDLE-IN-A-VIDEO-HAYSTACK</text>
+    <line x1="24" y1="58" x2="776" y2="58" stroke="#E4E4E7" stroke-width="1.5" />
+    <text x="24" y="100" fill="#18181B" font-size="20" font-weight="600">• 单次支持时长：最长 120 分钟原生视频（1 fps 采样）</text>
+    <text x="24" y="142" fill="#18181B" font-size="20" font-weight="600">• 片段定位响应：平均 0.8 秒返回精确时间戳索引</text>
+    <text x="24" y="186" fill="#4F46E5" font-size="23" font-weight="800">• 2M 窗口检索召回率：99.2% 精确帧窗口命中</text>
+  </g>
+</svg>
