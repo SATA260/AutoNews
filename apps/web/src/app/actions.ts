@@ -1,0 +1,587 @@
+'use server';
+
+import {
+  PIPELINE_STAGES,
+  ScheduleTimeSchema,
+  type SourceTestResult,
+  StageSchema,
+} from '@aidaily/contracts';
+import { revalidatePath } from 'next/cache';
+import { z } from 'zod';
+import { getCore } from '@/lib/core';
+
+/** 网页端提交操作后的统一响应结构 */
+export interface ActionResult<T = undefined> {
+  ok: boolean;
+  message?: string;
+  error?: string;
+  data?: T;
+}
+
+const RunIdSchema = z.string().trim().min(1, '任务 ID 不能为空');
+const ItemIdSchema = z.string().trim().min(1, '条目 ID 不能为空');
+const EditStepSchema = z.enum(['summarize', 'polish', 'factcheck']);
+
+/** 安全解析正整数表单字段（禁止空白与非正整数，不回退默认值） */
+function parseRequiredPositiveInt(raw: FormDataEntryValue | null, label: string): number {
+  const str = typeof raw === 'string' ? raw.trim() : '';
+  if (!str) {
+    throw new Error(`请显式填写${label}（正整数，不设默认值）`);
+  }
+  if (!/^[1-9]\d*$/.test(str)) {
+    throw new Error(`${label}必须为大于 0 的整数`);
+  }
+  const num = Number.parseInt(str, 10);
+  if (!Number.isSafeInteger(num) || num <= 0 || String(num) !== str) {
+    throw new Error(`${label}超出有效正整数范围`);
+  }
+  return num;
+}
+
+/** 从表单条目读取必填非空字符串 */
+function parseRequiredString(raw: FormDataEntryValue | null, label: string): string {
+  const str = typeof raw === 'string' ? raw.trim() : '';
+  if (!str) {
+    throw new Error(`${label}不能为空`);
+  }
+  return str;
+}
+
+/** 解析必填的有限数值表单字段，防止空白字段被隐式转换成 0 */
+function parseRequiredNumberField(raw: FormDataEntryValue | null, label: string): number {
+  const str = typeof raw === 'string' ? raw.trim() : '';
+  if (!str) {
+    throw new Error(`${label}不能为空`);
+  }
+  const num = Number(str);
+  if (!Number.isFinite(num)) {
+    throw new Error(`${label}必须为有效数字`);
+  }
+  return num;
+}
+
+/** 从表单条目读取布尔开关值 */
+function parseBooleanField(raw: FormDataEntryValue | null): boolean {
+  if (typeof raw !== 'string') {
+    return false;
+  }
+  return raw === 'true' || raw === 'on' || raw === '1';
+}
+
+/** 在 Next.js 请求上下文中刷新指定页面缓存；测试环境无请求上下文时静默跳过 */
+function safeRevalidate(pathTarget: string): void {
+  try {
+    revalidatePath(pathTarget);
+  } catch {
+    // 直接单元测试调用时不存在 Next.js 页面缓存上下文
+  }
+}
+
+/** 启动新一期视频生成任务（后台工作进程模式，必须显式填写正整数条数） */
+export async function startRunAction(formData: FormData): Promise<ActionResult<{ runId: string }>> {
+  try {
+    const itemCount = parseRequiredPositiveInt(formData.get('itemCount'), '本期新闻条数');
+    const core = await getCore();
+    const { runId } = await core.tasks.start({
+      itemCount,
+      trigger: 'manual-web',
+      detach: true,
+    });
+    safeRevalidate('/');
+    safeRevalidate('/runs');
+    safeRevalidate(`/runs/${runId}`);
+    return { ok: true, data: { runId }, message: `已创建并在后台启动第 ${runId} 期任务` };
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+  }
+}
+
+/** 恢复中断任务或从指定阶段重跑（自动归档之后作废产物，在后台进程执行） */
+export async function resumeRunAction(formData: FormData): Promise<ActionResult> {
+  try {
+    const runId = RunIdSchema.parse(formData.get('runId'));
+    const rawFrom = formData.get('fromStage');
+    const fromStr = typeof rawFrom === 'string' ? rawFrom.trim() : '';
+    let fromStage: (typeof PIPELINE_STAGES)[number] | undefined;
+    if (fromStr) {
+      const parsed = StageSchema.parse(fromStr);
+      if (!(PIPELINE_STAGES as readonly string[]).includes(parsed)) {
+        throw new Error(`阶段 ${parsed} 不支持直接从该处重跑`);
+      }
+      fromStage = parsed as (typeof PIPELINE_STAGES)[number];
+    }
+    const useLatestConfig = parseBooleanField(formData.get('useLatestConfig'));
+
+    const core = await getCore();
+    await core.tasks.resume(runId, {
+      fromStage,
+      useLatestConfig,
+      detach: true,
+    });
+    safeRevalidate('/');
+    safeRevalidate('/runs');
+    safeRevalidate(`/runs/${runId}`);
+    return {
+      ok: true,
+      message: fromStage
+        ? `已提交从 ${fromStage} 阶段重跑（旧产物已归档）`
+        : '已提交从断点阶段继续执行',
+    };
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+  }
+}
+
+/** 单独重做指定新闻条目并自动触发后续编排与视频合成（后台进程执行） */
+export async function retryItemAction(formData: FormData): Promise<ActionResult> {
+  try {
+    const runId = RunIdSchema.parse(formData.get('runId'));
+    const itemId = ItemIdSchema.parse(formData.get('itemId'));
+    const rawStep = formData.get('fromStep');
+    const fromStep =
+      typeof rawStep === 'string' && rawStep.trim()
+        ? EditStepSchema.parse(rawStep.trim())
+        : 'summarize';
+    const useLatestConfig = parseBooleanField(formData.get('useLatestConfig'));
+
+    const core = await getCore();
+    await core.tasks.retryItem(runId, itemId, {
+      fromStep,
+      useLatestConfig,
+      detach: true,
+    });
+    safeRevalidate(`/runs/${runId}`);
+    return { ok: true, message: `已提交单条新闻重做（起点：${fromStep}）` };
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+  }
+}
+
+/** 放弃未发布或中断任务并释放已占用的新闻文章 */
+export async function abandonRunAction(formData: FormData): Promise<ActionResult> {
+  try {
+    const runId = RunIdSchema.parse(formData.get('runId'));
+    const core = await getCore();
+    await core.tasks.abandon(runId);
+    safeRevalidate('/');
+    safeRevalidate('/runs');
+    safeRevalidate(`/runs/${runId}`);
+    return { ok: true, message: `已放弃任务 ${runId} 并释放占用的新闻` };
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+  }
+}
+
+/** 发出安全停止请求取消正在运行的任务 */
+export async function cancelRunAction(formData: FormData): Promise<ActionResult> {
+  try {
+    const runId = RunIdSchema.parse(formData.get('runId'));
+    const core = await getCore();
+    await core.tasks.cancel(runId);
+    safeRevalidate('/');
+    safeRevalidate('/runs');
+    safeRevalidate(`/runs/${runId}`);
+    return { ok: true, message: `已向任务 ${runId} 发送取消请求` };
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+  }
+}
+
+/** 保存人工编辑后的视频标题、简介和标签草稿 */
+export async function updateDraftAction(formData: FormData): Promise<ActionResult> {
+  try {
+    const runId = RunIdSchema.parse(formData.get('runId'));
+    const title = parseRequiredString(formData.get('title'), '视频标题');
+    const description = parseRequiredString(formData.get('description'), '视频简介');
+    const tagsRaw = parseRequiredString(formData.get('tags'), '视频标签');
+    const tags = tagsRaw
+      .split(/[,，\n]/)
+      .map((t) => t.trim())
+      .filter(Boolean);
+
+    const core = await getCore();
+    await core.publish.updateDraft(runId, { title, description, tags });
+    safeRevalidate(`/runs/${runId}`);
+    return { ok: true, message: '投稿文案草稿已保存' };
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+  }
+}
+
+/** 审核通过并启动后台 B 站投稿上传（强制开启 AI 生成内容声明） */
+export async function approvePublishAction(formData: FormData): Promise<ActionResult> {
+  try {
+    const runId = RunIdSchema.parse(formData.get('runId'));
+    const core = await getCore();
+    await core.publish.approve(runId, { detach: true });
+    safeRevalidate('/');
+    safeRevalidate('/runs');
+    safeRevalidate(`/runs/${runId}`);
+    return { ok: true, message: '已确认通过审核并在后台启动 B 站投稿' };
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+  }
+}
+
+/** 投稿明确失败后在后台重新发起 B 站上传 */
+export async function retryPublishAction(formData: FormData): Promise<ActionResult> {
+  try {
+    const runId = RunIdSchema.parse(formData.get('runId'));
+    const core = await getCore();
+    await core.publish.retry(runId, { detach: true });
+    safeRevalidate('/');
+    safeRevalidate('/runs');
+    safeRevalidate(`/runs/${runId}`);
+    return { ok: true, message: '已在后台重新发起 B 站投稿上传' };
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+  }
+}
+
+/** 对上传失联后处于状态待确认的任务执行人工核实定案 */
+export async function confirmUncertainAction(formData: FormData): Promise<ActionResult> {
+  try {
+    const runId = RunIdSchema.parse(formData.get('runId'));
+    const outcome = z.enum(['published', 'not_published']).parse(formData.get('outcome'));
+    const core = await getCore();
+    if (outcome === 'not_published') {
+      await core.publish.confirmUncertain(runId, { published: false });
+      safeRevalidate('/');
+      safeRevalidate('/runs');
+      safeRevalidate(`/runs/${runId}`);
+      return { ok: true, message: '已确认平台未收稿，现可发起安全重试' };
+    }
+    const bvid = parseRequiredString(formData.get('bvid'), 'B 站 BV 号');
+    await core.publish.confirmUncertain(runId, { published: true, bvid });
+    safeRevalidate('/');
+    safeRevalidate('/runs');
+    safeRevalidate('/history');
+    safeRevalidate(`/runs/${runId}`);
+    return { ok: true, message: `已确认稿件已发布（${bvid}）并完成已播提交` };
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+  }
+}
+
+/** 驳回待审视频并立即释放其预留的新闻文章 */
+export async function rejectPublishAction(formData: FormData): Promise<ActionResult> {
+  try {
+    const runId = RunIdSchema.parse(formData.get('runId'));
+    const reasonRaw = formData.get('reason');
+    const reason = typeof reasonRaw === 'string' && reasonRaw.trim() ? reasonRaw.trim() : undefined;
+    const core = await getCore();
+    await core.publish.reject(runId, reason);
+    safeRevalidate('/');
+    safeRevalidate('/runs');
+    safeRevalidate(`/runs/${runId}`);
+    return { ok: true, message: '已驳回本期视频并释放占用的新闻文章' };
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+  }
+}
+
+/** 跳过投稿直接将本期选用新闻归入历史已播库 */
+export async function markConsumedAction(formData: FormData): Promise<ActionResult> {
+  try {
+    const runId = RunIdSchema.parse(formData.get('runId'));
+    const core = await getCore();
+    await core.publish.markConsumed(runId);
+    safeRevalidate('/');
+    safeRevalidate('/runs');
+    safeRevalidate('/history');
+    safeRevalidate(`/runs/${runId}`);
+    return { ok: true, message: '已跳过平台投稿并提交本期新闻到已播历史库' };
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+  }
+}
+
+/** 新建每日定时执行任务（必须显式填写每日时间与新闻条数，不设默认值） */
+export async function createScheduleAction(formData: FormData): Promise<ActionResult> {
+  try {
+    const timeRaw = parseRequiredString(formData.get('time'), '每日执行时间');
+    const time = ScheduleTimeSchema.parse(timeRaw);
+    const itemCount = parseRequiredPositiveInt(formData.get('itemCount'), '每期新闻条数');
+    const nameRaw = formData.get('name');
+    const name = typeof nameRaw === 'string' && nameRaw.trim() ? nameRaw.trim() : undefined;
+    const enabled = formData.has('enabled') ? parseBooleanField(formData.get('enabled')) : true;
+
+    const core = await getCore();
+    const job = await core.scheduler.create({ name, time, itemCount, enabled });
+    safeRevalidate('/');
+    safeRevalidate('/schedules');
+    return { ok: true, message: `已创建并同步定时任务「${job.name}」（每日 ${job.time}）` };
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+  }
+}
+
+/** 更新定时任务配置或启停状态，并同步更新系统调度代理 */
+export async function updateScheduleAction(formData: FormData): Promise<ActionResult> {
+  try {
+    const id = parseRequiredString(formData.get('id'), '定时任务 ID');
+    const patch: { name?: string; time?: string; itemCount?: number; enabled?: boolean } = {};
+
+    const nameRaw = formData.get('name');
+    if (typeof nameRaw === 'string' && nameRaw.trim()) {
+      patch.name = nameRaw.trim();
+    }
+    const timeRaw = formData.get('time');
+    if (typeof timeRaw === 'string' && timeRaw.trim()) {
+      patch.time = ScheduleTimeSchema.parse(timeRaw.trim());
+    }
+    const itemsRaw = formData.get('itemCount');
+    if (typeof itemsRaw === 'string' && itemsRaw.trim()) {
+      patch.itemCount = parseRequiredPositiveInt(itemsRaw, '每期新闻条数');
+    }
+    if (formData.has('enabled')) {
+      patch.enabled = parseBooleanField(formData.get('enabled'));
+    }
+
+    const core = await getCore();
+    const updated = await core.scheduler.update(id, patch);
+    safeRevalidate('/');
+    safeRevalidate('/schedules');
+    return { ok: true, message: `已更新定时任务「${updated.name}」` };
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+  }
+}
+
+/** 删除指定定时任务并从系统调度器卸载 */
+export async function removeScheduleAction(formData: FormData): Promise<ActionResult> {
+  try {
+    const id = parseRequiredString(formData.get('id'), '定时任务 ID');
+    const core = await getCore();
+    await core.scheduler.remove(id);
+    safeRevalidate('/');
+    safeRevalidate('/schedules');
+    return { ok: true, message: '已删除定时任务并清理系统调度配置' };
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+  }
+}
+
+/** 将数据库中的全部定时任务全量重同步到系统调度器 */
+export async function syncSchedulesAction(): Promise<ActionResult> {
+  try {
+    const core = await getCore();
+    await core.scheduler.sync();
+    safeRevalidate('/');
+    safeRevalidate('/schedules');
+    return { ok: true, message: '已全量重同步全部定时任务到 launchd' };
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+  }
+}
+
+const StageFieldPatchSchema = z.object({
+  cli: z.string().trim().min(1),
+  model: z.string().trim().min(1),
+  timeoutSec: z.number().int().positive(),
+  retries: z.number().int().min(0),
+});
+
+/** 更新各个 AI 处理阶段所使用的命令行工具与模型配置（保存后下一期或启用最新配置重试即生效） */
+export async function updateStageRoutingAction(formData: FormData): Promise<ActionResult> {
+  try {
+    const stageKeys = ['select', 'summarize', 'polish', 'factcheck', 'package'] as const;
+    const stages: Record<string, z.infer<typeof StageFieldPatchSchema>> = {};
+    for (const key of stageKeys) {
+      stages[key] = StageFieldPatchSchema.parse({
+        cli: formData.get(`stage_${key}_cli`),
+        model: formData.get(`stage_${key}_model`),
+        timeoutSec: parseRequiredNumberField(
+          formData.get(`stage_${key}_timeoutSec`),
+          `${key} 阶段超时时间`,
+        ),
+        retries: parseRequiredNumberField(
+          formData.get(`stage_${key}_retries`),
+          `${key} 阶段重试次数`,
+        ),
+      });
+    }
+    const maxConcurrentCalls = z
+      .number()
+      .int()
+      .min(1)
+      .max(10)
+      .parse(parseRequiredNumberField(formData.get('maxConcurrentCalls'), '最大并发模型调用数'));
+
+    const core = await getCore();
+    await core.config.updateSettings({
+      ai: {
+        maxConcurrentCalls,
+        stages: {
+          select: stages.select,
+          summarize: stages.summarize,
+          polish: stages.polish,
+          factcheck: stages.factcheck,
+          package: stages.package,
+        },
+      },
+    });
+    safeRevalidate('/settings');
+    return { ok: true, message: '各阶段命令行与模型路由配置已保存并立即生效' };
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+  }
+}
+
+/** 保存选题补抓、模板渲染以及 B 站发布参数配置（强制保留 AI 声明开启状态） */
+export async function updateWorkflowSettingsAction(formData: FormData): Promise<ActionResult> {
+  try {
+    const parsed = z
+      .object({
+        timezone: z.string().trim().min(1),
+        freshnessHours: z.number().int().positive(),
+        itemConcurrency: z.number().int().min(1).max(10),
+        maxRounds: z.number().int().min(0).max(10),
+        useBackupSources: z.boolean(),
+        lookbackStepHours: z.number().int().positive(),
+        maxLookbackHours: z.number().int().positive(),
+        reservationHoldHours: z.number().int().positive(),
+        maxRevisions: z.number().int().min(0).max(5),
+        activeTemplate: z.string().trim().min(1),
+        pagePaddingSec: z.number().nonnegative(),
+        publishMode: z.enum(['manual-review', 'auto']),
+        bilibiliTid: z.number().int().nonnegative(),
+        titleMax: z.number().int().positive(),
+        descMax: z.number().int().positive(),
+        tagsMax: z.number().int().positive(),
+        defaultTags: z.string(),
+        aiDisclaimerText: z.string().trim().min(1),
+      })
+      .parse({
+        timezone: formData.get('timezone'),
+        freshnessHours: parseRequiredNumberField(formData.get('freshnessHours'), '新闻新鲜度窗口'),
+        itemConcurrency: parseRequiredNumberField(
+          formData.get('itemConcurrency'),
+          '同时处理新闻并发数',
+        ),
+        maxRounds: parseRequiredNumberField(formData.get('maxRounds'), '最大补抓替补轮数'),
+        useBackupSources: parseBooleanField(formData.get('useBackupSources')),
+        lookbackStepHours: parseRequiredNumberField(formData.get('lookbackStepHours'), '回溯步长'),
+        maxLookbackHours: parseRequiredNumberField(
+          formData.get('maxLookbackHours'),
+          '最大回溯上限',
+        ),
+        reservationHoldHours: parseRequiredNumberField(
+          formData.get('reservationHoldHours'),
+          '文章锁定保留小时数',
+        ),
+        maxRevisions: parseRequiredNumberField(
+          formData.get('maxRevisions'),
+          '单条最大核查打回次数',
+        ),
+        activeTemplate: formData.get('activeTemplate'),
+        pagePaddingSec: parseRequiredNumberField(
+          formData.get('pagePaddingSec'),
+          '翻页停顿缓冲秒数',
+        ),
+        publishMode: formData.get('publishMode'),
+        bilibiliTid: parseRequiredNumberField(formData.get('bilibiliTid'), 'B 站分区编号'),
+        titleMax: parseRequiredNumberField(formData.get('titleMax'), '标题最大字数'),
+        descMax: parseRequiredNumberField(formData.get('descMax'), '简介最大字数'),
+        tagsMax: parseRequiredNumberField(formData.get('tagsMax'), '标签最多个数'),
+        defaultTags: String(formData.get('defaultTags') ?? ''),
+        aiDisclaimerText: formData.get('aiDisclaimerText'),
+      });
+
+    const tagList = Array.from(
+      new Set(
+        parsed.defaultTags
+          .split(/[,，]/)
+          .map((t) => t.trim())
+          .filter(Boolean),
+      ),
+    );
+
+    const core = await getCore();
+    await core.config.updateSettings({
+      timezone: parsed.timezone,
+      issue: {
+        freshnessHours: parsed.freshnessHours,
+        itemConcurrency: parsed.itemConcurrency,
+        refill: {
+          maxRounds: parsed.maxRounds,
+          useBackupSources: parsed.useBackupSources,
+          lookbackStepHours: parsed.lookbackStepHours,
+          maxLookbackHours: parsed.maxLookbackHours,
+        },
+      },
+      retry: {
+        reservationHoldHours: parsed.reservationHoldHours,
+      },
+      editorial: {
+        maxRevisions: parsed.maxRevisions,
+      },
+      template: {
+        active: parsed.activeTemplate,
+      },
+      render: {
+        pagePaddingSec: parsed.pagePaddingSec,
+      },
+      publish: {
+        mode: parsed.publishMode,
+        bilibili: {
+          tid: parsed.bilibiliTid,
+          titleMax: parsed.titleMax,
+          descMax: parsed.descMax,
+          tagsMax: parsed.tagsMax,
+          defaultTags: tagList,
+          aiDeclaration: true,
+          aiDisclaimerText: parsed.aiDisclaimerText,
+        },
+      },
+    });
+    safeRevalidate('/settings');
+    safeRevalidate('/');
+    return { ok: true, message: '工作流与发布配置已保存' };
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+  }
+}
+
+/** 切换单个新闻信源的启用或停用状态并保留 YAML 注释落盘 */
+export async function toggleSourceAction(formData: FormData): Promise<ActionResult> {
+  try {
+    const sourceId = parseRequiredString(formData.get('sourceId'), '信源 ID');
+    const enabled = parseBooleanField(formData.get('enabled'));
+    const core = await getCore();
+    const currentSources = core.config.getSources();
+    const found = currentSources.some((s) => s.id === sourceId);
+    if (!found) {
+      throw new Error(`未找到信源: ${sourceId}`);
+    }
+    const nextSources = currentSources.map((s) => (s.id === sourceId ? { ...s, enabled } : s));
+    await core.config.updateSources(nextSources);
+    safeRevalidate('/sources');
+    safeRevalidate('/');
+    return { ok: true, message: `信源 ${sourceId} 已${enabled ? '启用' : '停用'}` };
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+  }
+}
+
+/** 立即对单个订阅信源执行无缓存试抓并返回诊断结果 */
+export async function testSourceAction(
+  formData: FormData,
+): Promise<ActionResult<SourceTestResult>> {
+  try {
+    const sourceId = parseRequiredString(formData.get('sourceId'), '信源 ID');
+    const core = await getCore();
+    const result = await core.sources.test(sourceId);
+    safeRevalidate('/sources');
+    return {
+      ok: result.ok,
+      data: result,
+      message: result.ok
+        ? `试抓成功：获取到 ${result.itemCount} 条（耗时 ${result.durationMs}ms）`
+        : undefined,
+      error: result.ok ? undefined : (result.error ?? '试抓失败'),
+    };
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+  }
+}
