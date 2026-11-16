@@ -10,7 +10,7 @@ build/
 next-env.d.ts
 
 # Runtime data & secrets
-storage/
+/storage/
 .env
 .env.*
 !.env.example
