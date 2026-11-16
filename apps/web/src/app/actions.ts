@@ -47,15 +47,34 @@ function parseRequiredString(raw: FormDataEntryValue | null, label: string): str
   return str;
 }
 
-/** 解析必填的有限数值表单字段，防止空白字段被隐式转换成 0 */
+/** 严格解析必填整数表单字段，拒绝空白、小数或超出安全整数范围的输入 */
+function parseRequiredIntField(raw: FormDataEntryValue | null, label: string): number {
+  const str = typeof raw === 'string' ? raw.trim() : '';
+  if (!str) {
+    throw new Error(`${label}不能为空`);
+  }
+  if (!/^-?(?:0|[1-9]\d*)$/.test(str)) {
+    throw new Error(`${label}必须为标准整数`);
+  }
+  const num = Number.parseInt(str, 10);
+  if (!Number.isSafeInteger(num) || String(num) !== str) {
+    throw new Error(`${label}超出安全整数范围`);
+  }
+  return num;
+}
+
+/** 严格解析必填十进制数值表单字段，防止空白被转成 0 或科学计数法失真 */
 function parseRequiredNumberField(raw: FormDataEntryValue | null, label: string): number {
   const str = typeof raw === 'string' ? raw.trim() : '';
   if (!str) {
     throw new Error(`${label}不能为空`);
   }
+  if (!/^-?\d+(?:\.\d+)?$/.test(str)) {
+    throw new Error(`${label}必须为有效十进制数字`);
+  }
   const num = Number(str);
   if (!Number.isFinite(num)) {
-    throw new Error(`${label}必须为有效数字`);
+    throw new Error(`${label}超出有效数值范围`);
   }
   return num;
 }
@@ -391,14 +410,11 @@ export async function updateStageRoutingAction(formData: FormData): Promise<Acti
       stages[key] = StageFieldPatchSchema.parse({
         cli: formData.get(`stage_${key}_cli`),
         model: formData.get(`stage_${key}_model`),
-        timeoutSec: parseRequiredNumberField(
+        timeoutSec: parseRequiredIntField(
           formData.get(`stage_${key}_timeoutSec`),
           `${key} 阶段超时时间`,
         ),
-        retries: parseRequiredNumberField(
-          formData.get(`stage_${key}_retries`),
-          `${key} 阶段重试次数`,
-        ),
+        retries: parseRequiredIntField(formData.get(`stage_${key}_retries`), `${key} 阶段重试次数`),
       });
     }
     const maxConcurrentCalls = z
@@ -406,9 +422,17 @@ export async function updateStageRoutingAction(formData: FormData): Promise<Acti
       .int()
       .min(1)
       .max(10)
-      .parse(parseRequiredNumberField(formData.get('maxConcurrentCalls'), '最大并发模型调用数'));
+      .parse(parseRequiredIntField(formData.get('maxConcurrentCalls'), '最大并发模型调用数'));
 
     const core = await getCore();
+    const currentSettings = core.config.getSettings();
+    for (const key of stageKeys) {
+      const cliName = stages[key]?.cli ?? '';
+      if (!Object.hasOwn(currentSettings.clis, cliName)) {
+        throw new Error(`未在配置中定义命令行工具: ${cliName}`);
+      }
+    }
+
     await core.config.updateSettings({
       ai: {
         maxConcurrentCalls,
@@ -425,6 +449,15 @@ export async function updateStageRoutingAction(formData: FormData): Promise<Acti
     return { ok: true, message: '各阶段命令行与模型路由配置已保存并立即生效' };
   } catch (err) {
     return { ok: false, error: err instanceof Error ? err.message : String(err) };
+  }
+}
+
+/** 校验时区标识是否可被标准时间格式库识别 */
+function assertValidTimezone(timezone: string): void {
+  try {
+    new Intl.DateTimeFormat(undefined, { timeZone: timezone });
+  } catch {
+    throw new Error(`无效的时区标识: ${timezone}`);
   }
 }
 
@@ -454,39 +487,35 @@ export async function updateWorkflowSettingsAction(formData: FormData): Promise<
       })
       .parse({
         timezone: formData.get('timezone'),
-        freshnessHours: parseRequiredNumberField(formData.get('freshnessHours'), '新闻新鲜度窗口'),
-        itemConcurrency: parseRequiredNumberField(
+        freshnessHours: parseRequiredIntField(formData.get('freshnessHours'), '新闻新鲜度窗口'),
+        itemConcurrency: parseRequiredIntField(
           formData.get('itemConcurrency'),
           '同时处理新闻并发数',
         ),
-        maxRounds: parseRequiredNumberField(formData.get('maxRounds'), '最大补抓替补轮数'),
+        maxRounds: parseRequiredIntField(formData.get('maxRounds'), '最大补抓替补轮数'),
         useBackupSources: parseBooleanField(formData.get('useBackupSources')),
-        lookbackStepHours: parseRequiredNumberField(formData.get('lookbackStepHours'), '回溯步长'),
-        maxLookbackHours: parseRequiredNumberField(
-          formData.get('maxLookbackHours'),
-          '最大回溯上限',
-        ),
-        reservationHoldHours: parseRequiredNumberField(
+        lookbackStepHours: parseRequiredIntField(formData.get('lookbackStepHours'), '回溯步长'),
+        maxLookbackHours: parseRequiredIntField(formData.get('maxLookbackHours'), '最大回溯上限'),
+        reservationHoldHours: parseRequiredIntField(
           formData.get('reservationHoldHours'),
           '文章锁定保留小时数',
         ),
-        maxRevisions: parseRequiredNumberField(
-          formData.get('maxRevisions'),
-          '单条最大核查打回次数',
-        ),
+        maxRevisions: parseRequiredIntField(formData.get('maxRevisions'), '单条最大核查打回次数'),
         activeTemplate: formData.get('activeTemplate'),
         pagePaddingSec: parseRequiredNumberField(
           formData.get('pagePaddingSec'),
           '翻页停顿缓冲秒数',
         ),
         publishMode: formData.get('publishMode'),
-        bilibiliTid: parseRequiredNumberField(formData.get('bilibiliTid'), 'B 站分区编号'),
-        titleMax: parseRequiredNumberField(formData.get('titleMax'), '标题最大字数'),
-        descMax: parseRequiredNumberField(formData.get('descMax'), '简介最大字数'),
-        tagsMax: parseRequiredNumberField(formData.get('tagsMax'), '标签最多个数'),
+        bilibiliTid: parseRequiredIntField(formData.get('bilibiliTid'), 'B 站分区编号'),
+        titleMax: parseRequiredIntField(formData.get('titleMax'), '标题最大字数'),
+        descMax: parseRequiredIntField(formData.get('descMax'), '简介最大字数'),
+        tagsMax: parseRequiredIntField(formData.get('tagsMax'), '标签最多个数'),
         defaultTags: String(formData.get('defaultTags') ?? ''),
         aiDisclaimerText: formData.get('aiDisclaimerText'),
       });
+
+    assertValidTimezone(parsed.timezone);
 
     const tagList = Array.from(
       new Set(
@@ -498,6 +527,10 @@ export async function updateWorkflowSettingsAction(formData: FormData): Promise<
     );
 
     const core = await getCore();
+    const currentSettings = core.config.getSettings();
+    if (!Object.hasOwn(currentSettings.template.registry, parsed.activeTemplate)) {
+      throw new Error(`未在模板注册表中配置模板: ${parsed.activeTemplate}`);
+    }
     await core.config.updateSettings({
       timezone: parsed.timezone,
       issue: {

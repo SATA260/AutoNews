@@ -185,7 +185,7 @@ async function seedReviewReadyRun(): Promise<{ runId: string; mp4Bytes: Uint8Arr
 
 describe('apps/web routes and Server Actions', () => {
   it('serves artifact MP4 full stream, HTTP Range slices (206), 416 invalid range, 403 traversal, and 404 missing', async () => {
-    await setupWebTestWorkspace();
+    const rootDir = await setupWebTestWorkspace();
     const { runId, mp4Bytes: expectedBytes } = await seedReviewReadyRun();
     const fullText = Buffer.from(expectedBytes).toString('utf8');
 
@@ -254,6 +254,24 @@ describe('apps/web routes and Server Actions', () => {
       { params: Promise.resolve({ id: '..', path: ['state.sqlite'] }) },
     );
     expect(badIdRes.status).toBe(403);
+
+    const multipartRangeRes = await getArtifactRoute(
+      new Request(`http://127.0.0.1:3000/api/runs/${runId}/artifacts/output/video.mp4`, {
+        headers: { Range: 'bytes=0-1, 8-9' },
+      }),
+      { params: Promise.resolve({ id: runId, path: ['output', 'video.mp4'] }) },
+    );
+    expect(multipartRangeRes.status).toBe(200);
+    expect(await multipartRangeRes.text()).toBe(fullText);
+
+    const symlinkTarget = path.join(rootDir, 'storage', 'runs', runId, 'output', 'video.mp4');
+    const symlinkPath = path.join(rootDir, 'storage', 'runs', runId, 'output', 'sym.mp4');
+    await fs.symlink(symlinkTarget, symlinkPath);
+    const symlinkRes = await getArtifactRoute(
+      new Request(`http://127.0.0.1:3000/api/runs/${runId}/artifacts/output/sym.mp4`),
+      { params: Promise.resolve({ id: runId, path: ['output', 'sym.mp4'] }) },
+    );
+    expect(symlinkRes.status).toBe(403);
 
     const missingRes = await getArtifactRoute(
       new Request(`http://127.0.0.1:3000/api/runs/${runId}/artifacts/output/nope.mp4`),
@@ -327,6 +345,12 @@ describe('apps/web routes and Server Actions', () => {
     );
     expect(badCursorRes.status).toBe(400);
 
+    const unsafeCursorRes = await getEventsRoute(
+      new Request(`http://127.0.0.1:3000/api/runs/${runId}/events?afterId=9007199254740993`),
+      { params: Promise.resolve({ id: runId }) },
+    );
+    expect(unsafeCursorRes.status).toBe(400);
+
     const notFoundRes = await getEventsRoute(
       new Request('http://127.0.0.1:3000/api/runs/unknown-run/events'),
       { params: Promise.resolve({ id: 'unknown-run' }) },
@@ -363,6 +387,26 @@ describe('apps/web routes and Server Actions', () => {
     }
     blankRetriesFd.set('maxConcurrentCalls', '2');
     expect((await updateStageRoutingAction(blankRetriesFd)).ok).toBe(false);
+
+    const sciNotationFd = new FormData();
+    for (const key of ['select', 'summarize', 'polish', 'factcheck', 'package']) {
+      sciNotationFd.set(`stage_${key}_cli`, 'agy');
+      sciNotationFd.set(`stage_${key}_model`, 'gemini-2.5-pro');
+      sciNotationFd.set(`stage_${key}_timeoutSec`, key === 'select' ? '1e2' : '120');
+      sciNotationFd.set(`stage_${key}_retries`, '0');
+    }
+    sciNotationFd.set('maxConcurrentCalls', '2');
+    expect((await updateStageRoutingAction(sciNotationFd)).ok).toBe(false);
+
+    const unknownCliFd = new FormData();
+    for (const key of ['select', 'summarize', 'polish', 'factcheck', 'package']) {
+      unknownCliFd.set(`stage_${key}_cli`, key === 'select' ? 'unknown-cli' : 'agy');
+      unknownCliFd.set(`stage_${key}_model`, 'gemini-2.5-pro');
+      unknownCliFd.set(`stage_${key}_timeoutSec`, '120');
+      unknownCliFd.set(`stage_${key}_retries`, '0');
+    }
+    unknownCliFd.set('maxConcurrentCalls', '2');
+    expect((await updateStageRoutingAction(unknownCliFd)).ok).toBe(false);
 
     const validRoutingFd = new FormData();
     for (const key of ['select', 'summarize', 'polish', 'factcheck', 'package']) {

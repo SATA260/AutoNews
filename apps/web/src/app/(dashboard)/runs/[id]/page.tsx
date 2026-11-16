@@ -1,4 +1,11 @@
-import type { QaReport, Timeline } from '@aidaily/contracts';
+import {
+  type QaReport,
+  QaReportSchema,
+  RETRYABLE_RUN_STATUSES,
+  type RunEvent,
+  type Timeline,
+  TimelineSchema,
+} from '@aidaily/contracts';
 import Link from 'next/link';
 import { notFound } from 'next/navigation';
 import { PublishControls } from '@/components/PublishControls';
@@ -36,6 +43,27 @@ function resolveTab(rawTab: string | undefined): DetailTab {
   return matched ? matched.key : 'progress';
 }
 
+/** 分页拉取任务最近 500 条运行日志，避免超长任务因截取开头而漏掉末尾状态事件 */
+async function loadRecentRunEvents(
+  core: Awaited<ReturnType<typeof getCore>>,
+  runId: string,
+): Promise<RunEvent[]> {
+  const all: RunEvent[] = [];
+  let afterId = 0;
+  while (true) {
+    const batch = await core.tasks.events(runId, afterId, 500);
+    if (batch.length === 0) {
+      break;
+    }
+    all.push(...batch);
+    afterId = batch[batch.length - 1]?.id ?? afterId;
+    if (batch.length < 500) {
+      break;
+    }
+  }
+  return all.length > 500 ? all.slice(-500) : all;
+}
+
 /** 单期任务详情页：提供进度日志、原文对照、候选替补、音画质检、发布审核与模型调用六个视图页签 */
 export default async function RunDetailPage({
   params,
@@ -48,20 +76,22 @@ export default async function RunDetailPage({
   const activeTab = resolveTab(sp.tab);
 
   const core = await getCore();
-  const detail = await core.tasks.get(id).catch(() => null);
-  if (!detail) {
-    notFound();
+  let detail: Awaited<ReturnType<typeof core.tasks.get>>;
+  try {
+    detail = await core.tasks.get(id);
+  } catch (err) {
+    if (err instanceof Error && err.message.includes('未找到任务')) {
+      notFound();
+    }
+    throw err;
   }
 
   const settings = core.config.getSettings();
   const retryOptions = await core.tasks.getRetryOptions(id);
   const isActive =
     detail.status === 'running' || detail.status === 'queued' || detail.status === 'publishing';
-  const canRetryItems =
-    !isActive &&
-    detail.status !== 'published' &&
-    detail.status !== 'abandoned' &&
-    detail.status !== 'publish_uncertain';
+  const selectDone = detail.stages.some((s) => s.stage === 'select' && s.status === 'done');
+  const canRetryItems = RETRYABLE_RUN_STATUSES.includes(detail.status) && selectDone;
 
   return (
     <div className="space-y-5">
@@ -133,7 +163,7 @@ export default async function RunDetailPage({
 
       {activeTab === 'progress'
         ? await (async () => {
-            const runEvents = await core.tasks.events(detail.id, 0, 300);
+            const runEvents = await loadRecentRunEvents(core, detail.id);
             return (
               <RunProgressTab
                 detail={detail}
@@ -230,18 +260,64 @@ export default async function RunDetailPage({
 
       {activeTab === 'media'
         ? await (async () => {
-            const [qaReport, timeline] = await Promise.all([
-              core.tasks.readArtifactJson<QaReport>(detail.id, 'qa.json').catch(() => null),
-              core.tasks.readArtifactJson<Timeline>(detail.id, 'timeline.json').catch(() => null),
+            const mediaWarnings: string[] = [];
+            let qaReport: QaReport | null = null;
+            let timeline: Timeline | null = null;
+
+            const [rawQaRes, rawTimelineRes] = await Promise.all([
+              core.tasks.readArtifactJson<unknown>(detail.id, 'qa.json').then(
+                (val) => ({ ok: true as const, val }),
+                (err) => ({ ok: false as const, err }),
+              ),
+              core.tasks.readArtifactJson<unknown>(detail.id, 'timeline.json').then(
+                (val) => ({ ok: true as const, val }),
+                (err) => ({ ok: false as const, err }),
+              ),
             ]);
+
+            if (!rawQaRes.ok) {
+              mediaWarnings.push(
+                `读取 qa.json 失败：${rawQaRes.err instanceof Error ? rawQaRes.err.message : String(rawQaRes.err)}`,
+              );
+            } else if (rawQaRes.val !== null) {
+              const parsed = QaReportSchema.safeParse(rawQaRes.val);
+              if (parsed.success) {
+                qaReport = parsed.data;
+              } else {
+                mediaWarnings.push('qa.json 文件内容格式校验失败，请重新执行质检阶段。');
+              }
+            }
+
+            if (!rawTimelineRes.ok) {
+              mediaWarnings.push(
+                `读取 timeline.json 失败：${rawTimelineRes.err instanceof Error ? rawTimelineRes.err.message : String(rawTimelineRes.err)}`,
+              );
+            } else if (rawTimelineRes.val !== null) {
+              const parsed = TimelineSchema.safeParse(rawTimelineRes.val);
+              if (parsed.success) {
+                timeline = parsed.data;
+              } else {
+                mediaWarnings.push('timeline.json 文件内容格式校验失败，请重新生成配音与时间轴。');
+              }
+            }
+
             return (
-              <RunMediaTab
-                runId={detail.id}
-                artifacts={detail.artifacts}
-                qaReport={qaReport}
-                timeline={timeline}
-                timezone={settings.timezone}
-              />
+              <div className="space-y-4">
+                {mediaWarnings.length > 0 ? (
+                  <div className="rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-xs text-rose-800">
+                    {mediaWarnings.map((w) => (
+                      <p key={w}>{w}</p>
+                    ))}
+                  </div>
+                ) : null}
+                <RunMediaTab
+                  runId={detail.id}
+                  artifacts={detail.artifacts}
+                  qaReport={qaReport}
+                  timeline={timeline}
+                  timezone={settings.timezone}
+                />
+              </div>
             );
           })()
         : null}
@@ -269,9 +345,14 @@ export default async function RunDetailPage({
         ? await (async () => {
             const calls = await core.tasks.getLlmCalls(detail.id);
             const rawCallId = sp.callId?.trim() ?? '';
+            const numericCallId = /^[1-9]\d*$/.test(rawCallId)
+              ? Number.parseInt(rawCallId, 10)
+              : null;
             const parsedCallId =
-              /^[1-9]\d*$/.test(rawCallId) && Number.isSafeInteger(Number(rawCallId))
-                ? Number.parseInt(rawCallId, 10)
+              numericCallId !== null &&
+              Number.isSafeInteger(numericCallId) &&
+              String(numericCallId) === rawCallId
+                ? numericCallId
                 : null;
             const selectedCallLog =
               parsedCallId !== null

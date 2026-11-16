@@ -5,7 +5,7 @@ export const dynamic = 'force-dynamic';
 
 const HEARTBEAT_INTERVAL_MS = 15_000;
 
-/** 从请求头 `Last-Event-ID` 或查询参数 `afterId` 解析事件流断点续传游标 */
+/** 从请求头 `Last-Event-ID` 或查询参数 `afterId` 严格解析安全范围内的事件游标 */
 function parseAfterIdCursor(request: Request): number | null {
   const headerVal = request.headers.get('last-event-id');
   const url = new URL(request.url);
@@ -13,11 +13,12 @@ function parseAfterIdCursor(request: Request): number | null {
   if (raw === null || raw.trim() === '') {
     return 0;
   }
-  if (!/^\d+$/.test(raw.trim())) {
+  const trimmed = raw.trim();
+  if (!/^(?:0|[1-9]\d*)$/.test(trimmed)) {
     return null;
   }
-  const num = Number.parseInt(raw.trim(), 10);
-  return Number.isSafeInteger(num) && num >= 0 ? num : null;
+  const num = Number.parseInt(trimmed, 10);
+  return Number.isSafeInteger(num) && String(num) === trimmed ? num : null;
 }
 
 /**
@@ -47,6 +48,7 @@ export async function GET(
   const encoder = new TextEncoder();
   const watchCtrl = new AbortController();
   let heartbeatTimer: ReturnType<typeof setInterval> | null = null;
+  let streamCtrl: ReadableStreamDefaultController<Uint8Array> | null = null;
   let closed = false;
 
   const cleanup = () => {
@@ -59,10 +61,19 @@ export async function GET(
       heartbeatTimer = null;
     }
     watchCtrl.abort();
+    if (streamCtrl) {
+      try {
+        streamCtrl.close();
+      } catch {
+        // 读取端已取消或流已关闭时忽略重复关闭异常
+      }
+      streamCtrl = null;
+    }
   };
 
   const stream = new ReadableStream<Uint8Array>({
     async start(controller) {
+      streamCtrl = controller;
       const enqueueText = (payload: string) => {
         if (closed || watchCtrl.signal.aborted) {
           return;
@@ -77,6 +88,10 @@ export async function GET(
       const onReqAbort = () => {
         cleanup();
       };
+      if (request.signal.aborted) {
+        cleanup();
+        return;
+      }
       request.signal.addEventListener('abort', onReqAbort, { once: true });
 
       heartbeatTimer = setInterval(() => {
@@ -93,21 +108,11 @@ export async function GET(
           { afterId, pollMs: 200 },
         );
         enqueueText(': done\n\n');
-        if (!closed) {
-          closed = true;
-          if (heartbeatTimer) {
-            clearInterval(heartbeatTimer);
-            heartbeatTimer = null;
-          }
-          controller.close();
-        }
       } catch (err) {
         if (!watchCtrl.signal.aborted && !closed) {
           enqueueText(
             `event: error\ndata: ${JSON.stringify({ message: err instanceof Error ? err.message : String(err) })}\n\n`,
           );
-          cleanup();
-          controller.close();
         }
       } finally {
         request.signal.removeEventListener('abort', onReqAbort);

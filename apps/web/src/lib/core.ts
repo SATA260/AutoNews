@@ -9,6 +9,7 @@ interface GlobalCoreSlot {
 
 const globalSlotHost = globalThis as typeof globalThis & {
   __aidailyCoreSlot?: GlobalCoreSlot;
+  __aidailyCoreClosing?: Promise<void>;
 };
 
 /** 返回当前加载的核心引擎版本号，供服务端渲染与接口健康检查使用 */
@@ -18,7 +19,7 @@ export function getCoreVersion(): string {
 
 /**
  * 获取或初始化全局核心业务引擎单例；
- * 支持通过 `AIDAILY_ROOT` 环境变量切换目标工作区，并在根目录变更时先安全关闭旧实例。
+ * 支持通过 `AIDAILY_ROOT` 环境变量切换目标工作区，并在根目录变更时串行等待旧实例关闭后再创建新实例。
  */
 export async function getCore(): Promise<Core> {
   const rootDir = process.env.AIDAILY_ROOT?.trim() || undefined;
@@ -29,13 +30,17 @@ export async function getCore(): Promise<Core> {
     return existing.corePromise;
   }
 
-  if (existing) {
-    const oldCore = await existing.corePromise.catch(() => null);
-    await oldCore?.close().catch(() => undefined);
-    globalSlotHost.__aidailyCoreSlot = undefined;
-  }
+  const prevCloseChain = (globalSlotHost.__aidailyCoreClosing ?? Promise.resolve()).then(
+    async () => {
+      if (existing) {
+        const oldCore = await existing.corePromise.catch(() => null);
+        await oldCore?.close().catch(() => undefined);
+      }
+    },
+  );
+  globalSlotHost.__aidailyCoreClosing = prevCloseChain;
 
-  const nextPromise = createCore(rootDir ? { rootDir } : undefined);
+  const nextPromise = prevCloseChain.then(() => createCore(rootDir ? { rootDir } : undefined));
   const slot: GlobalCoreSlot = { rootDirKey, corePromise: nextPromise };
   globalSlotHost.__aidailyCoreSlot = slot;
 
@@ -52,10 +57,14 @@ export async function getCore(): Promise<Core> {
 /** 关闭并清理全局核心引擎单例（供测试收尾时释放 SQLite 文件句柄） */
 export async function closeCoreSingleton(): Promise<void> {
   const existing = globalSlotHost.__aidailyCoreSlot;
-  if (!existing) {
-    return;
-  }
   globalSlotHost.__aidailyCoreSlot = undefined;
-  const core = await existing.corePromise.catch(() => null);
-  await core?.close().catch(() => undefined);
+  const closeTask = (globalSlotHost.__aidailyCoreClosing ?? Promise.resolve()).then(async () => {
+    if (!existing) {
+      return;
+    }
+    const core = await existing.corePromise.catch(() => null);
+    await core?.close().catch(() => undefined);
+  });
+  globalSlotHost.__aidailyCoreClosing = closeTask;
+  await closeTask;
 }

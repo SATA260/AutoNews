@@ -28,11 +28,13 @@ export function PublishControls({
   limits: { titleMax: number; descMax: number; tagsMax: number };
 }) {
   const router = useRouter();
-  const [title, setTitle] = useState(draft?.title ?? publishRecord?.title ?? '');
-  const [description, setDescription] = useState(
-    draft?.description ?? publishRecord?.description ?? '',
-  );
-  const [tagsText, setTagsText] = useState((draft?.tags ?? publishRecord?.tags ?? []).join(', '));
+  const initialTitle = draft?.title ?? publishRecord?.title ?? '';
+  const initialDescription = draft?.description ?? publishRecord?.description ?? '';
+  const initialTagsText = (draft?.tags ?? publishRecord?.tags ?? []).join(', ');
+
+  const [title, setTitle] = useState(initialTitle);
+  const [description, setDescription] = useState(initialDescription);
+  const [tagsText, setTagsText] = useState(initialTagsText);
   const [rejectReason, setRejectReason] = useState('');
   const [bvidInput, setBvidInput] = useState('');
   const [feedback, setFeedback] = useState<{ ok: boolean; text: string } | null>(null);
@@ -49,6 +51,17 @@ export function PublishControls({
     ),
   );
   const canEdit = runStatus === 'awaiting_review' || runStatus === 'publish_failed';
+  const isDirty =
+    title !== initialTitle || description !== initialDescription || tagsText !== initialTagsText;
+
+  const buildDraftFormData = () => {
+    const fd = new FormData();
+    fd.set('runId', runId);
+    fd.set('title', title);
+    fd.set('description', description);
+    fd.set('tags', tagsText);
+    return fd;
+  };
 
   const runAction = (fn: () => Promise<{ ok: boolean; message?: string; error?: string }>) => {
     setFeedback(null);
@@ -62,14 +75,23 @@ export function PublishControls({
     });
   };
 
+  const runActionWithAutoSave = (
+    fn: () => Promise<{ ok: boolean; message?: string; error?: string }>,
+  ) => {
+    runAction(async () => {
+      if (isDirty) {
+        const saved = await updateDraftAction(buildDraftFormData());
+        if (!saved.ok) {
+          return saved;
+        }
+      }
+      return fn();
+    });
+  };
+
   const handleSaveDraft = (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault();
-    const fd = new FormData();
-    fd.set('runId', runId);
-    fd.set('title', title);
-    fd.set('description', description);
-    fd.set('tags', tagsText);
-    runAction(() => updateDraftAction(fd));
+    runAction(() => updateDraftAction(buildDraftFormData()));
   };
 
   return (
@@ -249,7 +271,7 @@ export function PublishControls({
                   onClick={() => {
                     const fd = new FormData();
                     fd.set('runId', runId);
-                    runAction(() => approvePublishAction(fd));
+                    runActionWithAutoSave(() => approvePublishAction(fd));
                   }}
                   className="rounded-lg bg-slate-900 px-4 py-2 text-xs font-medium text-white hover:bg-slate-800 disabled:opacity-50"
                 >
@@ -264,7 +286,7 @@ export function PublishControls({
                   onClick={() => {
                     const fd = new FormData();
                     fd.set('runId', runId);
-                    runAction(() => retryPublishAction(fd));
+                    runActionWithAutoSave(() => retryPublishAction(fd));
                   }}
                   className="rounded-lg bg-slate-900 px-4 py-2 text-xs font-medium text-white hover:bg-slate-800 disabled:opacity-50"
                 >
@@ -278,7 +300,7 @@ export function PublishControls({
                 onClick={() => {
                   const fd = new FormData();
                   fd.set('runId', runId);
-                  runAction(() => markConsumedAction(fd));
+                  runActionWithAutoSave(() => markConsumedAction(fd));
                 }}
                 className="rounded-lg border border-emerald-300 bg-emerald-50 px-4 py-2 text-xs font-medium text-emerald-800 hover:bg-emerald-100 disabled:opacity-50"
               >
