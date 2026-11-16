@@ -19,7 +19,7 @@ ai每日报/
 ├── templates/
 │   └── daily-deck/          # 独立前端视频模板项目（通过 window.__NEWS_DECK__ 对接渲染）
 ├── config/
-│   ├── settings.yaml        # 系统配置：模型路由、补抓策略、画质、发布限制与字体设置
+│   ├── settings.yaml        # 系统配置：模型路由、补抓策略、画质、发布限制、TTS 与通知接口
 │   └── sources.yaml         # 国内外主力与备用 AI 新闻信源清单
 ├── storage/                 # 运行期数据库（WAL SQLite）、文章正文、缓存与分期产物
 └── docs/                    # 业务流程、架构设计与技术实施文档
@@ -148,15 +148,15 @@ npm run web
 - `/settings`：分阶段模型路由切换、环境自检及补抓/模板/发布参数设置
 
 > **安全警告（务必遵守）**：
-> 本管理台未设账号密码与鉴权拦截，仅供本地信任环境使用。启动脚本与默认配置均强制绑定回环地址 `127.0.0.1:3000`；**严禁将服务监听地址修改为 `0.0.0.0` 或直接通过端口转发/反向代理暴露至公网**。
+> 本管理台未设账号密码与鉴权拦截，仅供本地信任环境使用。`apps/web/package.json` 中的启动脚本默认显式传入 `-H 127.0.0.1 -p 3000` 仅监听本机回环地址；**严禁将服务监听地址修改为 `0.0.0.0` 或直接通过端口转发/反向代理暴露至公网**。
 
 ---
 
 ## 中断恢复与状态待确认处理机制
 
-- **步骤检查点与文章预留**：任务在选定新闻后会立即将候选文章标记为 `reserved`，在失败、取消或进程异常终止时保留检查点（默认保留 48 小时，可配置），随后可通过 `resume` 从断点无缝继续。超过保留期限仍未恢复的任务会在后续启动巡检时转为 `abandoned` 并自动释放文章。
-- **从任意历史阶段重跑**：指定 `--from <stage>`（或在网页选择重跑阶段）时，系统自动把该阶段及其之后已产生的旧文件归档至 `storage/runs/<runId>/archive/attempt-<N>-<stage>/` 目录，防止新旧文件混杂污染成片。
-- **上传结果待确认保护**：若在 B 站上传阶段发生进程失联，或命令退出但未解析到有效 BV 号，系统会将任务置为 `publish_uncertain` 并**禁止自动重传**以防重复投稿。需先到 B 站创作平台核实，再执行 `publish-confirm --not-published` 解锁重传，或执行 `publish-confirm --bvid <BV号>` 补录结果并提交已播库。
+- **步骤检查点与文章预留**：任务在选定新闻后会立即将候选文章标记为 `reserved`，在 `failed`、`cancelled`、`interrupted` 或 `rejected` 状态下保留检查点与文章占用（保留时长由 `retry.reservationHoldHours` 控制，默认为 48 小时），随后可通过 `resume` 从断点无缝继续。超出保留期限仍未恢复的上述任务会在后续启动巡检时转为 `abandoned` 并释放占用的文章（旧文件仍留在运行目录内方便排查）；而 `publish_failed` 与 `publish_uncertain` 属于投稿阶段状态，分别通过 `publish-retry` 与 `publish-confirm` 处理，不会被自动放弃。
+- **从指定已完成阶段回退重跑**：通过 `retry-options` 可查看当前任务允许重跑的阶段清单（涵盖已完成阶段以及首个未完成阶段）；指定 `--from <stage>`（或在网页选择允许重跑的阶段）时，系统自动把该阶段及其之后已产生的旧文件归档至 `storage/runs/<runId>/archive/attempt-<N>-<stage>/` 目录，防止新旧文件混杂污染成片。
+- **上传结果待确认保护**：若在 `publishing` 期间上传进程意外崩溃/失联、上传调用超时或中止，或者上传命令退出码为 0 但未能解析出有效 BV 号，系统会将任务置为 `publish_uncertain` 并**禁止自动重传**以防重复投稿；若是发布准备阶段失败或命令明确报错退出（且无模糊状态），则进入 `publish_failed` 可执行 `publish-retry` 重传。遇到 `publish_uncertain` 需先到 B 站创作平台核实，再执行 `publish-confirm --not-published` 解锁重传，或执行 `publish-confirm --bvid <BV号>` 补录结果并提交已播库。
 
 ---
 
@@ -175,6 +175,6 @@ npm run format      # 使用 Biome 检查并整理代码格式
 npm run build       # 全量编译所有工作区包与 Next.js 应用
 npm run typecheck   # 全工作区 TypeScript 严格类型检查
 npm run lint        # Biome 静态规则检查（含分层导入限制）
-npm test            # 运行全部包与 Web 单元测试、故障演练测试
-npm run test:e2e    # 运行 core 集成与媒体渲染/QA 端到端测试
+npm test            # 运行全部 packages/* 与 apps/* 单元测试、路由测试与故障演练（templates/daily-deck 单独在子目录测试）
+npm run test:e2e    # 运行 @aidaily/core 下全套集成、媒体渲染及故障恢复测试（vitest run --project core）
 ```
