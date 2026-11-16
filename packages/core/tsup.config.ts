@@ -4,6 +4,8 @@ export default defineConfig([
   {
     entry: ['src/index.ts'],
     format: ['esm'],
+    platform: 'node',
+    removeNodeProtocol: false,
     dts: true,
     clean: true,
     sourcemap: true,
@@ -12,6 +14,8 @@ export default defineConfig([
   {
     entry: { worker: 'src/worker/main.ts' },
     format: ['esm'],
+    platform: 'node',
+    removeNodeProtocol: false,
     dts: false,
     clean: false,
     sourcemap: true,

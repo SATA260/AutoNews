@@ -1,15 +1,98 @@
+import fs from 'node:fs/promises';
+import path from 'node:path';
+import { type CallRecord, CliBridge } from '@aidaily/cli-bridge';
 import type { Settings, SourceDef } from '@aidaily/contracts';
+import { TtsService } from '@aidaily/tts';
 import type { Logger } from 'pino';
 import pino from 'pino';
 import { loadSettings, loadSources } from './config/loader.js';
 import { NoopNotifier, type Notifier } from './notify/index.js';
 import { findRepoRoot, type RepoPaths, resolveRepoPaths } from './paths.js';
 import { type DatabaseSync, openDatabase } from './storage/db.js';
-import { ensureDir, ensurePrivateDir } from './storage/files.js';
+import { ensureDir, ensurePrivateDir, writeJsonAtomic } from './storage/files.js';
 import { runMigrations } from './storage/migrate.js';
 import { createRepositories, type Repositories } from './storage/repos/index.js';
 
-/** 核心运行上下文，集中管理配置、数据库连接、数据读写对象、日志、时钟和通知能力 */
+/** 清洗用于文件名的安全标识片段 */
+function sanitizeLogToken(raw: string): string {
+  return raw.replace(/[^a-zA-Z0-9._-]/g, '_');
+}
+
+/** 扫描并初始化各期任务下模型调用记录文件的递增序号 */
+async function nextLlmSeqForRun(
+  llmDir: string,
+  seqCounters: Map<string, number>,
+  runId: string,
+): Promise<number> {
+  let curr = seqCounters.get(runId);
+  if (curr === undefined) {
+    curr = 0;
+    try {
+      const files = await fs.readdir(llmDir);
+      for (const name of files) {
+        const match = /^(\d+)-/.exec(name);
+        if (match?.[1]) {
+          const num = Number.parseInt(match[1], 10);
+          if (num > curr) {
+            curr = num;
+          }
+        }
+      }
+    } catch {
+      // 目录尚未创建时从 0 开始编号
+    }
+  }
+  const next = curr + 1;
+  seqCounters.set(runId, next);
+  return next;
+}
+
+/** 创建模型调用审计落盘回调：把完整提示词与原始输出存入文件，并在数据库写入调用索引 */
+function createLlmCallRecorder(
+  paths: RepoPaths,
+  repos: Repositories,
+): (record: CallRecord) => Promise<void> {
+  const seqCounters = new Map<string, number>();
+  let writeChain = Promise.resolve();
+
+  const writeRecord = async (record: CallRecord) => {
+    let relLogPath: string | null = null;
+    if (record.runId) {
+      const llmDir = path.join(paths.runDir(record.runId), 'llm');
+      const seq = await nextLlmSeqForRun(llmDir, seqCounters, record.runId);
+      const seqLabel = String(seq).padStart(4, '0');
+      const stagePart = sanitizeLogToken(record.stage ?? 'general');
+      const itemPart = record.itemId ? `-${sanitizeLogToken(record.itemId)}` : '';
+      const logFile = path.join(llmDir, `${seqLabel}-${stagePart}${itemPart}.json`);
+      await writeJsonAtomic(logFile, record);
+      relLogPath = path.relative(paths.rootDir, logFile);
+    }
+
+    repos.llmCalls.insert({
+      runId: record.runId ?? null,
+      stage: record.stage ?? null,
+      itemId: record.itemId ?? null,
+      cli: record.cli,
+      model: record.model ?? null,
+      attempt: record.attempt,
+      status: record.status,
+      durationMs: record.durationMs,
+      inputTokens: record.inputTokens ?? null,
+      outputTokens: record.outputTokens ?? null,
+      conversationId: record.conversationId ?? null,
+      logPath: relLogPath,
+      createdAt: record.createdAt,
+    });
+  };
+
+  return (record: CallRecord) => {
+    const next = writeChain.catch(() => undefined).then(() => writeRecord(record));
+    writeChain = next;
+    return next;
+  };
+}
+
+/** 核心运行上下文，集中管理配置、数据库连接、数据读写对象、外部调用接口、日志、时钟和通知能力 */
 export interface CoreContext {
   paths: RepoPaths;
   settings: Settings;
@@ -18,16 +101,22 @@ export interface CoreContext {
   repos: Repositories;
   logger: Logger;
   notifier: Notifier;
+  fetchImpl: typeof fetch;
+  bridge: CliBridge;
+  tts: TtsService;
   now: () => Date;
-  /** 从磁盘重新读取并校验运行配置和信源清单 */
+  /** 从磁盘重新读取并校验运行配置和信源清单（两份配置均通过校验后才替换内存引用） */
   reloadConfig: () => Promise<void>;
 }
 
-/** 初始化项目运行时环境：准备存储目录、加载校验配置、连接数据库并执行建表迁移 */
+/** 初始化项目运行时环境：准备存储目录、加载校验配置、连接数据库、执行建表迁移并装配外部能力适配器 */
 export async function createCoreContext(opts?: {
   rootDir?: string;
   notifier?: Notifier;
   logger?: Logger;
+  fetchImpl?: typeof fetch;
+  bridge?: CliBridge;
+  tts?: TtsService;
   now?: () => Date;
 }): Promise<CoreContext> {
   const rootDir = opts?.rootDir ?? findRepoRoot();
@@ -48,11 +137,32 @@ export async function createCoreContext(opts?: {
   let sources = await loadSources(paths.sourcesFile);
 
   const db = openDatabase(paths.dbFile);
-  runMigrations(db);
+  try {
+    runMigrations(db);
+  } catch (err) {
+    db.close();
+    throw err;
+  }
   const repos = createRepositories(db);
 
   const logger = opts?.logger ?? pino({ name: 'aidaily-core', level: 'info' });
   const notifier = opts?.notifier ?? new NoopNotifier();
+  const fetchImpl = opts?.fetchImpl ?? globalThis.fetch;
+  const bridge =
+    opts?.bridge ??
+    new CliBridge({
+      configs: settings.clis,
+      tmpDir: paths.tmpDir,
+      maxConcurrentCalls: settings.ai.maxConcurrentCalls,
+      logCall: createLlmCallRecorder(paths, repos),
+    });
+  const tts =
+    opts?.tts ??
+    new TtsService({
+      settings: settings.tts,
+      cacheDir: paths.ttsCacheDir,
+      bridge,
+    });
   const now = opts?.now ?? (() => new Date());
 
   const ctx: CoreContext = {
@@ -67,11 +177,18 @@ export async function createCoreContext(opts?: {
     repos,
     logger,
     notifier,
+    fetchImpl,
+    bridge,
+    tts,
     now,
-    /** 重新读取最新配置与信源列表并更新内存快照 */
+    /** 重新读取最新配置与信源列表，全部校验成功后原子更新内存快照 */
     async reloadConfig() {
-      settings = await loadSettings(paths.settingsFile);
-      sources = await loadSources(paths.sourcesFile);
+      const [nextSettings, nextSources] = await Promise.all([
+        loadSettings(paths.settingsFile),
+        loadSources(paths.sourcesFile),
+      ]);
+      settings = nextSettings;
+      sources = nextSources;
     },
   };
 
