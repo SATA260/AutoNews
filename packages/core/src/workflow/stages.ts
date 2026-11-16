@@ -1,5 +1,11 @@
 import path from 'node:path';
-import type { ContentLimits, PIPELINE_STAGES, Settings } from '@aidaily/contracts';
+import {
+  type ContentLimits,
+  type PIPELINE_STAGES,
+  type Settings,
+  type Timeline,
+  TimelineSchema,
+} from '@aidaily/contracts';
 import { collectSources } from '../collector/index.js';
 import type { CoreContext } from '../context.js';
 import {
@@ -8,9 +14,11 @@ import {
   runPackageStage,
   runSelectStage,
 } from '../editorial/index.js';
-import { PipelineError } from '../errors.js';
+import { runRenderStage } from '../media/compositor.js';
 import { runNarrateStage } from '../media/narration.js';
+import { runQaStage } from '../media/qa.js';
 import { readJsonOrNull } from '../storage/files.js';
+import { resolveEffectiveContentLimits } from '../templates/registry.js';
 
 /** 自动化流程中按顺序执行的步骤名称类型 */
 export type PipelineStage = (typeof PIPELINE_STAGES)[number];
@@ -37,6 +45,7 @@ export const STAGE_ARTIFACTS: Record<PipelineStage, readonly string[]> = {
   render: [
     'stages/render.json',
     'template-data.json',
+    'assets',
     'frames',
     'output/video.mp4',
     'output/cover.jpg',
@@ -69,12 +78,14 @@ export const DEFAULT_STAGE_EXECUTORS: Record<PipelineStage, StageExecutor> = {
 
   /** 并发执行新闻总结、口播润色、规则预检与独立事实核查 */
   async edit({ ctx, runId, settings, signal, limitsOverride }) {
-    return runEditStage(ctx, runId, settings, { signal, limitsOverride });
+    const effectiveLimits = resolveEffectiveContentLimits(ctx, settings, limitsOverride);
+    return runEditStage(ctx, runId, settings, { signal, limitsOverride: effectiveLimits });
   },
 
   /** 编排播出顺序、生成开场白、结尾互动及投稿标题简介 */
   async package({ ctx, runId, settings, signal, limitsOverride }) {
-    return runPackageStage(ctx, runId, settings, { signal, limitsOverride });
+    const effectiveLimits = resolveEffectiveContentLimits(ctx, settings, limitsOverride);
+    return runPackageStage(ctx, runId, settings, { signal, limitsOverride: effectiveLimits });
   },
 
   /** 调用语音合成并生成整期视频时间轴 */
@@ -94,13 +105,44 @@ export const DEFAULT_STAGE_EXECUTORS: Record<PipelineStage, StageExecutor> = {
     return checkpoint;
   },
 
-  /** 视频画面合成渲染默认占位（后续由视频合成器接入） */
-  async render() {
-    throw new PipelineError('render_failed', '尚未注入视频合成与画面渲染执行器');
+  /** 调用前端视觉模板截图并合成带响度均衡音轨的高清成片与封面图 */
+  async render({ ctx, runId, settings, signal }) {
+    const runDir = ctx.paths.runDir(runId);
+    const pkgCheckpoint = await readJsonOrNull<PackageCheckpoint>(
+      path.join(runDir, STAGE_CHECKPOINT_REL_PATH.package),
+    );
+    if (!pkgCheckpoint?.packageData) {
+      throw new Error(`任务 ${runId} 缺少整期编排检查点，无法开始视频渲染`);
+    }
+    const rawTimeline = await readJsonOrNull<Timeline>(path.join(runDir, 'timeline.json'));
+    const parsedTimeline = TimelineSchema.safeParse(rawTimeline);
+    if (!parsedTimeline.success) {
+      throw new Error(`任务 ${runId} 缺少合法的时间轴文件，无法开始视频渲染`);
+    }
+    return runRenderStage({
+      ctx,
+      runId,
+      settings,
+      packageData: pkgCheckpoint.packageData,
+      timeline: parsedTimeline.data,
+      signal,
+    });
   },
 
-  /** 成片音画质量检查默认占位（后续由质检模块接入） */
-  async qa() {
-    throw new PipelineError('qa_failed', '尚未注入成片质量检查执行器');
+  /** 对合成的成片视频执行自动化音画参数、时长同步与空白画面检查 */
+  async qa({ ctx, runId, settings, signal }) {
+    const runDir = ctx.paths.runDir(runId);
+    const rawTimeline = await readJsonOrNull<Timeline>(path.join(runDir, 'timeline.json'));
+    const parsedTimeline = TimelineSchema.safeParse(rawTimeline);
+    if (!parsedTimeline.success) {
+      throw new Error(`任务 ${runId} 缺少合法的时间轴文件，无法执行成片质检`);
+    }
+    return runQaStage({
+      ctx,
+      runId,
+      settings,
+      timeline: parsedTimeline.data,
+      signal,
+    });
   },
 };

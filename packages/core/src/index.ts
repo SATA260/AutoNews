@@ -22,6 +22,7 @@ export * from './storage/db.js';
 export * from './storage/files.js';
 export * from './storage/migrate.js';
 export * from './storage/repos/index.js';
+export * from './templates/index.js';
 export * from './workflow/index.js';
 
 /** 对命令行和网页后台暴露的核心业务引擎实例 */
