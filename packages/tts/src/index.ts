@@ -1,5 +1,6 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import type { CliBridge } from '@aidaily/cli-bridge';
 import type { NarrationSection, SectionAudio, TtsSettings } from '@aidaily/contracts';
 import { concatSentenceWavs, normalizeSegmentToWav, probeAudioDurationMs } from './audio.js';
 import { computeTtsCacheKey, saveToCache, tryRestoreFromCache } from './cache.js';
@@ -13,10 +14,13 @@ export * from './cache.js';
 export * from './providers/silent.js';
 export * from './types.js';
 
+const SAFE_SECTION_KEY_PATTERN = /^[a-zA-Z0-9_-]+$/;
+
 /**
  * 语音合成统一调度服务：管理多种语音引擎的注册与切换、单句缓存、音频标准化与句间拼接。
  */
 export class TtsService {
+  readonly bridge?: CliBridge;
   private readonly settings: TtsSettings;
   private readonly cacheDir: string;
   private readonly ffmpegBin: string;
@@ -26,6 +30,7 @@ export class TtsService {
   constructor(opts: TtsServiceOptions) {
     this.settings = opts.settings;
     this.cacheDir = opts.cacheDir;
+    this.bridge = opts.bridge;
     this.ffmpegBin = opts.ffmpegBin ?? 'ffmpeg';
     this.ffprobeBin = opts.ffprobeBin ?? 'ffprobe';
 
@@ -73,13 +78,27 @@ export class TtsService {
     outDir: string,
     signal?: AbortSignal,
   ): Promise<SectionAudio[]> {
+    const seenKeys = new Set<string>();
+    for (const section of sections) {
+      if (!SAFE_SECTION_KEY_PATTERN.test(section.key)) {
+        throw new Error(`非法的口播段落标识: ${section.key}`);
+      }
+      if (seenKeys.has(section.key)) {
+        throw new Error(`存在重复的口播段落标识: ${section.key}`);
+      }
+      seenKeys.add(section.key);
+    }
+
     const provider = this.getActiveProvider();
     const providerConfig = this.settings.providers[provider.id] ?? {};
     const { sampleRate, trimSilence, sentenceGapMs } = this.settings.postprocess;
+    const resolvedOutDir = path.resolve(outDir);
 
-    await fs.mkdir(outDir, { recursive: true });
+    await fs.mkdir(resolvedOutDir, { recursive: true });
     await provider.start?.();
 
+    let primaryError: unknown;
+    let stopError: unknown;
     const results: SectionAudio[] = [];
     try {
       for (const section of sections) {
@@ -87,7 +106,10 @@ export class TtsService {
           throw new DOMException('已取消', 'AbortError');
         }
 
-        const sectionDir = path.join(outDir, section.key);
+        const sectionDir = path.resolve(resolvedOutDir, section.key);
+        if (!sectionDir.startsWith(`${resolvedOutDir}${path.sep}`)) {
+          throw new Error(`段落目录越界: ${section.key}`);
+        }
         await fs.mkdir(sectionDir, { recursive: true });
 
         const segmentFiles: string[] = [];
@@ -105,8 +127,21 @@ export class TtsService {
             text,
           );
 
+          let durationMs: number | null = null;
           const cacheHit = await tryRestoreFromCache(this.cacheDir, cacheKey, normFile);
-          if (!cacheHit) {
+          if (cacheHit) {
+            try {
+              durationMs = await probeAudioDurationMs(normFile, this.ffprobeBin, signal);
+            } catch {
+              // 缓存文件损坏时删除失效缓存并回退到重新合成
+              await fs
+                .rm(path.join(this.cacheDir, `${cacheKey}.wav`), { force: true })
+                .catch(() => undefined);
+              await fs.rm(normFile, { force: true }).catch(() => undefined);
+            }
+          }
+
+          if (durationMs === null) {
             await provider.synthesize({ text, outFile: rawFile, signal });
             await normalizeSegmentToWav({
               inFile: rawFile,
@@ -120,14 +155,14 @@ export class TtsService {
             });
             await fs.rm(rawFile, { force: true }).catch(() => undefined);
             await saveToCache(this.cacheDir, cacheKey, normFile);
+            durationMs = await probeAudioDurationMs(normFile, this.ffprobeBin, signal);
           }
 
-          const durationMs = await probeAudioDurationMs(normFile, this.ffprobeBin, signal);
           segmentFiles.push(normFile);
           sentenceDurationsMs.push(durationMs);
         }
 
-        const sectionFile = path.join(outDir, `${section.key}.wav`);
+        const sectionFile = path.resolve(resolvedOutDir, `${section.key}.wav`);
         const concatResult = await concatSentenceWavs({
           segmentFiles,
           sentenceDurationsMs,
@@ -150,10 +185,21 @@ export class TtsService {
           })),
         });
       }
-      return results;
+    } catch (err) {
+      primaryError = err;
+      throw err;
     } finally {
-      await provider.stop?.();
+      try {
+        await provider.stop?.();
+      } catch (err) {
+        stopError = err;
+      }
     }
+
+    if (stopError !== undefined && primaryError === undefined) {
+      throw stopError;
+    }
+    return results;
   }
 
   /** 用当前配置的语音引擎合成一段试听音频文件 */
@@ -163,6 +209,8 @@ export class TtsService {
     const rawFile = path.join(path.dirname(outFile), `raw-${path.basename(outFile)}`);
 
     await provider.start?.();
+    let primaryError: unknown;
+    let stopError: unknown;
     try {
       await provider.synthesize({ text, outFile: rawFile });
       await normalizeSegmentToWav({
@@ -174,9 +222,20 @@ export class TtsService {
         ffmpegBin: this.ffmpegBin,
         ffprobeBin: this.ffprobeBin,
       });
+    } catch (err) {
+      primaryError = err;
+      throw err;
     } finally {
       await fs.rm(rawFile, { force: true }).catch(() => undefined);
-      await provider.stop?.();
+      try {
+        await provider.stop?.();
+      } catch (err) {
+        stopError = err;
+      }
+    }
+
+    if (stopError !== undefined && primaryError === undefined) {
+      throw stopError;
     }
   }
 }

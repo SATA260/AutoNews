@@ -1,6 +1,7 @@
 import React, { useEffect, useId, useState } from 'react';
 import { mediaReadyTracker } from '../../utils/mediaReadyTracker';
 
+/** 媒体安全加载组件的入参属性 */
 interface SafeMediaProps {
   src: string | null | undefined;
   alt: string;
@@ -12,6 +13,7 @@ interface SafeMediaProps {
 
 const VIDEO_EXTENSION_RE = /\.(webm|mp4|mov)(\?.*)?$/i;
 
+/** 安全媒体加载器：统一处理图片与循环视频的加载状态，失败时无感切换为降级内容 */
 export const SafeMedia: React.FC<SafeMediaProps> = ({
   src,
   alt,

@@ -88,6 +88,9 @@ button {
 
 /* Editorial Top Masthead */
 .deck-header {
+  position: relative;
+  z-index: 12;
+  background-color: var(--paper);
   height: 60px;
   flex-shrink: 0;
   display: flex;
@@ -176,40 +179,446 @@ button {
   font-size: 28px;
 }
 
-/* Main Slide Body */
+/* Main Slide Body & Dual-Sheet 3D Page-Turn Stage */
 .deck-slide-body {
   flex: 1;
   min-height: 0;
+  position: relative;
+  overflow: visible;
+}
+
+.page-turn-stage {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  perspective: 2600px;
+  perspective-origin: 48% 50%;
+  transform-style: preserve-3d;
+}
+
+.page-sheet {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  background-color: var(--paper);
+  backface-visibility: hidden;
+  will-change: transform, opacity;
+}
+
+.page-sheet-inner {
+  width: 100%;
+  height: 100%;
   overflow: hidden;
 }
 
-.anim-slide-next {
-  animation: deckSlideNext 0.3s cubic-bezier(0.22, 1, 0.36, 1) both;
+.page-sheet.is-exiting .page-sheet-inner,
+.page-sheet.is-exiting .page-sheet-inner * {
+  animation: none !important;
 }
 
-.anim-slide-prev {
-  animation: deckSlidePrev 0.3s cubic-bezier(0.22, 1, 0.36, 1) both;
+.page-curl-sheen,
+.page-enter-sheen,
+.page-enter-shadow,
+.page-exit-dim {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  opacity: 0;
 }
 
-@keyframes deckSlideNext {
-  from {
-    opacity: 0;
-    transform: translateX(28px);
+/* Mode 1: Tactile 3D Editorial Book Flip */
+.book-spine-shadow {
+  position: absolute;
+  left: -14px;
+  top: 0;
+  bottom: 0;
+  width: 28px;
+  background: linear-gradient(90deg, rgba(20, 20, 19, 0.14), transparent);
+  z-index: 6;
+  pointer-events: none;
+}
+
+[data-theme='dark'] .book-spine-shadow {
+  background: linear-gradient(90deg, rgba(0, 0, 0, 0.45), transparent);
+}
+
+.mode-flip.dir-next .page-sheet.is-exiting {
+  z-index: 4;
+  transform-origin: 0% 50%;
+  animation: flipSheetOutNext 0.7s cubic-bezier(0.32, 0.04, 0.22, 1) forwards;
+}
+
+.mode-flip.dir-next .page-curl-sheen {
+  background: linear-gradient(
+    96deg,
+    rgba(0, 0, 0, 0.12) 0%,
+    rgba(255, 255, 255, 0.56) 28%,
+    rgba(255, 255, 255, 0.08) 58%,
+    rgba(0, 0, 0, 0.16) 100%
+  );
+  animation: sheetSheenSweep 0.7s ease-out forwards;
+}
+
+[data-theme='dark'] .mode-flip.dir-next .page-curl-sheen {
+  background: linear-gradient(
+    96deg,
+    rgba(0, 0, 0, 0.35) 0%,
+    rgba(255, 255, 255, 0.14) 30%,
+    rgba(0, 0, 0, 0.12) 60%,
+    rgba(0, 0, 0, 0.45) 100%
+  );
+}
+
+.mode-flip.dir-next .page-sheet.is-entering {
+  z-index: 2;
+  animation: flipRevealUnderNext 0.7s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+.mode-flip.dir-next .page-enter-shadow {
+  background: linear-gradient(90deg, rgba(20, 20, 19, 0.28) 0%, rgba(20, 20, 19, 0.08) 45%, transparent 80%);
+  animation: underShadowPeel 0.68s cubic-bezier(0.22, 1, 0.36, 1) forwards;
+}
+
+.mode-flip.dir-prev .page-sheet.is-entering {
+  z-index: 4;
+  transform-origin: 0% 50%;
+  animation: flipSheetInPrev 0.7s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+.mode-flip.dir-prev .page-enter-sheen {
+  background: linear-gradient(
+    96deg,
+    rgba(0, 0, 0, 0.1) 0%,
+    rgba(255, 255, 255, 0.48) 32%,
+    rgba(255, 255, 255, 0.04) 68%,
+    rgba(0, 0, 0, 0.12) 100%
+  );
+  animation: sheetSheenFade 0.7s ease-out forwards;
+}
+
+[data-theme='dark'] .mode-flip.dir-prev .page-enter-sheen {
+  background: linear-gradient(
+    96deg,
+    rgba(0, 0, 0, 0.3) 0%,
+    rgba(255, 255, 255, 0.12) 32%,
+    rgba(0, 0, 0, 0.35) 100%
+  );
+}
+
+.mode-flip.dir-prev .page-sheet.is-exiting {
+  z-index: 2;
+  animation: flipRecedeUnderPrev 0.7s cubic-bezier(0.22, 1, 0.36, 1) forwards;
+}
+
+.mode-flip.dir-prev .page-exit-dim {
+  background: #000000;
+  animation: exitDimIn 0.7s ease-out forwards;
+}
+
+@keyframes flipSheetOutNext {
+  0% {
+    transform: rotateY(0deg) skewY(0deg);
+    opacity: 1;
+    box-shadow: 12px 0 32px rgba(0, 0, 0, 0.05);
   }
-  to {
+  52% {
+    transform: rotateY(-56deg) skewY(1.3deg);
+    opacity: 1;
+    box-shadow: 44px 12px 72px rgba(0, 0, 0, 0.22);
+  }
+  84% {
+    opacity: 0.92;
+  }
+  100% {
+    transform: rotateY(-95deg) skewY(1.9deg);
+    opacity: 0;
+    box-shadow: 8px 0 20px rgba(0, 0, 0, 0);
+  }
+}
+
+@keyframes flipRevealUnderNext {
+  0% {
+    transform: translate3d(26px, 0, -64px) scale(0.984);
+  }
+  100% {
+    transform: translate3d(0, 0, 0) scale(1);
+  }
+}
+
+@keyframes flipSheetInPrev {
+  0% {
+    transform: rotateY(-92deg) skewY(1.7deg);
+    opacity: 0.15;
+    box-shadow: 40px 12px 68px rgba(0, 0, 0, 0.24);
+  }
+  25% {
+    opacity: 1;
+  }
+  100% {
+    transform: rotateY(0deg) skewY(0deg);
+    opacity: 1;
+    box-shadow: 0 0 0 rgba(0, 0, 0, 0);
+  }
+}
+
+@keyframes flipRecedeUnderPrev {
+  0% {
+    transform: translate3d(0, 0, 0) scale(1);
+  }
+  100% {
+    transform: translate3d(24px, 0, -56px) scale(0.984);
+  }
+}
+
+@keyframes sheetSheenSweep {
+  0% {
+    opacity: 0;
+  }
+  35% {
+    opacity: 0.9;
+  }
+  100% {
+    opacity: 0.2;
+  }
+}
+
+@keyframes sheetSheenFade {
+  0% {
+    opacity: 0.85;
+  }
+  100% {
+    opacity: 0;
+  }
+}
+
+@keyframes underShadowPeel {
+  0% {
+    opacity: 0.9;
+  }
+  100% {
+    opacity: 0;
+  }
+}
+
+@keyframes exitDimIn {
+  0% {
+    opacity: 0;
+  }
+  100% {
+    opacity: 0.18;
+  }
+}
+
+/* Mode 2: Parallax Editorial Stack Glide */
+.mode-glide.dir-next .page-sheet.is-entering {
+  z-index: 4;
+  box-shadow: -28px 0 64px rgba(0, 0, 0, 0.18);
+  animation: glideInNext 0.64s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+.mode-glide.dir-next .page-sheet.is-exiting {
+  z-index: 2;
+  animation: glideOutNext 0.64s cubic-bezier(0.22, 1, 0.36, 1) forwards;
+}
+
+.mode-glide.dir-prev .page-sheet.is-entering {
+  z-index: 4;
+  box-shadow: 28px 0 64px rgba(0, 0, 0, 0.18);
+  animation: glideInPrev 0.64s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+.mode-glide.dir-prev .page-sheet.is-exiting {
+  z-index: 2;
+  animation: glideOutPrev 0.64s cubic-bezier(0.22, 1, 0.36, 1) forwards;
+}
+
+.mode-glide .page-exit-dim {
+  background: #000000;
+  animation: exitDimIn 0.64s ease-out forwards;
+}
+
+@keyframes glideInNext {
+  0% {
+    transform: translate3d(102%, 0, 0);
+  }
+  100% {
+    transform: translate3d(0, 0, 0);
+  }
+}
+
+@keyframes glideOutNext {
+  0% {
+    transform: translate3d(0, 0, 0) scale(1);
+  }
+  100% {
+    transform: translate3d(-22%, 0, 0) scale(0.96);
+  }
+}
+
+@keyframes glideInPrev {
+  0% {
+    transform: translate3d(-102%, 0, 0);
+  }
+  100% {
+    transform: translate3d(0, 0, 0);
+  }
+}
+
+@keyframes glideOutPrev {
+  0% {
+    transform: translate3d(0, 0, 0) scale(1);
+  }
+  100% {
+    transform: translate3d(22%, 0, 0) scale(0.96);
+  }
+}
+
+/* Mode 3: Editorial Shutter Wipe */
+.mode-shutter.dir-next .page-sheet.is-entering {
+  z-index: 4;
+  animation: shutterInNext 0.58s cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+.mode-shutter.dir-next .page-sheet.is-exiting {
+  z-index: 2;
+  animation: shutterOutNext 0.58s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
+
+.mode-shutter.dir-prev .page-sheet.is-entering {
+  z-index: 4;
+  animation: shutterInPrev 0.58s cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+.mode-shutter.dir-prev .page-sheet.is-exiting {
+  z-index: 2;
+  animation: shutterOutPrev 0.58s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
+
+.mode-shutter .page-exit-dim {
+  background: #000000;
+  animation: exitDimIn 0.58s ease-out forwards;
+}
+
+@keyframes shutterInNext {
+  0% {
+    clip-path: inset(0 0 0 100%);
+    transform: scale(1.022);
+  }
+  100% {
+    clip-path: inset(0 0 0 0);
+    transform: scale(1);
+  }
+}
+
+@keyframes shutterOutNext {
+  0% {
+    transform: translate3d(0, 0, 0);
+  }
+  100% {
+    transform: translate3d(-6%, 0, 0);
+  }
+}
+
+@keyframes shutterInPrev {
+  0% {
+    clip-path: inset(0 100% 0 0);
+    transform: scale(1.022);
+  }
+  100% {
+    clip-path: inset(0 0 0 0);
+    transform: scale(1);
+  }
+}
+
+@keyframes shutterOutPrev {
+  0% {
+    transform: translate3d(0, 0, 0);
+  }
+  100% {
+    transform: translate3d(6%, 0, 0);
+  }
+}
+
+/* Staggered Internal Choreography on Active Sheet */
+[data-motion='animated'] .page-turn-stage:not(.mode-none) .page-sheet.is-active .news-kicker,
+[data-motion='animated'] .page-turn-stage:not(.mode-none) .page-sheet.is-active .cover-eyebrow,
+[data-motion='animated'] .page-turn-stage:not(.mode-none) .page-sheet.is-active .outro-eyebrow {
+  animation: choreoFadeUp 0.46s cubic-bezier(0.22, 1, 0.36, 1) 0.08s both;
+}
+
+[data-motion='animated'] .page-turn-stage:not(.mode-none) .page-sheet.is-active .news-editorial-title,
+[data-motion='animated'] .page-turn-stage:not(.mode-none) .page-sheet.is-active .cover-display-title,
+[data-motion='animated'] .page-turn-stage:not(.mode-none) .page-sheet.is-active .outro-heading {
+  animation: choreoFadeUp 0.52s cubic-bezier(0.22, 1, 0.36, 1) 0.13s both;
+}
+
+[data-motion='animated'] .page-turn-stage:not(.mode-none) .page-sheet.is-active .news-rule,
+[data-motion='animated'] .page-turn-stage:not(.mode-none) .page-sheet.is-active .editorial-rule-short,
+[data-motion='animated'] .page-turn-stage:not(.mode-none) .page-sheet.is-active .cover-agenda-header,
+[data-motion='animated'] .page-turn-stage:not(.mode-none) .page-sheet.is-active .outro-top-bar {
+  transform-origin: left center;
+  animation: choreoDrawLine 0.56s cubic-bezier(0.16, 1, 0.3, 1) 0.16s both;
+}
+
+[data-motion='animated'] .page-turn-stage:not(.mode-none) .page-sheet.is-active .news-synopsis-text,
+[data-motion='animated'] .page-turn-stage:not(.mode-none) .page-sheet.is-active .cover-focus-line {
+  animation: choreoFadeUp 0.52s cubic-bezier(0.22, 1, 0.36, 1) 0.2s both;
+}
+
+[data-motion='animated'] .page-turn-stage:not(.mode-none) .page-sheet.is-active .news-keypoint-item,
+[data-motion='animated'] .page-turn-stage:not(.mode-none) .page-sheet.is-active .agenda-row,
+[data-motion='animated'] .page-turn-stage:not(.mode-none) .page-sheet.is-active .outro-row,
+[data-motion='animated'] .page-turn-stage:not(.mode-none) .page-sheet.is-active .excerpt-spec-row {
+  animation: choreoRowSlide 0.48s cubic-bezier(0.22, 1, 0.36, 1) calc(0.2s + var(--row-idx, 0) * 0.055s) both;
+}
+
+[data-motion='animated'] .page-turn-stage:not(.mode-none) .page-sheet.is-active .official-plate-figure,
+[data-motion='animated'] .page-turn-stage:not(.mode-none) .page-sheet.is-active .official-excerpt-sheet {
+  animation: choreoPlateFocus 0.58s cubic-bezier(0.22, 1, 0.36, 1) 0.15s both;
+}
+
+@keyframes choreoFadeUp {
+  0% {
+    opacity: 0;
+    transform: translateY(14px);
+  }
+  100% {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes choreoDrawLine {
+  0% {
+    opacity: 0;
+    transform: scaleX(0.06);
+  }
+  100% {
+    opacity: 1;
+    transform: scaleX(1);
+  }
+}
+
+@keyframes choreoRowSlide {
+  0% {
+    opacity: 0;
+    transform: translateX(14px);
+  }
+  100% {
     opacity: 1;
     transform: translateX(0);
   }
 }
 
-@keyframes deckSlidePrev {
-  from {
+@keyframes choreoPlateFocus {
+  0% {
     opacity: 0;
-    transform: translateX(-28px);
+    transform: translateY(18px) scale(0.982);
   }
-  to {
+  100% {
     opacity: 1;
-    transform: translateX(0);
+    transform: translateY(0) scale(1);
   }
 }
 
@@ -757,6 +1166,28 @@ button {
   justify-content: flex-end;
 }
 
+.corner-mascot-entry {
+  width: 100%;
+  height: 100%;
+  transform-origin: bottom right;
+  animation: mascotSpringIn 0.46s cubic-bezier(0.34, 1.42, 0.64, 1) both;
+}
+
+[data-motion='static'] .corner-mascot-entry {
+  animation: none;
+}
+
+@keyframes mascotSpringIn {
+  0% {
+    opacity: 0;
+    transform: translateY(20px) scale(0.92);
+  }
+  100% {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
 .corner-mascot-float {
   width: 100%;
   height: 100%;
@@ -857,10 +1288,14 @@ button {
   left: 50%;
   transform: translateX(-50%);
   z-index: 40;
+  width: max-content;
+  max-width: calc(100vw - 24px);
+  overflow-x: auto;
+  white-space: nowrap;
   display: flex;
   align-items: center;
-  gap: 10px;
-  padding: 8px 14px;
+  gap: 8px;
+  padding: 7px 14px;
   border-radius: 99px;
   background: rgba(15, 23, 42, 0.9);
   border: 1px solid rgba(148, 163, 184, 0.28);
@@ -873,25 +1308,29 @@ button {
   display: flex;
   align-items: center;
   gap: 6px;
+  flex-shrink: 0;
 }
 
 .controls-divider {
   width: 1px;
   height: 20px;
   background: rgba(148, 163, 184, 0.3);
+  flex-shrink: 0;
 }
 
 .ctrl-btn {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  padding: 7px 12px;
+  padding: 6px 11px;
   border-radius: 99px;
   border: 1px solid transparent;
   background: rgba(255, 255, 255, 0.08);
   color: #f8fafc;
   font-size: 13px;
   font-weight: 600;
+  white-space: nowrap;
+  flex-shrink: 0;
 }
 
 .ctrl-btn:hover:not(:disabled) {
@@ -919,17 +1358,21 @@ button {
   font-weight: 700;
   padding: 0 6px;
   color: #e2e8f0;
+  white-space: nowrap;
+  flex-shrink: 0;
 }
 
 .ctrl-health-pill {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  padding: 7px 12px;
+  padding: 6px 11px;
   border-radius: 99px;
   border: 1px solid;
   font-size: 13px;
   font-weight: 700;
+  white-space: nowrap;
+  flex-shrink: 0;
 }
 
 .ctrl-health-pill.is-ok {

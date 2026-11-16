@@ -1,5 +1,6 @@
 import type { PresetMascotId } from '../schema/newsSchema';
 
+/** 单个角色形象的显示名称、缩写与图片路径定义 */
 export interface MascotProfile {
   id: PresetMascotId;
   name: string;
@@ -7,6 +8,7 @@ export interface MascotProfile {
   assetUrl: string | null;
 }
 
+/** 模板内置的 AI 角色立绘注册表 */
 export const MASCOT_REGISTRY: Record<PresetMascotId, MascotProfile> = {
   deepseek: {
     id: 'deepseek',
@@ -46,6 +48,7 @@ export const MASCOT_REGISTRY: Record<PresetMascotId, MascotProfile> = {
   },
 };
 
+/** 根据角色标识读取形象资料，未找到时默认回退到 DeepSeek 娘 */
 export function getMascotProfile(id: PresetMascotId): MascotProfile {
   return MASCOT_REGISTRY[id] ?? MASCOT_REGISTRY.deepseek;
 }

@@ -1,14 +1,18 @@
 import React, { useEffect, useRef, useState } from 'react';
 
+/** 画布逻辑基准宽度（像素） */
 export const STAGE_WIDTH = 1920;
+/** 画布逻辑基准高度（像素） */
 export const STAGE_HEIGHT = 1080;
 
+/** 固定比例缩放容器的入参属性 */
 interface ViewportScalerProps {
   children: React.ReactNode;
   theme?: 'light' | 'dark';
   motion?: 'animated' | 'static';
 }
 
+/** 固定比例缩放容器：将内部 1920×1080 版面按浏览器视口等比缩放并居中显示 */
 export const ViewportScaler: React.FC<ViewportScalerProps> = ({
   children,
   theme = 'light',

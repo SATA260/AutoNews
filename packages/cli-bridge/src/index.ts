@@ -153,9 +153,6 @@ export class CliBridge {
         throw new DOMException('已取消', 'AbortError');
       }
 
-      const workDir = path.join(this.tmpDir, 'cli-bridge', crypto.randomUUID());
-      await fs.mkdir(workDir, { recursive: true });
-
       let rawStdout = '';
       let rawStderr = '';
       let commandArgs: string[] = [];
@@ -164,49 +161,55 @@ export class CliBridge {
 
       try {
         const result = await sem.run(async () => {
-          const attemptReq: InvokeRequest<unknown> = {
-            ...req,
-            prompt: currentPrompt,
-          };
-          const cmd = await adapter.buildCommand(attemptReq, cfg, workDir);
-          commandArgs = cmd.args;
+          const workDir = path.join(this.tmpDir, 'cli-bridge', crypto.randomUUID());
+          await fs.mkdir(workDir, { recursive: true });
+          try {
+            const attemptReq: InvokeRequest<unknown> = {
+              ...req,
+              prompt: currentPrompt,
+            };
+            const cmd = await adapter.buildCommand(attemptReq, cfg, workDir);
+            commandArgs = cmd.args;
 
-          const execRes = await runSubprocess(cmd.bin, cmd.args, {
-            cwd: workDir,
-            env: cmd.env,
-            stdin: cmd.stdin,
-            timeoutMs: req.timeoutMs,
-            signal: req.signal,
-            stdio: 'pipe',
-          });
+            const execRes = await runSubprocess(cmd.bin, cmd.args, {
+              cwd: workDir,
+              env: cmd.env,
+              stdin: cmd.stdin,
+              timeoutMs: req.timeoutMs,
+              signal: req.signal,
+              stdio: 'pipe',
+            });
 
-          rawStdout = execRes.stdout;
-          rawStderr = execRes.stderr;
-          callDurationMs = execRes.durationMs;
+            rawStderr = execRes.stderr;
+            callDurationMs = execRes.durationMs;
 
-          let outFileContent: string | undefined;
-          if (cmd.outFile) {
-            outFileContent = await fs.readFile(cmd.outFile, 'utf8').catch(() => undefined);
+            let outFileContent: string | undefined;
+            if (cmd.outFile) {
+              outFileContent = await fs.readFile(cmd.outFile, 'utf8').catch(() => undefined);
+            }
+            rawStdout = outFileContent ?? execRes.stdout;
+
+            const parsedOut = adapter.parse(execRes.stdout, execRes.stderr, execRes.exitCode, {
+              hasSchema: Boolean(req.schema),
+              outFileContent,
+            });
+
+            const validatedData = req.schema
+              ? validateWithSchema(parsedOut.payload, req.schema, rawStdout)
+              : (parsedOut.payload as T);
+
+            return {
+              data: validatedData,
+              usage: parsedOut.usage,
+              conversationId: parsedOut.conversationId,
+            };
+          } finally {
+            await fs.rm(workDir, { recursive: true, force: true }).catch(() => undefined);
           }
-
-          const parsedOut = adapter.parse(execRes.stdout, execRes.stderr, execRes.exitCode, {
-            hasSchema: Boolean(req.schema),
-            outFileContent,
-          });
-
-          const validatedData = req.schema
-            ? validateWithSchema(parsedOut.payload, req.schema, execRes.stdout)
-            : (parsedOut.payload as T);
-
-          return {
-            data: validatedData,
-            usage: parsedOut.usage,
-            conversationId: parsedOut.conversationId,
-          };
-        });
+        }, req.signal);
 
         totalDurationMs += callDurationMs;
-        await this.logCall?.({
+        await this.safeLogCall({
           runId: req.meta?.runId,
           stage: req.meta?.stage,
           itemId: req.meta?.itemId,
@@ -239,7 +242,7 @@ export class CliBridge {
         totalDurationMs += elapsed;
 
         if (!(err instanceof Error && err.name === 'AbortError')) {
-          await this.logCall?.({
+          await this.safeLogCall({
             runId: req.meta?.runId,
             stage: req.meta?.stage,
             itemId: req.meta?.itemId,
@@ -269,12 +272,22 @@ export class CliBridge {
         const delay =
           this.retryDelaysMs[Math.min(attempt - 1, this.retryDelaysMs.length - 1)] ?? 2000;
         await sleepWithAbort(delay, req.signal);
-      } finally {
-        await fs.rm(workDir, { recursive: true, force: true }).catch(() => undefined);
       }
     }
 
     throw new Error('invoke 循环意外结束');
+  }
+
+  /** 安全写入调用审计日志，防止日志落盘失败影响已完成的模型调用主结果 */
+  private async safeLogCall(record: CallRecord): Promise<void> {
+    if (!this.logCall) {
+      return;
+    }
+    try {
+      await this.logCall(record);
+    } catch {
+      // 日志回调异常不应吞掉或改写模型调用本身的状态
+    }
   }
 
   /** 直接执行通用非大模型外部命令（例如 B 站投稿工具、系统定时任务管理命令等） */

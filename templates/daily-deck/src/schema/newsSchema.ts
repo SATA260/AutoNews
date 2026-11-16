@@ -1,19 +1,24 @@
 import { z } from 'zod';
 
+/** 模板内置的右下角人物形象标识 */
 export type PresetMascotId = 'deepseek' | 'gpt' | 'claude' | 'gemini' | 'grok' | 'none';
+/** 右下角形象的切换方式：随每条新闻切换，或整期固定同一位 */
 export type MascotMode = 'per-item' | 'fixed-host';
 
+/** 数据清洗过程中记录的单条提示或自动修正明细 */
 export interface ValidationWarning {
   path: string;
   code: 'truncated' | 'fallback' | 'clamped' | 'invalid_url';
   message: string;
 }
 
+/** 无配图时在右侧摘要表展示的单个参数条目 */
 export interface SanitizedMetric {
   label: string;
   value: string;
 }
 
+/** 外部传入的单条新闻原始输入结构 */
 export interface NewsItemInput {
   id?: string;
   category?: string;
@@ -37,6 +42,7 @@ export interface NewsItemInput {
   durationSec?: number;
 }
 
+/** 外部传入的整期日报原始输入结构 */
 export interface DailyIssueInput {
   issueTitle?: string;
   issueNumber?: string;
@@ -50,6 +56,7 @@ export interface DailyIssueInput {
   items: NewsItemInput[];
 }
 
+/** 经安全清洗与上限裁剪后的单条新闻渲染数据 */
 export interface SanitizedNewsItem {
   id: string;
   indexLabel: string;
@@ -71,6 +78,7 @@ export interface SanitizedNewsItem {
   durationSec: number;
 }
 
+/** 经安全清洗与上限裁剪后的整期日报渲染数据 */
 export interface SanitizedDailyIssue {
   issueTitle: string;
   issueNumber: string;
@@ -84,12 +92,14 @@ export interface SanitizedDailyIssue {
   items: SanitizedNewsItem[];
 }
 
+/** 数据清洗与校检完成后返回的结果对象 */
 export interface SanitizedIssueResult {
   issue: SanitizedDailyIssue;
   warnings: ValidationWarning[];
   isClean: boolean;
 }
 
+/** 画布各文本与数值字段的安全字数及范围硬上限 */
 export const HARD_LIMITS = {
   maxItems: 12,
   minItems: 1,
@@ -133,7 +143,7 @@ const MASCOT_MODES: readonly MascotMode[] = ['per-item', 'fixed-host'] as const;
 
 const LooseRecordSchema = z.record(z.unknown());
 
-/** Strip ASCII control chars and collapse repeated whitespace cleanly. */
+/** 去除文本中的不可见控制字符并合并多余空白 */
 function normalizeText(value: unknown): string {
   if (typeof value === 'number' || typeof value === 'boolean') {
     return String(value);
@@ -147,7 +157,7 @@ function normalizeText(value: unknown): string {
     .trim();
 }
 
-/** Truncate using Unicode codepoints so emoji/surrogate pairs are never split. */
+/** 按完整字符码点安全截断文本，避免把表情符号从中间劈开产生乱码 */
 export function truncateCodepoints(str: string, maxLen: number): { text: string; truncated: boolean } {
   const chars = Array.from(str);
   if (chars.length <= maxLen) {
@@ -162,7 +172,7 @@ export function truncateCodepoints(str: string, maxLen: number): { text: string;
   };
 }
 
-/** Normalize, fallback on empty, and enforce codepoint limit without ever throwing. */
+/** 清洗字符串并在为空或超长时执行安全替补与截断，绝不抛出异常 */
 export function cleanAndTruncate(
   val: unknown,
   maxLen: number,
@@ -194,7 +204,7 @@ export function cleanAndTruncate(
   return text;
 }
 
-/** Validate URLs strictly to safe http(s), local relative paths, or safe data:image payloads. */
+/** 校验媒体链接，仅允许安全的网址、本地相对路径或合法图片编码数据 */
 export function sanitizeMediaUrl(
   rawUrl: unknown,
   path: string,
@@ -494,10 +504,7 @@ function createEmergencyFallbackIssue(): SanitizedDailyIssue {
   };
 }
 
-/**
- * Guaranteed zero-throw sanitizer for DailyIssue data.
- * Clamps items, truncates text cleanly, normalizes enums, and returns structured warnings.
- */
+/** 将外部输入的不规范日报数据安全清洗为可直接渲染的结构，保证在任何异常输入下都不会抛出错误 */
 export function sanitizeDailyIssue(raw: unknown): SanitizedIssueResult {
   const warnings: ValidationWarning[] = [];
 

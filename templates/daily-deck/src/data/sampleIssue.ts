@@ -1,5 +1,6 @@
 import type { DailyIssueInput } from '../schema/newsSchema';
 
+/** 模板内置的 5 条 AI 前沿新闻示范期数据 */
 export const SAMPLE_DAILY_ISSUE: DailyIssueInput = {
   issueTitle: 'AI 每日报',
   issueNumber: 'NO. 042',

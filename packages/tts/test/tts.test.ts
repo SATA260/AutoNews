@@ -161,4 +161,51 @@ describe('@aidaily/tts', () => {
     expect(first?.speechMs).toBeGreaterThan(450);
     expect(first?.speechMs).toBeLessThan(950);
   });
+
+  it('recovers from corrupted cache and rejects invalid or duplicate section keys', async () => {
+    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'aidaily-tts-corrupt-'));
+    tempDirs.push(tmpDir);
+    const cacheDir = path.join(tmpDir, 'cache');
+
+    const service = new TtsService({ settings: baseSettings('silent'), cacheDir });
+
+    await expect(
+      service.synthesizeSections(
+        [{ key: '../escape', kind: 'intro', sentences: ['非法键测试'] }],
+        path.join(tmpDir, 'out-bad'),
+      ),
+    ).rejects.toThrow(/非法的口播段落标识/);
+
+    await expect(
+      service.synthesizeSections(
+        [
+          { key: 'intro', kind: 'intro', sentences: ['句子一'] },
+          { key: 'intro', kind: 'intro', sentences: ['句子二'] },
+        ],
+        path.join(tmpDir, 'out-dup'),
+      ),
+    ).rejects.toThrow(/重复的口播段落标识/);
+
+    // 首次合成生成缓存
+    const firstOut = await service.synthesizeSections(
+      [{ key: 'intro', kind: 'intro', sentences: ['缓存损坏自愈测试'] }],
+      path.join(tmpDir, 'out1'),
+    );
+    expect(firstOut[0]?.speechMs).toBeGreaterThan(0);
+
+    // 破坏缓存目录里的 wav 文件后再次合成，应自动重建缓存而非整体报错
+    const cachedFiles = await fs.readdir(cacheDir);
+    expect(cachedFiles.length).toBeGreaterThan(0);
+    for (const file of cachedFiles) {
+      if (file.endsWith('.wav')) {
+        await fs.writeFile(path.join(cacheDir, file), 'NOT_A_WAV');
+      }
+    }
+
+    const healedOut = await service.synthesizeSections(
+      [{ key: 'intro', kind: 'intro', sentences: ['缓存损坏自愈测试'] }],
+      path.join(tmpDir, 'out2'),
+    );
+    expect(healedOut[0]?.speechMs).toBeGreaterThan(0);
+  });
 });

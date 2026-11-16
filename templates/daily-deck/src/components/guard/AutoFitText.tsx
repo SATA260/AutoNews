@@ -1,5 +1,6 @@
 import React, { useLayoutEffect, useRef, useState } from 'react';
 
+/** 自适应字号文本框组件的入参属性 */
 interface AutoFitTextProps {
   text: string;
   maxFontSize: number;
@@ -11,10 +12,7 @@ interface AutoFitTextProps {
   style?: React.CSSProperties;
 }
 
-/**
- * Automatically shrinks font size within [minFontSize, maxFontSize] so copy
- * fits cleanly inside its container, then clamps at maxLines to prevent overflow.
- */
+/** 在给定字号区间内自动缩小字体并按最大行数截断，防止长文案撑破版面 */
 export const AutoFitText: React.FC<AutoFitTextProps> = ({
   text,
   maxFontSize,

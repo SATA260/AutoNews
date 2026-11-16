@@ -5,7 +5,24 @@ import type {
   SourceLang,
   SourceState,
 } from '@aidaily/contracts';
-import type { DatabaseSync } from '../db.js';
+import { type DatabaseSync, inTransaction } from '../db.js';
+
+/** 将输入时间戳统一转为精确到毫秒的标准 UTC ISO 字符串 */
+function normalizeIsoTimestamp(value: string | null): string | null {
+  if (!value) {
+    return null;
+  }
+  const ms = Date.parse(value);
+  return Number.isNaN(ms) ? value : new Date(ms).toISOString();
+}
+
+/** 校验分页上限参数为不超过指定最大值的正整数 */
+function clampLimit(limit: number, maxLimit = 500): number {
+  if (!Number.isInteger(limit) || limit <= 0) {
+    throw new RangeError(`查询数量上限 limit 必须为正整数: ${String(limit)}`);
+  }
+  return Math.min(limit, maxLimit);
+}
 
 /** 数据库 `source_state` 表行结构 */
 interface SourceStateRow {
@@ -106,7 +123,16 @@ export function createSourceStateRepo(db: DatabaseSync) {
       lastItemPublishedAt: string | null;
       etag: string | null;
       lastModified: string | null;
+      preserveConditionalHeaders?: boolean;
     }): void {
+      const normalizedLastItemAt = normalizeIsoTimestamp(input.lastItemPublishedAt);
+      const etagExpr = input.preserveConditionalHeaders
+        ? 'COALESCE(excluded.etag, source_state.etag)'
+        : 'excluded.etag';
+      const lastModExpr = input.preserveConditionalHeaders
+        ? 'COALESCE(excluded.last_modified, source_state.last_modified)'
+        : 'excluded.last_modified';
+
       db.prepare(`
         INSERT INTO source_state (
           source_id, last_fetched_at, last_item_published_at, etag, last_modified, consecutive_failures, last_error
@@ -116,18 +142,18 @@ export function createSourceStateRepo(db: DatabaseSync) {
           last_item_published_at = CASE
             WHEN excluded.last_item_published_at IS NOT NULL AND (
               source_state.last_item_published_at IS NULL OR
-              excluded.last_item_published_at > source_state.last_item_published_at
+              julianday(excluded.last_item_published_at) > julianday(source_state.last_item_published_at)
             ) THEN excluded.last_item_published_at
             ELSE source_state.last_item_published_at
           END,
-          etag = COALESCE(excluded.etag, source_state.etag),
-          last_modified = COALESCE(excluded.last_modified, source_state.last_modified),
+          etag = ${etagExpr},
+          last_modified = ${lastModExpr},
           consecutive_failures = 0,
           last_error = NULL
       `).run(
         input.sourceId,
         input.lastFetchedAt,
-        input.lastItemPublishedAt,
+        normalizedLastItemAt,
         input.etag,
         input.lastModified,
       );
@@ -135,16 +161,16 @@ export function createSourceStateRepo(db: DatabaseSync) {
 
     /** 记录一次信源抓取失败并返回累加后的连续失败次数 */
     recordFailure(sourceId: string, errorMsg: string): number {
-      db.prepare(`
-        INSERT INTO source_state (source_id, consecutive_failures, last_error)
-        VALUES (?, 1, ?)
-        ON CONFLICT(source_id) DO UPDATE SET
-          consecutive_failures = source_state.consecutive_failures + 1,
-          last_error = excluded.last_error
-      `).run(sourceId, errorMsg);
       const row = db
-        .prepare('SELECT consecutive_failures FROM source_state WHERE source_id = ?')
-        .get(sourceId) as { consecutive_failures: number };
+        .prepare(`
+          INSERT INTO source_state (source_id, consecutive_failures, last_error)
+          VALUES (?, 1, ?)
+          ON CONFLICT(source_id) DO UPDATE SET
+            consecutive_failures = source_state.consecutive_failures + 1,
+            last_error = excluded.last_error
+          RETURNING consecutive_failures
+        `)
+        .get(sourceId, errorMsg) as { consecutive_failures: number };
       return row.consecutive_failures;
     },
   };
@@ -215,17 +241,28 @@ export function createArticlesRepo(db: DatabaseSync) {
       return rows.map(mapArticle);
     },
 
-    /** 将选中的文章标记为被指定期次占用，避免被其他期次重复挑选 */
+    /** 将选中的文章在事务内全部标记为被指定期次占用，避免被其他期次重复挑选 */
     markReserved(articleIds: string[], runId: string): void {
-      if (articleIds.length === 0) {
+      const uniqueIds = Array.from(new Set(articleIds));
+      if (uniqueIds.length === 0) {
         return;
       }
-      const placeholders = articleIds.map(() => '?').join(', ');
-      db.prepare(`
-        UPDATE articles
-        SET status = 'reserved', reserved_by_run = ?
-        WHERE id IN (${placeholders}) AND status IN ('new', 'expired')
-      `).run(runId, ...articleIds);
+      inTransaction(db, () => {
+        const placeholders = uniqueIds.map(() => '?').join(', ');
+        const res = db
+          .prepare(`
+            UPDATE articles
+            SET status = 'reserved', reserved_by_run = ?
+            WHERE id IN (${placeholders})
+              AND (status IN ('new', 'expired') OR (status = 'reserved' AND reserved_by_run = ?))
+          `)
+          .run(runId, ...uniqueIds, runId);
+        if (Number(res.changes) !== uniqueIds.length) {
+          throw new Error(
+            `文章占用失败：预期占用 ${uniqueIds.length} 篇，实际更新 ${String(res.changes)} 篇（可能已被其他任务占用或已消费）`,
+          );
+        }
+      });
     },
 
     /** 释放某期任务占用的全部文章，使其重新回到待选池 */
@@ -289,14 +326,15 @@ export function createHistoryRepo(db: DatabaseSync) {
 
     /** 查询指定时间点之后的近期已播事件记录 */
     listRecent(sinceIso: string, limit = 200): PublishedHistoryRecord[] {
+      const safeLimit = clampLimit(limit, 500);
       const rows = db
         .prepare(`
           SELECT * FROM published_history
           WHERE published_at >= ?
-          ORDER BY published_at DESC
+          ORDER BY published_at DESC, event_id DESC
           LIMIT ?
         `)
-        .all(sinceIso, limit) as unknown as Array<{
+        .all(sinceIso, safeLimit) as unknown as Array<{
         event_id: string;
         run_id: string;
         title: string;

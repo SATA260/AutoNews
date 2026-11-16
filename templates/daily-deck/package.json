@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "vite --port 5173 --strictPort",
     "build": "tsc -b && vite build",
+    "typecheck": "tsc -b",
     "preview": "vite preview --port 4173",
     "test": "vitest run",
     "validate:data": "node scripts/validate-data.mjs"

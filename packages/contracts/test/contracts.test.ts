@@ -40,11 +40,17 @@ describe('@aidaily/contracts', () => {
     expect(ScheduleTimeSchema.safeParse('8:30').success).toBe(false);
   });
 
-  it('converts schemas to Draft-07 JSON Schema without $schema', () => {
+  it('converts schemas to Draft-07 JSON Schema without unsupported constraint keywords', () => {
     const jsonSchema = zodToJsonSchema(PolishedItemSchema);
     expect(jsonSchema.$schema).toBeUndefined();
+    expect(jsonSchema.additionalProperties).toBeUndefined();
     expect(jsonSchema.type).toBe('object');
     expect(jsonSchema.properties).toBeDefined();
+    const serialized = JSON.stringify(jsonSchema);
+    expect(serialized).not.toContain('minLength');
+    expect(serialized).not.toContain('maxLength');
+    expect(serialized).not.toContain('maxItems');
+    expect(serialized).not.toContain('additionalProperties');
   });
 
   it('validates TimelineSchema', () => {

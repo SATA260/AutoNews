@@ -3,7 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
-import { loadSettings, updateSettingsFile } from '../src/index.js';
+import { loadSettings, loadSources, updateSettingsFile, updateSourcesFile } from '../src/index.js';
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..', '..');
 const tempDirs: string[] = [];
@@ -58,5 +58,27 @@ describe('config loader and comment-preserving writer', () => {
 
     const after = await fs.readFile(settingsPath, 'utf8');
     expect(after).toBe(before);
+  });
+
+  it('preserves comments in sources.yaml and rejects malformed YAML documents', async () => {
+    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'aidaily-cfg-src-'));
+    tempDirs.push(tmpDir);
+    const sourcesPath = path.join(tmpDir, 'sources.yaml');
+    await fs.copyFile(path.join(REPO_ROOT, 'config', 'sources.yaml'), sourcesPath);
+
+    const sources = await loadSources(sourcesPath);
+    const updatedSources = sources.map((s) =>
+      s.id === 'openai-news' ? { ...s, enabled: false } : s,
+    );
+    await updateSourcesFile(sourcesPath, updatedSources);
+
+    const rawSourcesAfter = await fs.readFile(sourcesPath, 'utf8');
+    expect(rawSourcesAfter).toContain('# pool: primary 每次都抓');
+    const reloadedSources = await loadSources(sourcesPath);
+    expect(reloadedSources.find((s) => s.id === 'openai-news')?.enabled).toBe(false);
+
+    const badYaml = path.join(tmpDir, 'broken.yaml');
+    await fs.writeFile(badYaml, 'version: 1\n  bad_indent: [1, 2', 'utf8');
+    await expect(updateSettingsFile(badYaml, { timezone: 'UTC' })).rejects.toThrow(/语法错误/);
   });
 });

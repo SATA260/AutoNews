@@ -1,7 +1,7 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { type CliConfig, zodToJsonSchema } from '@aidaily/contracts';
-import { CliExitError } from '../errors.js';
+import { CliAuthError, CliExitError, hasAuthFailureMessage } from '../errors.js';
 import { runSubprocess } from '../exec.js';
 import { extractJsonFromText } from '../json.js';
 import type { AdapterCommand, AdapterParsedOutput, CliAdapter, InvokeRequest } from '../types.js';
@@ -66,7 +66,14 @@ export const genericAdapter: CliAdapter = {
     ctx: { hasSchema: boolean; outFileContent?: string },
     parseMode: string = 'json',
   ): AdapterParsedOutput {
+    if (hasAuthFailureMessage(stderr)) {
+      throw new CliAuthError(`CLI 认证失败或未登录: ${stderr.trim()}`);
+    }
     if (exitCode !== 0) {
+      const diag = `${stderr}\n${stdout}`;
+      if (hasAuthFailureMessage(diag)) {
+        throw new CliAuthError(`CLI 认证失败或未登录: ${stderr.trim() || stdout.trim()}`);
+      }
       throw new CliExitError(
         `命令退出异常 (code=${exitCode}): ${stderr.trim() || stdout.trim().slice(0, 300)}`,
         exitCode,

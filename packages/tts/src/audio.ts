@@ -33,6 +33,33 @@ export interface ConcatSentencesResult {
   offsetsMs: number[];
 }
 
+const DEFAULT_MEDIA_TIMEOUT_MS = 60_000;
+
+/** 生成带合法后缀名的同目录临时文件路径，确保原子重命名且音视频工具能正确识别格式 */
+function makeSiblingTempPath(targetFile: string): string {
+  const dir = path.dirname(targetFile);
+  const ext = path.extname(targetFile) || '.wav';
+  const base = path.basename(targetFile, ext);
+  const rand = crypto.randomBytes(4).toString('hex');
+  return path.join(dir, `.${base}.${process.pid}.${rand}${ext}`);
+}
+
+/** 通过临时文件与原子重命名替换目标文件，失败时自动清理临时文件 */
+async function withAtomicWavWrite(
+  targetFile: string,
+  writeFn: (tmpFile: string) => Promise<void>,
+): Promise<void> {
+  await fs.mkdir(path.dirname(targetFile), { recursive: true });
+  const tmpFile = makeSiblingTempPath(targetFile);
+  try {
+    await writeFn(tmpFile);
+    await fs.rename(tmpFile, targetFile);
+  } catch (err) {
+    await fs.rm(tmpFile, { force: true }).catch(() => undefined);
+    throw err;
+  }
+}
+
 /** 调用 ffprobe 精确读取音频文件的实际时长（毫秒） */
 export async function probeAudioDurationMs(
   filePath: string,
@@ -44,11 +71,15 @@ export async function probeAudioDurationMs(
     ['-v', 'error', '-show_entries', 'format=duration', '-of', 'json', filePath],
     {
       cancelSignal: signal,
+      timeout: DEFAULT_MEDIA_TIMEOUT_MS,
       reject: false,
     },
   );
   if (res.isCanceled) {
     throw new DOMException('已取消', 'AbortError');
+  }
+  if (res.timedOut) {
+    throw new Error(`ffprobe 读取音频时长超时 (${filePath})`);
   }
   if (res.exitCode !== 0) {
     throw new Error(`ffprobe 读取音频时长失败 (${filePath}): ${res.stderr}`);
@@ -69,33 +100,38 @@ export async function generateSilenceWav(
   ffmpegBin = 'ffmpeg',
   signal?: AbortSignal,
 ): Promise<void> {
-  await fs.mkdir(path.dirname(outFile), { recursive: true });
   const durationSec = Math.max(0.05, durationMs / 1000).toFixed(3);
-  const res = await execa(
-    ffmpegBin,
-    [
-      '-y',
-      '-f',
-      'lavfi',
-      '-i',
-      `anullsrc=r=${sampleRate}:cl=mono`,
-      '-t',
-      durationSec,
-      '-c:a',
-      'pcm_s16le',
-      outFile,
-    ],
-    {
-      cancelSignal: signal,
-      reject: false,
-    },
-  );
-  if (res.isCanceled) {
-    throw new DOMException('已取消', 'AbortError');
-  }
-  if (res.exitCode !== 0) {
-    throw new Error(`ffmpeg 生成静音音频失败: ${res.stderr}`);
-  }
+  await withAtomicWavWrite(outFile, async (tmpOut) => {
+    const res = await execa(
+      ffmpegBin,
+      [
+        '-y',
+        '-f',
+        'lavfi',
+        '-i',
+        `anullsrc=r=${sampleRate}:cl=mono`,
+        '-t',
+        durationSec,
+        '-c:a',
+        'pcm_s16le',
+        tmpOut,
+      ],
+      {
+        cancelSignal: signal,
+        timeout: DEFAULT_MEDIA_TIMEOUT_MS,
+        reject: false,
+      },
+    );
+    if (res.isCanceled) {
+      throw new DOMException('已取消', 'AbortError');
+    }
+    if (res.timedOut) {
+      throw new Error(`ffmpeg 生成静音音频超时 (${outFile})`);
+    }
+    if (res.exitCode !== 0) {
+      throw new Error(`ffmpeg 生成静音音频失败: ${res.stderr}`);
+    }
+  });
 }
 
 /**
@@ -105,28 +141,33 @@ export async function generateSilenceWav(
 export async function normalizeSegmentToWav(opts: NormalizeSegmentOptions): Promise<void> {
   const ffmpegBin = opts.ffmpegBin ?? 'ffmpeg';
   const ffprobeBin = opts.ffprobeBin ?? 'ffprobe';
-  await fs.mkdir(path.dirname(opts.outFile), { recursive: true });
 
   const convert = async (applyTrim: boolean) => {
-    const args = ['-y', '-i', opts.inFile];
-    if (applyTrim) {
-      args.push(
-        '-af',
-        'silenceremove=start_periods=1:start_threshold=-45dB:stop_periods=-1:stop_duration=0.15:stop_threshold=-45dB',
-      );
-    }
-    args.push('-ar', String(opts.sampleRate), '-ac', '1', '-c:a', 'pcm_s16le', opts.outFile);
+    await withAtomicWavWrite(opts.outFile, async (tmpOut) => {
+      const args = ['-y', '-i', opts.inFile];
+      if (applyTrim) {
+        args.push(
+          '-af',
+          'silenceremove=start_periods=1:start_threshold=-45dB:stop_periods=-1:stop_duration=0.15:stop_threshold=-45dB',
+        );
+      }
+      args.push('-ar', String(opts.sampleRate), '-ac', '1', '-c:a', 'pcm_s16le', tmpOut);
 
-    const res = await execa(ffmpegBin, args, {
-      cancelSignal: opts.signal,
-      reject: false,
+      const res = await execa(ffmpegBin, args, {
+        cancelSignal: opts.signal,
+        timeout: DEFAULT_MEDIA_TIMEOUT_MS,
+        reject: false,
+      });
+      if (res.isCanceled) {
+        throw new DOMException('已取消', 'AbortError');
+      }
+      if (res.timedOut) {
+        throw new Error(`ffmpeg 标准化音频超时 (${opts.inFile})`);
+      }
+      if (res.exitCode !== 0) {
+        throw new Error(`ffmpeg 标准化音频失败 (${opts.inFile}): ${res.stderr}`);
+      }
     });
-    if (res.isCanceled) {
-      throw new DOMException('已取消', 'AbortError');
-    }
-    if (res.exitCode !== 0) {
-      throw new Error(`ffmpeg 标准化音频失败 (${opts.inFile}): ${res.stderr}`);
-    }
   };
 
   if (opts.trimSilence && !opts.isSilentProvider) {
@@ -158,23 +199,23 @@ export async function concatSentenceWavs(
   if (opts.segmentFiles.length === 0) {
     throw new Error('没有可拼接的语音片段');
   }
+  if (opts.segmentFiles.length !== opts.sentenceDurationsMs.length) {
+    throw new Error(
+      `音频片段数量 (${opts.segmentFiles.length}) 与时长数量 (${opts.sentenceDurationsMs.length}) 不匹配`,
+    );
+  }
 
   const ffmpegBin = opts.ffmpegBin ?? 'ffmpeg';
   const ffprobeBin = opts.ffprobeBin ?? 'ffprobe';
   await fs.mkdir(path.dirname(opts.outFile), { recursive: true });
 
-  const offsetsMs: number[] = [];
-  let cursorMs = 0;
-  for (let i = 0; i < opts.sentenceDurationsMs.length; i++) {
-    offsetsMs.push(cursorMs);
-    const dur = opts.sentenceDurationsMs[i] ?? 0;
-    cursorMs += dur + (i < opts.sentenceDurationsMs.length - 1 ? opts.sentenceGapMs : 0);
-  }
-
   if (opts.segmentFiles.length === 1 && opts.segmentFiles[0]) {
-    await fs.copyFile(opts.segmentFiles[0], opts.outFile);
+    const singleSeg = opts.segmentFiles[0];
+    await withAtomicWavWrite(opts.outFile, async (tmpOut) => {
+      await fs.copyFile(singleSeg, tmpOut);
+    });
     const speechMs = await probeAudioDurationMs(opts.outFile, ffprobeBin, opts.signal);
-    return { speechMs, offsetsMs };
+    return { speechMs, offsetsMs: [0] };
   }
 
   const workDir = path.join(
@@ -185,6 +226,7 @@ export async function concatSentenceWavs(
 
   try {
     let gapFile: string | null = null;
+    let actualGapMs = 0;
     if (opts.sentenceGapMs > 0) {
       gapFile = path.join(workDir, 'gap.wav');
       await generateSilenceWav(
@@ -194,6 +236,15 @@ export async function concatSentenceWavs(
         ffmpegBin,
         opts.signal,
       );
+      actualGapMs = await probeAudioDurationMs(gapFile, ffprobeBin, opts.signal);
+    }
+
+    const offsetsMs: number[] = [];
+    let cursorMs = 0;
+    for (let i = 0; i < opts.sentenceDurationsMs.length; i++) {
+      offsetsMs.push(cursorMs);
+      const dur = opts.sentenceDurationsMs[i] ?? 0;
+      cursorMs += dur + (i < opts.sentenceDurationsMs.length - 1 ? actualGapMs : 0);
     }
 
     const lines: string[] = [];
@@ -211,20 +262,26 @@ export async function concatSentenceWavs(
     const listFile = path.join(workDir, 'concat.txt');
     await fs.writeFile(listFile, `${lines.join('\n')}\n`, 'utf8');
 
-    const res = await execa(
-      ffmpegBin,
-      ['-y', '-f', 'concat', '-safe', '0', '-i', listFile, '-c:a', 'pcm_s16le', opts.outFile],
-      {
-        cancelSignal: opts.signal,
-        reject: false,
-      },
-    );
-    if (res.isCanceled) {
-      throw new DOMException('已取消', 'AbortError');
-    }
-    if (res.exitCode !== 0) {
-      throw new Error(`ffmpeg 拼接段落音频失败: ${res.stderr}`);
-    }
+    await withAtomicWavWrite(opts.outFile, async (tmpOut) => {
+      const res = await execa(
+        ffmpegBin,
+        ['-y', '-f', 'concat', '-safe', '0', '-i', listFile, '-c:a', 'pcm_s16le', tmpOut],
+        {
+          cancelSignal: opts.signal,
+          timeout: DEFAULT_MEDIA_TIMEOUT_MS,
+          reject: false,
+        },
+      );
+      if (res.isCanceled) {
+        throw new DOMException('已取消', 'AbortError');
+      }
+      if (res.timedOut) {
+        throw new Error(`ffmpeg 拼接段落音频超时 (${opts.outFile})`);
+      }
+      if (res.exitCode !== 0) {
+        throw new Error(`ffmpeg 拼接段落音频失败: ${res.stderr}`);
+      }
+    });
 
     const speechMs = await probeAudioDurationMs(opts.outFile, ffprobeBin, opts.signal);
     return { speechMs, offsetsMs };

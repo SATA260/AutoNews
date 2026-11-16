@@ -1,5 +1,6 @@
 import React from 'react';
 
+/** 局部错误隔离边界组件的入参属性 */
 interface DeckErrorBoundaryProps {
   scopeName: string;
   children: React.ReactNode;
@@ -11,6 +12,7 @@ interface DeckErrorBoundaryState {
   hasError: boolean;
 }
 
+/** 局部错误隔离边界：捕获子组件渲染异常并展示安全占位内容，避免整页白屏 */
 export class DeckErrorBoundary extends React.Component<
   DeckErrorBoundaryProps,
   DeckErrorBoundaryState
@@ -20,10 +22,12 @@ export class DeckErrorBoundary extends React.Component<
     this.state = { hasError: false };
   }
 
+  /** 将渲染异常转换为降级状态标记 */
   static getDerivedStateFromError(): DeckErrorBoundaryState {
     return { hasError: true };
   }
 
+  /** 将捕获到的错误信息静默上报给外层健康统计 */
   override componentDidCatch(error: Error): void {
     this.props.onErrorCaptured?.(
       this.props.scopeName,
@@ -31,6 +35,7 @@ export class DeckErrorBoundary extends React.Component<
     );
   }
 
+  /** 正常时直接透传子节点，异常时展示降级占位 */
   override render(): React.ReactNode {
     if (this.state.hasError) {
       if (this.props.fallback) {

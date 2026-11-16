@@ -2,11 +2,13 @@ import React from 'react';
 import type { SanitizedDailyIssue } from '../../schema/newsSchema';
 import { AutoFitText } from '../guard/AutoFitText';
 
-interface CoverPageProps {
+/** 封面导览页组件入参属性 */
+export interface CoverPageProps {
   issue: SanitizedDailyIssue;
   onJumpToNews: (itemIndex: number) => void;
 }
 
+/** 封面导览页：左侧呈现今日要闻焦点，右侧以可点击编号列表展示全期新闻目录 */
 export const CoverPage: React.FC<CoverPageProps> = ({ issue, onJumpToNews }) => {
   const isDenseList = issue.items.length > 6;
 
@@ -39,6 +41,7 @@ export const CoverPage: React.FC<CoverPageProps> = ({ issue, onJumpToNews }) => 
               key={item.id}
               type="button"
               className="agenda-row"
+              style={{ '--row-idx': idx } as React.CSSProperties}
               onClick={() => onJumpToNews(idx)}
             >
               <span className="agenda-index">{item.indexLabel}</span>

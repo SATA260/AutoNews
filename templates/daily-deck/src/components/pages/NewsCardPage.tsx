@@ -4,12 +4,14 @@ import { AutoFitText } from '../guard/AutoFitText';
 import { DeckErrorBoundary } from '../guard/DeckErrorBoundary';
 import { SafeMedia } from '../guard/SafeMedia';
 
-interface NewsCardPageProps {
+/** 单条新闻页面组件入参属性 */
+export interface NewsCardPageProps {
   item: SanitizedNewsItem;
   totalItems: number;
   onErrorCaptured?: (scopeName: string, message: string) => void;
 }
 
+/** 单条新闻页面：左侧呈现标题、简短梗概、事实要点与来源，右侧展示官方配图或披露摘录 */
 export const NewsCardPage: React.FC<NewsCardPageProps> = ({
   item,
   totalItems,
@@ -37,7 +39,6 @@ export const NewsCardPage: React.FC<NewsCardPageProps> = ({
 
   return (
     <div className="news-editorial-layout">
-      {/* Left Column: Concise News Synopsis Only */}
       <section className="news-synopsis-col">
         <div className="news-kicker">
           <span className="news-kicker-num">{item.indexLabel}</span>
@@ -75,7 +76,11 @@ export const NewsCardPage: React.FC<NewsCardPageProps> = ({
         {item.keyPoints.length > 0 && (
           <ul className="news-keypoints-list">
             {item.keyPoints.map((point, idx) => (
-              <li key={idx} className="news-keypoint-item">
+              <li
+                key={idx}
+                className="news-keypoint-item"
+                style={{ '--row-idx': idx } as React.CSSProperties}
+              >
                 <span className="keypoint-dash" aria-hidden="true">
                   —
                 </span>
@@ -99,7 +104,6 @@ export const NewsCardPage: React.FC<NewsCardPageProps> = ({
         </footer>
       </section>
 
-      {/* Right Column: Official Image Citation or Primary Source Excerpt */}
       <section className="news-reference-col">
         <DeckErrorBoundary scopeName={`news-ref-${item.id}`} onErrorCaptured={onErrorCaptured}>
           {hasPrimaryImage ? (
@@ -150,7 +154,11 @@ export const NewsCardPage: React.FC<NewsCardPageProps> = ({
 
               <div className="excerpt-specs-table">
                 {fallbackSpecs.map((spec, sIdx) => (
-                  <div key={sIdx} className="excerpt-spec-row">
+                  <div
+                    key={sIdx}
+                    className="excerpt-spec-row"
+                    style={{ '--row-idx': sIdx } as React.CSSProperties}
+                  >
                     <span className="spec-label">{spec.label}</span>
                     <strong className="spec-value">{spec.value}</strong>
                   </div>

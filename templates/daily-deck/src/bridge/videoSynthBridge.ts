@@ -1,7 +1,12 @@
 import type { ValidationWarning } from '../schema/newsSchema';
 
+/** 页面在整期新闻中的角色类型 */
 export type DeckPageType = 'cover' | 'news' | 'outro';
 
+/** 翻页过渡动画样式：立体翻页、层叠滑移、折页快门、无动效 */
+export type DeckTransitionStyle = 'flip' | 'glide' | 'shutter' | 'none';
+
+/** 外部脚本或控制台查询的当前播放状态 */
 export interface DeckBridgeState {
   currentPage: number;
   totalPages: number;
@@ -10,8 +15,10 @@ export interface DeckBridgeState {
   isAutoPlaying: boolean;
   cleanMode: boolean;
   theme: 'light' | 'dark';
+  transition: DeckTransitionStyle;
 }
 
+/** 注入新闻数据后返回的安全校验结果 */
 export interface SetNewsDataResult {
   ok: boolean;
   warningCount: number;
@@ -19,6 +26,7 @@ export interface SetNewsDataResult {
   totalPages: number;
 }
 
+/** 模板当前运行健康检查与数据修正明细报告 */
 export interface DeckHealthReport {
   ok: boolean;
   isDataClean: boolean;
@@ -27,6 +35,7 @@ export interface DeckHealthReport {
   runtimeErrors: string[];
 }
 
+/** 挂载在浏览器窗口上的自动化视频合成控制接口 */
 export interface NewsDeckBridgeAPI {
   getState: () => DeckBridgeState;
   getPageCount: () => number;
@@ -44,6 +53,7 @@ declare global {
   }
 }
 
+/** 将外部传入的页码索引安全限制在有效页面范围内 */
 export function clampPageIndex(index: number, totalPages: number): number {
   const safeTotal = Math.max(1, Math.floor(totalPages));
   if (!Number.isFinite(index)) {
@@ -51,4 +61,19 @@ export function clampPageIndex(index: number, totalPages: number): number {
   }
   const rounded = Math.trunc(index);
   return Math.min(safeTotal - 1, Math.max(0, rounded));
+}
+
+/** 解析网址参数或配置中的翻页动效名称，未知值默认启用立体翻页 */
+export function parseTransitionStyle(raw: string | null | undefined): DeckTransitionStyle {
+  const normalized = (raw ?? '').trim().toLowerCase();
+  if (normalized === 'none') {
+    return 'none';
+  }
+  if (normalized === 'glide' || normalized === 'slide') {
+    return 'glide';
+  }
+  if (normalized === 'shutter') {
+    return 'shutter';
+  }
+  return 'flip';
 }

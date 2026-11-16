@@ -22,8 +22,10 @@ import {
   type ValidationWarning,
 } from '../../schema/newsSchema';
 
+/** 编辑与体检抽屉面板的标签页标识 */
 export type InspectorTab = 'summary' | 'json' | 'health';
 
+/** 编辑与体检抽屉组件的入参属性 */
 interface DataInspectorDrawerProps {
   open: boolean;
   activeTab: InspectorTab;
@@ -39,10 +41,12 @@ interface DataInspectorDrawerProps {
   onJumpToNewsPage: (itemIndex: number) => void;
 }
 
+/** 深拷贝整期输入数据以便安全修改表单 */
 function cloneIssue(issue: DailyIssueInput): DailyIssueInput {
   return JSON.parse(JSON.stringify(issue)) as DailyIssueInput;
 }
 
+/** 编辑与校验抽屉面板：支持逐条编辑梗概与配图、粘贴整期 JSON，以及查看自动修正体检结果 */
 export const DataInspectorDrawer: React.FC<DataInspectorDrawerProps> = ({
   open,
   activeTab,

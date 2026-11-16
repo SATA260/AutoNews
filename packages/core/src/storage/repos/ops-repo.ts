@@ -1,5 +1,5 @@
 import type { PublishRecord, PublishStatus, ScheduleJob } from '@aidaily/contracts';
-import type { DatabaseSync } from '../db.js';
+import { type DatabaseSync, inTransaction } from '../db.js';
 
 /** 数据库 `schedules` 表行结构 */
 interface ScheduleRow {
@@ -166,7 +166,7 @@ export function createSchedulesRepo(db: DatabaseSync) {
 /** 创建 B 站投稿发布记录操作对象，管理草稿保存与发布结果追踪 */
 export function createPublishRepo(db: DatabaseSync) {
   return {
-    /** 写入或重置一期任务的视频投稿草稿（标题、简介、标签） */
+    /** 写入或重置一期任务的视频投稿草稿，严禁覆盖已发布、上传中或状态不明的投稿记录 */
     upsertDraft(input: {
       runId: string;
       title: string;
@@ -174,28 +174,43 @@ export function createPublishRepo(db: DatabaseSync) {
       tags: string[];
       updatedAt: string;
     }): PublishRecord {
-      db.prepare(`
-        INSERT INTO publish_records (
-          run_id, platform, title, description, tags, status, attempts, updated_at
-        ) VALUES (?, 'bilibili', ?, ?, ?, 'draft', 0, ?)
-        ON CONFLICT(run_id) DO UPDATE SET
-          title = excluded.title,
-          description = excluded.description,
-          tags = excluded.tags,
-          status = 'draft',
-          updated_at = excluded.updated_at
-      `).run(
-        input.runId,
-        input.title,
-        input.description,
-        JSON.stringify(input.tags),
-        input.updatedAt,
-      );
-      const record = this.getByRun(input.runId);
-      if (!record) {
-        throw new Error(`写入发布草稿失败: ${input.runId}`);
-      }
-      return record;
+      return inTransaction(db, () => {
+        const existing = this.getByRun(input.runId);
+        if (
+          existing &&
+          (existing.status === 'publishing' ||
+            existing.status === 'published' ||
+            existing.status === 'uncertain')
+        ) {
+          throw new Error(`任务 ${input.runId} 当前投稿状态为 ${existing.status}，禁止重置为草稿`);
+        }
+
+        db.prepare(`
+          INSERT INTO publish_records (
+            run_id, platform, title, description, tags, status, bvid, attempts, error, updated_at
+          ) VALUES (?, 'bilibili', ?, ?, ?, 'draft', NULL, 0, NULL, ?)
+          ON CONFLICT(run_id) DO UPDATE SET
+            title = excluded.title,
+            description = excluded.description,
+            tags = excluded.tags,
+            status = 'draft',
+            bvid = NULL,
+            attempts = 0,
+            error = NULL,
+            updated_at = excluded.updated_at
+        `).run(
+          input.runId,
+          input.title,
+          input.description,
+          JSON.stringify(input.tags),
+          input.updatedAt,
+        );
+        const record = this.getByRun(input.runId);
+        if (!record) {
+          throw new Error(`写入发布草稿失败: ${input.runId}`);
+        }
+        return record;
+      });
     },
 
     /** 查询指定任务对应的投稿记录 */
@@ -206,37 +221,47 @@ export function createPublishRepo(db: DatabaseSync) {
       return row ? mapPublishRecord(row) : null;
     },
 
-    /** 局部更新人工修改后的投稿标题、简介或标签列表 */
+    /** 局部更新人工修改后的投稿标题、简介或标签列表（仅允许在草稿或失败状态下编辑） */
     updateDraftFields(
       runId: string,
       patch: { title?: string; description?: string; tags?: string[]; updatedAt: string },
     ): PublishRecord | null {
-      const sets = ['updated_at = ?'];
-      const params: string[] = [patch.updatedAt];
+      return inTransaction(db, () => {
+        const existing = this.getByRun(runId);
+        if (!existing) {
+          return null;
+        }
+        if (existing.status !== 'draft' && existing.status !== 'failed') {
+          throw new Error(`当前投稿状态为 ${existing.status}，不允许修改投稿文案`);
+        }
 
-      if (patch.title !== undefined) {
-        sets.push('title = ?');
-        params.push(patch.title);
-      }
-      if (patch.description !== undefined) {
-        sets.push('description = ?');
-        params.push(patch.description);
-      }
-      if (patch.tags !== undefined) {
-        sets.push('tags = ?');
-        params.push(JSON.stringify(patch.tags));
-      }
+        const sets = ['updated_at = ?'];
+        const params: string[] = [patch.updatedAt];
 
-      params.push(runId);
-      db.prepare(`UPDATE publish_records SET ${sets.join(', ')} WHERE run_id = ?`).run(...params);
-      return this.getByRun(runId);
+        if (patch.title !== undefined) {
+          sets.push('title = ?');
+          params.push(patch.title);
+        }
+        if (patch.description !== undefined) {
+          sets.push('description = ?');
+          params.push(patch.description);
+        }
+        if (patch.tags !== undefined) {
+          sets.push('tags = ?');
+          params.push(JSON.stringify(patch.tags));
+        }
+
+        params.push(runId);
+        db.prepare(`UPDATE publish_records SET ${sets.join(', ')} WHERE run_id = ?`).run(...params);
+        return this.getByRun(runId);
+      });
     },
 
     /** 更新投稿状态、记录上传尝试次数或写入成功后的 B 站 BV 号 */
     updateStatus(
       runId: string,
       status: PublishStatus,
-      opts?: {
+      opts: {
         bvid?: string | null;
         error?: string | null;
         incrementAttempts?: boolean;
@@ -244,10 +269,7 @@ export function createPublishRepo(db: DatabaseSync) {
       },
     ): void {
       const sets = ['status = ?', 'updated_at = ?'];
-      const params: Array<string | number | null> = [
-        status,
-        opts?.updatedAt ?? new Date().toISOString(),
-      ];
+      const params: Array<string | number | null> = [status, opts.updatedAt];
 
       if (opts?.bvid !== undefined) {
         sets.push('bvid = ?');

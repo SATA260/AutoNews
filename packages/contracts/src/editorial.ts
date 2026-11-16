@@ -62,21 +62,26 @@ export const MetricPairSchema = z.object({
 /** 关键数据指标类型 */
 export type MetricPair = z.infer<typeof MetricPairSchema>;
 
+/** 按指定核心要点数量上限构建单条新闻润色定稿校验规则 */
+export function createPolishedItemSchema(keyPointsMax = 3) {
+  return z.object({
+    title: z.string().min(1),
+    shortTitle: z.string().min(1),
+    category: z.string().min(1),
+    entity: z.string().min(1),
+    summary: z.string().min(1),
+    keyPoints: z.array(z.string().min(1)).max(Math.max(1, keyPointsMax)),
+    detail: z.string().min(1),
+    hostComment: z.string().min(1),
+    narration: z.array(z.string().min(1)).min(1),
+    evidence: z.array(EvidenceSchema).min(1),
+    officialQuote: z.string().optional(),
+    metrics: z.array(MetricPairSchema).max(4).optional(),
+  });
+}
+
 /** 经过中文口播润色后的单条新闻定稿（包含屏幕展示文案和语音播报分句） */
-export const PolishedItemSchema = z.object({
-  title: z.string().min(1),
-  shortTitle: z.string().min(1),
-  category: z.string().min(1),
-  entity: z.string().min(1),
-  summary: z.string().min(1),
-  keyPoints: z.array(z.string().min(1)).max(3),
-  detail: z.string().min(1),
-  hostComment: z.string().min(1),
-  narration: z.array(z.string().min(1)).min(1),
-  evidence: z.array(EvidenceSchema).min(1),
-  officialQuote: z.string().optional(),
-  metrics: z.array(MetricPairSchema).max(4).optional(),
-});
+export const PolishedItemSchema = createPolishedItemSchema(3);
 /** 中文润色定稿类型 */
 export type PolishedItem = z.infer<typeof PolishedItemSchema>;
 

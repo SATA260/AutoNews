@@ -46,5 +46,6 @@ npm run build          # 严格 TypeScript 编译与生产打包
 ## 自动化合成参数与桥接接口
 
 - `?clean=1`：隐藏底部控制栏，输出纯净 16:9 画面
-- `?autoplay=1` / `?page=0` / `?theme=light|dark` / `?transition=slide|none` / `?motion=static`
+- `?autoplay=1` / `?page=0` / `?theme=light|dark` / `?transition=flip|glide|shutter|none` / `?motion=static`
+- `T` 快捷键（或点击底部控制台动效按钮）：实时切换「立体翻页」「层叠滑移」「折页快门」「无动效」
 - `window.__NEWS_DECK__.setNewsData(json)` / `goToPage(i)` / `getHealthReport()`

@@ -73,3 +73,21 @@ export class CliOutputError extends CliBridgeError {
     this.rawOutput = rawOutput;
   }
 }
+
+const AUTH_ERROR_PATTERNS = [
+  /not logged in/i,
+  /please\s+log\s*in/i,
+  /authentication\s+required/i,
+  /unauthenticated/i,
+  /login\s+required/i,
+  /invalid\s+credentials/i,
+  /token\s+expired/i,
+  /未登录/,
+  /请先登录/,
+  /认证失败/,
+];
+
+/** 判断外部命令行输出中是否包含未登录、鉴权失败或凭证过期提示 */
+export function hasAuthFailureMessage(text: string): boolean {
+  return AUTH_ERROR_PATTERNS.some((pattern) => pattern.test(text));
+}

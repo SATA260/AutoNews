@@ -159,6 +159,78 @@ describe('M1 sqlite storage, paths, and transactions', () => {
       fs.access(path.join(runDir, 'archive', 'attempt-1-package', 'stages', 'package.json')),
     ).resolves.toBeUndefined();
 
+    // 验证软链接越界拦截与嵌套事务保存点
+    const outsideSecret = path.join(core.context.paths.storageDir, 'secret.txt');
+    await fs.writeFile(outsideSecret, 'top-secret');
+    await fs.symlink(outsideSecret, path.join(runDir, 'leak.txt'));
+    expect(() => resolveSafeArtifactPath(core.context.paths.runsDir, 'run-1', 'leak.txt')).toThrow(
+      /软链接/,
+    );
+
+    inTransaction(core.context.db, () => {
+      core.context.repos.schedules.create({
+        id: 'sched-outer',
+        name: '外层任务',
+        time: '07:00',
+        itemCount: 3,
+        enabled: true,
+        now: '2026-11-16T01:00:00.000Z',
+      });
+      expect(() =>
+        inTransaction(core.context.db, () => {
+          core.context.repos.schedules.create({
+            id: 'sched-inner',
+            name: '内层回滚',
+            time: '08:00',
+            itemCount: 3,
+            enabled: true,
+            now: '2026-11-16T01:00:00.000Z',
+          });
+          throw new Error('inner rollback');
+        }),
+      ).toThrow('inner rollback');
+    });
+    expect(core.context.repos.schedules.getById('sched-outer')).not.toBeNull();
+    expect(core.context.repos.schedules.getById('sched-inner')).toBeNull();
+
+    // 验证互斥锁原子抢占与 ISO 毫秒时间戳对比
+    const lock1 = core.context.repos.locks.tryAcquire({
+      name: 'pipeline',
+      ownerRun: 'run-a',
+      pid: process.pid,
+      now: '2026-11-16T02:00:00.000Z',
+      staleMs: 60_000,
+      isProcessAlive: () => true,
+    });
+    expect(lock1.acquired).toBe(true);
+    const lock2 = core.context.repos.locks.tryAcquire({
+      name: 'pipeline',
+      ownerRun: 'run-b',
+      pid: process.pid + 1,
+      now: '2026-11-16T02:00:10.000Z',
+      staleMs: 60_000,
+      isProcessAlive: () => true,
+    });
+    expect(lock2.acquired).toBe(false);
+
+    core.context.repos.sourceState.upsertSuccess({
+      sourceId: 'src-1',
+      lastFetchedAt: '2026-11-16T02:00:00.000Z',
+      lastItemPublishedAt: '2026-11-16T10:00:00.500Z',
+      etag: '"v1"',
+      lastModified: null,
+    });
+    core.context.repos.sourceState.upsertSuccess({
+      sourceId: 'src-1',
+      lastFetchedAt: '2026-11-16T02:05:00.000Z',
+      lastItemPublishedAt: '2026-11-16T10:00:00Z',
+      etag: null,
+      lastModified: null,
+    });
+    const srcState = core.context.repos.sourceState.get('src-1');
+    expect(srcState?.lastItemPublishedAt).toBe('2026-11-16T10:00:00.500Z');
+    expect(srcState?.etag).toBeNull();
+
     await core.close();
   });
 });

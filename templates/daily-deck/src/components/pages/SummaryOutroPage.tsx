@@ -2,11 +2,13 @@ import React from 'react';
 import type { SanitizedDailyIssue } from '../../schema/newsSchema';
 import { AutoFitText } from '../guard/AutoFitText';
 
-interface SummaryOutroPageProps {
+/** 全期总结尾页组件入参属性 */
+export interface SummaryOutroPageProps {
   issue: SanitizedDailyIssue;
   onJumpToNews: (itemIndex: number) => void;
 }
 
+/** 全期总结尾页：按编号列表汇总全部新闻的短标题、梗概与来源，底部附互动收尾提示 */
 export const SummaryOutroPage: React.FC<SummaryOutroPageProps> = ({
   issue,
   onJumpToNews,
@@ -29,6 +31,7 @@ export const SummaryOutroPage: React.FC<SummaryOutroPageProps> = ({
             key={item.id}
             type="button"
             className="outro-row"
+            style={{ '--row-idx': idx } as React.CSSProperties}
             onClick={() => onJumpToNews(idx)}
           >
             <span className="outro-row-num">{item.indexLabel}</span>

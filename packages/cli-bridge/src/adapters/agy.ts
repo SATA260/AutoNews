@@ -1,23 +1,19 @@
+import fs from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
 import { type CliConfig, zodToJsonSchema } from '@aidaily/contracts';
-import { CliAuthError, CliExitError, CliOutputError, PromptTooLargeError } from '../errors.js';
+import {
+  CliAuthError,
+  CliExitError,
+  CliOutputError,
+  hasAuthFailureMessage,
+  PromptTooLargeError,
+} from '../errors.js';
 import { runSubprocess } from '../exec.js';
 import { extractJsonFromText } from '../json.js';
 import type { AdapterCommand, AdapterParsedOutput, CliAdapter, InvokeRequest } from '../types.js';
 
 const MAX_PROMPT_BYTES = 400_000;
-
-const AUTH_ERROR_PATTERNS = [
-  /not logged in/i,
-  /please\s+log\s*in/i,
-  /authentication\s+required/i,
-  /unauthenticated/i,
-  /login\s+required/i,
-  /invalid\s+credentials/i,
-  /token\s+expired/i,
-  /未登录/,
-  /请先登录/,
-  /认证失败/,
-];
 
 /** Antigravity CLI 返回的标准 JSON 包装结构 */
 interface AgyEnvelope {
@@ -30,11 +26,6 @@ interface AgyEnvelope {
     input_tokens?: number;
     output_tokens?: number;
   };
-}
-
-/** 检查错误输出或返回文本中是否包含未登录、Token 过期等鉴权提示 */
-function hasAuthFailure(text: string): boolean {
-  return AUTH_ERROR_PATTERNS.some((pattern) => pattern.test(text));
 }
 
 /** 去除命令行加载动画里的终端颜色码与回车控制字符 */
@@ -92,7 +83,7 @@ export const agyAdapter: CliAdapter = {
     ctx: { hasSchema: boolean },
   ): AdapterParsedOutput {
     const combinedDiag = `${stderr}\n${stdout}`;
-    if (hasAuthFailure(stderr)) {
+    if (hasAuthFailureMessage(stderr)) {
       throw new CliAuthError(`agy 认证失败或未登录: ${stderr.trim()}`);
     }
 
@@ -104,7 +95,7 @@ export const agyAdapter: CliAdapter = {
       }
       envelope = parsed as AgyEnvelope;
     } catch (err) {
-      if (hasAuthFailure(combinedDiag)) {
+      if (hasAuthFailureMessage(combinedDiag)) {
         throw new CliAuthError(`agy 认证失败或未登录: ${combinedDiag.trim()}`, err);
       }
       if (exitCode !== 0) {
@@ -123,7 +114,7 @@ export const agyAdapter: CliAdapter = {
 
     if (exitCode !== 0 || envelope.status !== 'SUCCESS') {
       const msg = envelope.error || stderr.trim() || `status=${String(envelope.status)}`;
-      if (hasAuthFailure(msg)) {
+      if (hasAuthFailureMessage(msg)) {
         throw new CliAuthError(`agy 认证失败或未登录: ${msg}`);
       }
       throw new CliExitError(
@@ -154,22 +145,64 @@ export const agyAdapter: CliAdapter = {
     };
   },
 
-  /** 运行 `--help` 检查本机 `agy` 可执行文件是否正常响应 */
+  /** 先验证 `agy --help`，再在空目录执行一次最小结构化调用以确认登录状态与输出可用 */
   async healthcheck(cfg: CliConfig): Promise<{ ok: boolean; detail: string }> {
+    let probeDir: string | null = null;
     try {
-      const res = await runSubprocess(cfg.bin, ['--help'], { timeoutMs: 10_000 });
-      if (res.exitCode === 0) {
-        return { ok: true, detail: `agy 可用 (${cfg.bin})` };
+      const helpRes = await runSubprocess(cfg.bin, ['--help'], { timeoutMs: 10_000 });
+      if (helpRes.exitCode !== 0) {
+        return {
+          ok: false,
+          detail: `agy --help 返回退出码 ${helpRes.exitCode}: ${helpRes.stderr.trim() || helpRes.stdout.trim()}`,
+        };
+      }
+
+      probeDir = await fs.mkdtemp(path.join(os.tmpdir(), 'aidaily-agy-health-'));
+      const minimalSchema = JSON.stringify({
+        type: 'object',
+        properties: { ok: { type: 'boolean' } },
+        required: ['ok'],
+      });
+      const probeRes = await runSubprocess(
+        cfg.bin,
+        [
+          '-p',
+          'Return JSON {"ok": true}',
+          '--output-format',
+          'json',
+          '--disable-slash-commands',
+          '--print-timeout',
+          '20s',
+          '--json-schema',
+          minimalSchema,
+          ...cfg.extraArgs,
+        ],
+        { cwd: probeDir, timeoutMs: 25_000 },
+      );
+
+      const parsed = agyAdapter.parse(probeRes.stdout, probeRes.stderr, probeRes.exitCode, {
+        hasSchema: true,
+      });
+      if (
+        typeof parsed.payload === 'object' &&
+        parsed.payload !== null &&
+        (parsed.payload as Record<string, unknown>).ok === true
+      ) {
+        return { ok: true, detail: `agy 可用且结构化调用正常 (${cfg.bin})` };
       }
       return {
         ok: false,
-        detail: `agy --help 返回退出码 ${res.exitCode}: ${res.stderr.trim() || res.stdout.trim()}`,
+        detail: 'agy 结构化探测未返回预期 {"ok": true}',
       };
     } catch (err) {
       return {
         ok: false,
         detail: err instanceof Error ? err.message : String(err),
       };
+    } finally {
+      if (probeDir) {
+        await fs.rm(probeDir, { recursive: true, force: true }).catch(() => undefined);
+      }
     }
   },
 

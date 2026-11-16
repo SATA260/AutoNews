@@ -10,7 +10,20 @@ import {
   type StageStatus,
   type Trigger,
 } from '@aidaily/contracts';
-import type { DatabaseSync } from '../db.js';
+import { type DatabaseSync, inTransaction } from '../db.js';
+
+/** 校验分页上限参数为不超过指定最大值的正整数 */
+function clampLimit(limit: number, maxLimit = 500): number {
+  if (!Number.isInteger(limit) || limit <= 0) {
+    throw new RangeError(`查询数量上限 limit 必须为正整数: ${String(limit)}`);
+  }
+  return Math.min(limit, maxLimit);
+}
+
+/** 互斥锁原子抢占或接管的执行结果 */
+export type LockAcquireResult =
+  | { acquired: true; takenOverFrom?: LockRow }
+  | { acquired: false; holder: LockRow };
 
 /** 数据库 `runs` 表原始行结构 */
 interface RunRow {
@@ -166,7 +179,7 @@ export function createRunsRepo(db: DatabaseSync) {
       return row ? mapRunRowDetail(row) : null;
     },
 
-    /** 按状态和游标分页查询任务摘要列表 */
+    /** 按状态和游标分页查询任务摘要列表（游标支持 `<createdAt>` 或 `<createdAt>|<id>`） */
     list(q?: { status?: RunStatus[]; limit?: number; before?: string }): RunSummary[] {
       const conditions: string[] = [];
       const params: Array<string | number> = [];
@@ -177,16 +190,24 @@ export function createRunsRepo(db: DatabaseSync) {
         params.push(...q.status);
       }
       if (q?.before) {
-        conditions.push('created_at < ?');
-        params.push(q.before);
+        const sepIdx = q.before.indexOf('|');
+        if (sepIdx !== -1) {
+          const beforeTs = q.before.slice(0, sepIdx);
+          const beforeId = q.before.slice(sepIdx + 1);
+          conditions.push('(created_at < ? OR (created_at = ? AND id < ?))');
+          params.push(beforeTs, beforeTs, beforeId);
+        } else {
+          conditions.push('created_at < ?');
+          params.push(q.before);
+        }
       }
 
       const where = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
-      const limit = q?.limit ?? 20;
+      const limit = clampLimit(q?.limit ?? 20, 500);
       params.push(limit);
 
       const rows = db
-        .prepare(`SELECT * FROM runs ${where} ORDER BY created_at DESC LIMIT ?`)
+        .prepare(`SELECT * FROM runs ${where} ORDER BY created_at DESC, id DESC LIMIT ?`)
         .all(...params) as unknown as RunRow[];
       return rows.map(mapRunSummary);
     },
@@ -274,21 +295,23 @@ export function createRunsRepo(db: DatabaseSync) {
       return row?.cancel_requested === 1;
     },
 
-    /** 将任务的总执行尝试次数加一并返回最新次数 */
+    /** 将任务的总执行尝试次数原子加一并返回最新次数 */
     incrementAttempt(id: string): number {
-      db.prepare('UPDATE runs SET attempt = attempt + 1 WHERE id = ?').run(id);
-      const row = db.prepare('SELECT attempt FROM runs WHERE id = ?').get(id) as {
-        attempt: number;
-      };
+      const row = db
+        .prepare('UPDATE runs SET attempt = attempt + 1 WHERE id = ? RETURNING attempt')
+        .get(id) as { attempt: number } | undefined;
+      if (!row) {
+        throw new Error(`未找到任务记录，无法累加执行次数: ${id}`);
+      }
       return row.attempt;
     },
 
-    /** 找出已超出重试保留窗口、需要自动放弃并释放新闻的任务列表 */
+    /** 找出已超出重试保留窗口、需要自动放弃并释放新闻的任务列表（保留已出片的待审核任务） */
     listExpiredRetryable(nowIso: string): RunSummary[] {
       const rows = db
         .prepare(`
           SELECT * FROM runs
-          WHERE status IN ('failed', 'cancelled', 'interrupted', 'rejected', 'awaiting_review')
+          WHERE status IN ('failed', 'cancelled', 'interrupted', 'rejected')
             AND retry_deadline_at IS NOT NULL
             AND retry_deadline_at <= ?
         `)
@@ -301,15 +324,17 @@ export function createRunsRepo(db: DatabaseSync) {
 /** 创建任务步骤记录操作对象，管理各步骤的完成情况与作废标记 */
 export function createRunStagesRepo(db: DatabaseSync) {
   return {
-    /** 为新建任务初始化所有自动处理步骤记录 */
+    /** 为新建任务在事务内初始化所有自动处理步骤记录 */
     initStages(runId: string): void {
-      const stmt = db.prepare(`
-        INSERT OR IGNORE INTO run_stages (run_id, stage, status, attempt)
-        VALUES (?, ?, 'pending', 0)
-      `);
-      for (const stage of PIPELINE_STAGES) {
-        stmt.run(runId, stage);
-      }
+      inTransaction(db, () => {
+        const stmt = db.prepare(`
+          INSERT OR IGNORE INTO run_stages (run_id, stage, status, attempt)
+          VALUES (?, ?, 'pending', 0)
+        `);
+        for (const stage of PIPELINE_STAGES) {
+          stmt.run(runId, stage);
+        }
+      });
     },
 
     /** 查询指定任务下全部步骤的执行记录 */
@@ -411,6 +436,7 @@ export function createRunEventsRepo(db: DatabaseSync) {
 
     /** 按自增游标增量拉取某个任务的新事件列表 */
     listAfter(runId: string, afterId = 0, limit = 200): RunEvent[] {
+      const safeLimit = clampLimit(limit, 500);
       const rows = db
         .prepare(`
           SELECT * FROM run_events
@@ -418,7 +444,7 @@ export function createRunEventsRepo(db: DatabaseSync) {
           ORDER BY id ASC
           LIMIT ?
         `)
-        .all(runId, afterId, limit) as unknown as RunEventRow[];
+        .all(runId, afterId, safeLimit) as unknown as RunEventRow[];
       return rows.map(mapRunEvent);
     },
   };
@@ -450,7 +476,48 @@ export function createLocksRepo(db: DatabaseSync) {
       };
     },
 
-    /** 写入或接管指定名称的互斥锁记录 */
+    /** 在独占事务内原子抢占或接管过期无效锁，避免双进程并发同时获得运行锁 */
+    tryAcquire(input: {
+      name: string;
+      ownerRun: string;
+      pid: number;
+      now: string;
+      staleMs: number;
+      isProcessAlive: (pid: number) => boolean;
+    }): LockAcquireResult {
+      return inTransaction(db, () => {
+        const existing = this.get(input.name);
+        if (existing && existing.ownerRun !== null && existing.ownerRun !== input.ownerRun) {
+          const heartbeatMs = existing.heartbeatAt ? Date.parse(existing.heartbeatAt) : Number.NaN;
+          const nowMs = Date.parse(input.now);
+          const heartbeatStale =
+            Number.isNaN(heartbeatMs) || Number.isNaN(nowMs) || nowMs - heartbeatMs > input.staleMs;
+          const pidDead = existing.pid === null || !input.isProcessAlive(existing.pid);
+          if (!pidDead && !heartbeatStale) {
+            return { acquired: false, holder: existing };
+          }
+          this.upsertLock({
+            name: input.name,
+            ownerRun: input.ownerRun,
+            pid: input.pid,
+            acquiredAt: input.now,
+            heartbeatAt: input.now,
+          });
+          return { acquired: true, takenOverFrom: existing };
+        }
+
+        this.upsertLock({
+          name: input.name,
+          ownerRun: input.ownerRun,
+          pid: input.pid,
+          acquiredAt: input.now,
+          heartbeatAt: input.now,
+        });
+        return { acquired: true };
+      });
+    },
+
+    /** 写入或更新指定名称的互斥锁记录（仅供锁事务内部或测试直接调用） */
     upsertLock(input: {
       name: string;
       ownerRun: string;

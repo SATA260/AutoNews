@@ -10,7 +10,7 @@ import type {
   RunItemRecord,
   RunItemStatus,
 } from '@aidaily/contracts';
-import type { DatabaseSync } from '../db.js';
+import { type DatabaseSync, inTransaction } from '../db.js';
 
 /** 数据库 `events` 表行结构 */
 interface EventRow {
@@ -137,29 +137,34 @@ function mapLlmCall(row: LlmCallRow): LlmCallRecord {
 /** 创建候选新闻事件操作对象，负责存储与清理单期选出的事件聚类 */
 export function createEventsRepo(db: DatabaseSync) {
   return {
-    /** 批量写入选出的主选与替补事件记录 */
+    /** 在事务内批量写入选出的主选与替补事件记录 */
     insertMany(records: EventRecord[]): void {
-      const stmt = db.prepare(`
-        INSERT INTO events (
-          id, run_id, rank, role, title, article_ids, category, entity, score, public_appeal, reason, refill_round
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      `);
-      for (const r of records) {
-        stmt.run(
-          r.id,
-          r.runId,
-          r.rank,
-          r.role,
-          r.title,
-          JSON.stringify(r.articleIds),
-          r.category,
-          r.entity,
-          r.score,
-          r.publicAppeal,
-          r.reason,
-          r.refillRound,
-        );
+      if (records.length === 0) {
+        return;
       }
+      inTransaction(db, () => {
+        const stmt = db.prepare(`
+          INSERT INTO events (
+            id, run_id, rank, role, title, article_ids, category, entity, score, public_appeal, reason, refill_round
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `);
+        for (const r of records) {
+          stmt.run(
+            r.id,
+            r.runId,
+            r.rank,
+            r.role,
+            r.title,
+            JSON.stringify(r.articleIds),
+            r.category,
+            r.entity,
+            r.score,
+            r.publicAppeal,
+            r.reason,
+            r.refillRound,
+          );
+        }
+      });
     },
 
     /** 按排序序号查询某期任务的全部候选事件 */
@@ -170,13 +175,15 @@ export function createEventsRepo(db: DatabaseSync) {
       return rows.map(mapEvent);
     },
 
-    /** 清理指定任务的事件、新闻条目及其历史版本记录（用于重新选题前重置） */
+    /** 在事务内清理指定任务的事件、新闻条目及其历史版本记录（用于重新选题前重置） */
     deleteByRun(runId: string): void {
-      db.prepare(
-        'DELETE FROM item_versions WHERE item_id IN (SELECT id FROM run_items WHERE run_id = ?)',
-      ).run(runId);
-      db.prepare('DELETE FROM run_items WHERE run_id = ?').run(runId);
-      db.prepare('DELETE FROM events WHERE run_id = ?').run(runId);
+      inTransaction(db, () => {
+        db.prepare(
+          'DELETE FROM item_versions WHERE item_id IN (SELECT id FROM run_items WHERE run_id = ?)',
+        ).run(runId);
+        db.prepare('DELETE FROM run_items WHERE run_id = ?').run(runId);
+        db.prepare('DELETE FROM events WHERE run_id = ?').run(runId);
+      });
     },
   };
 }
@@ -184,26 +191,31 @@ export function createEventsRepo(db: DatabaseSync) {
 /** 创建单条新闻稿件读写对象，管理撰写进度、修改轮次和历史版本快照 */
 export function createRunItemsRepo(db: DatabaseSync) {
   return {
-    /** 批量创建待处理新闻条目 */
+    /** 在事务内批量创建待处理新闻条目 */
     createMany(items: RunItemRecord[]): void {
-      const stmt = db.prepare(`
-        INSERT INTO run_items (
-          id, run_id, event_id, position, status, revision, drop_reason, final_json, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-      `);
-      for (const item of items) {
-        stmt.run(
-          item.id,
-          item.runId,
-          item.eventId,
-          item.position,
-          item.status,
-          item.revision,
-          item.dropReason,
-          item.finalJson ? JSON.stringify(item.finalJson) : null,
-          item.updatedAt,
-        );
+      if (items.length === 0) {
+        return;
       }
+      inTransaction(db, () => {
+        const stmt = db.prepare(`
+          INSERT INTO run_items (
+            id, run_id, event_id, position, status, revision, drop_reason, final_json, updated_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `);
+        for (const item of items) {
+          stmt.run(
+            item.id,
+            item.runId,
+            item.eventId,
+            item.position,
+            item.status,
+            item.revision,
+            item.dropReason,
+            item.finalJson ? JSON.stringify(item.finalJson) : null,
+            item.updatedAt,
+          );
+        }
+      });
     },
 
     /** 按条目 ID 查询单条新闻状态 */

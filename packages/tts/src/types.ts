@@ -23,7 +23,7 @@ export interface TtsProvider {
   stop?(): Promise<void>;
 }
 
-/** 语音合成调度服务初始化参数 */
+/** 语音合成调度服务初始化参数（`bridge` 供后续接入命令行类本地语音引擎时调用） */
 export interface TtsServiceOptions {
   settings: TtsSettings;
   cacheDir: string;

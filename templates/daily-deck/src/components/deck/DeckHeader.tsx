@@ -1,7 +1,8 @@
 import React from 'react';
 import type { SanitizedDailyIssue } from '../../schema/newsSchema';
 
-interface DeckHeaderProps {
+/** 顶部刊头栏组件入参属性 */
+export interface DeckHeaderProps {
   issue: SanitizedDailyIssue;
   currentPage: number;
   totalPages: number;
@@ -9,6 +10,7 @@ interface DeckHeaderProps {
   onSelectPage?: (index: number) => void;
 }
 
+/** 顶部刊头栏：展示刊名、发布日期、期号及可点击的细线翻页进度条 */
 export const DeckHeader: React.FC<DeckHeaderProps> = ({
   issue,
   currentPage,

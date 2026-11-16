@@ -68,7 +68,26 @@ export function resolveRepoPaths(rootDir: string): RepoPaths {
   };
 }
 
-/** 安全解析某期任务目录内部的产物文件路径，防止通过 `../` 越界访问外部文件 */
+/** 解析目标路径及其已存在最近祖先的真实物理路径，拦截通过软链接逃逸目录 */
+function resolveRealContainmentPath(targetPath: string): string {
+  const unresolvedSuffix: string[] = [];
+  let cursor = path.resolve(targetPath);
+  while (true) {
+    try {
+      const real = fs.realpathSync(cursor);
+      return unresolvedSuffix.length > 0 ? path.join(real, ...unresolvedSuffix.reverse()) : real;
+    } catch {
+      const parent = path.dirname(cursor);
+      if (parent === cursor) {
+        return path.resolve(targetPath);
+      }
+      unresolvedSuffix.push(path.basename(cursor));
+      cursor = parent;
+    }
+  }
+}
+
+/** 安全解析某期任务目录内部的产物文件路径，防止通过 `../` 或软链接越界访问外部文件 */
 export function resolveSafeArtifactPath(runsDir: string, runId: string, relPath: string): string {
   if (!SAFE_ID_PATTERN.test(runId) || runId === '.' || runId === '..') {
     throw new Error(`非法的任务 ID: ${runId}`);
@@ -81,6 +100,12 @@ export function resolveSafeArtifactPath(runsDir: string, runId: string, relPath:
   const resolvedTarget = path.resolve(baseRunDir, normalizedRel);
   if (!resolvedTarget.startsWith(`${baseRunDir}${path.sep}`)) {
     throw new Error(`禁止访问任务目录之外的路径: ${relPath}`);
+  }
+
+  const realBaseDir = resolveRealContainmentPath(baseRunDir);
+  const realTarget = resolveRealContainmentPath(resolvedTarget);
+  if (!realTarget.startsWith(`${realBaseDir}${path.sep}`)) {
+    throw new Error(`禁止通过软链接访问任务目录之外的路径: ${relPath}`);
   }
   return resolvedTarget;
 }

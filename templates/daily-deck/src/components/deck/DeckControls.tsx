@@ -1,6 +1,7 @@
 import React from 'react';
 import {
   AlertTriangle,
+  BookOpen,
   CheckCircle2,
   ChevronLeft,
   ChevronRight,
@@ -11,35 +12,49 @@ import {
   Play,
   Sun,
 } from 'lucide-react';
+import type { DeckTransitionStyle } from '../../bridge/videoSynthBridge';
 
-interface DeckControlsProps {
+/** 底部预览控制栏组件入参属性 */
+export interface DeckControlsProps {
   currentPage: number;
   totalPages: number;
   isAutoPlaying: boolean;
   theme: 'light' | 'dark';
   cleanMode: boolean;
+  transitionStyle: DeckTransitionStyle;
   warningCount: number;
   runtimeErrorCount: number;
   onPrev: () => void;
   onNext: () => void;
   onToggleAutoPlay: () => void;
   onToggleTheme: () => void;
+  onCycleTransition: () => void;
   onToggleCleanMode: () => void;
   onOpenInspector: (tab?: 'summary' | 'json' | 'health') => void;
 }
 
+const TRANSITION_LABELS: Record<DeckTransitionStyle, string> = {
+  flip: '立体翻页 (T)',
+  glide: '层叠滑移 (T)',
+  shutter: '折页快门 (T)',
+  none: '无动效 (T)',
+};
+
+/** 预览控制台：提供翻页、自动轮播、动效切换、深浅主题、数据编辑及纯净模式开关 */
 export const DeckControls: React.FC<DeckControlsProps> = ({
   currentPage,
   totalPages,
   isAutoPlaying,
   theme,
   cleanMode,
+  transitionStyle,
   warningCount,
   runtimeErrorCount,
   onPrev,
   onNext,
   onToggleAutoPlay,
   onToggleTheme,
+  onCycleTransition,
   onToggleCleanMode,
   onOpenInspector,
 }) => {
@@ -92,6 +107,16 @@ export const DeckControls: React.FC<DeckControlsProps> = ({
         >
           {isAutoPlaying ? <Pause size={16} /> : <Play size={16} />}
           <span>{isAutoPlaying ? '暂停轮播' : '自动播放'}</span>
+        </button>
+
+        <button
+          type="button"
+          className="ctrl-btn"
+          onClick={onCycleTransition}
+          title="切换翻页过渡动画样式 (T)"
+        >
+          <BookOpen size={16} />
+          <span>{TRANSITION_LABELS[transitionStyle]}</span>
         </button>
 
         <button

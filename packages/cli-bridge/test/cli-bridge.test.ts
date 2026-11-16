@@ -263,4 +263,52 @@ describe('@aidaily/cli-bridge', () => {
     });
     expect(raw.stdout).toBe('pong');
   });
+
+  it('does not fail succeeded invoke when logCall throws and aborts waiting callers in Semaphore', async () => {
+    await fs.chmod(FIXTURE_AGY, 0o755);
+    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'aidaily-bridge-logerr-'));
+    tempDirs.push(tmpDir);
+    const bridge = new CliBridge({
+      configs: {
+        slowAgy: { adapter: 'agy', bin: FIXTURE_AGY, extraArgs: [] },
+      },
+      tmpDir,
+      maxConcurrentCalls: 1,
+      logCall: () => {
+        throw new Error('disk full while logging');
+      },
+    });
+
+    const okRes = await bridge.invoke({
+      cli: 'slowAgy',
+      prompt: 'return json',
+      schema: z.object({ ok: z.boolean() }),
+      timeoutMs: 10_000,
+      retries: 0,
+    });
+    expect(okRes.data.ok).toBe(true);
+
+    // 验证排队等待信号量期间响应取消信号
+    process.env.FAKE_AGY_MODE = 'timeout';
+    const holderAc = new AbortController();
+    const waiterAc = new AbortController();
+    const holder = bridge.invoke({
+      cli: 'slowAgy',
+      prompt: 'hold slot',
+      timeoutMs: 10_000,
+      retries: 0,
+      signal: holderAc.signal,
+    });
+    const waiter = bridge.invoke({
+      cli: 'slowAgy',
+      prompt: 'queued caller',
+      timeoutMs: 10_000,
+      retries: 0,
+      signal: waiterAc.signal,
+    });
+    setTimeout(() => waiterAc.abort(), 30);
+    await expect(waiter).rejects.toThrow();
+    holderAc.abort();
+    await expect(holder).rejects.toThrow();
+  });
 });
