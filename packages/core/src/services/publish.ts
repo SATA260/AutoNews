@@ -10,6 +10,7 @@ import {
 import { commitRunConsumption } from '../publish/consumption.js';
 import { ensurePublishDraftForRun } from '../publish/description.js';
 import { inTransaction } from '../storage/db.js';
+import type { PublishedHistoryRecord } from '../storage/repos/articles-repo.js';
 import { emitRunEvent } from '../workflow/events.js';
 import { assertPipelineLockAvailable } from '../workflow/lock.js';
 
@@ -46,6 +47,8 @@ export interface PublishService {
   reject(runId: string, reason?: string): Promise<void>;
   /** 不向外网投稿发布，仅把本期选用的新闻提交已播历史库并标记整期完结 */
   markConsumed(runId: string): Promise<void>;
+  /** 按发布时间倒序查询已播出新闻的历史记录列表 */
+  listHistory(limit?: number): Promise<PublishedHistoryRecord[]>;
   /** 返回用于命令行交互式扫码登录 B 站的可执行程序路径与参数列表 */
   biliLoginCommand(): { bin: string; args: string[] };
 }
@@ -399,6 +402,11 @@ export function createPublishService(
         message: `已跳过平台上传，提交 ${stats.consumedArticleCount} 篇已播新闻并释放 ${stats.releasedUnusedCount} 篇未用新闻`,
         data: stats,
       });
+    },
+
+    /** 查询最近已播出新闻事件历史记录 */
+    async listHistory(limit = 100): Promise<PublishedHistoryRecord[]> {
+      return ctx.repos.history.listAll(limit);
     },
 
     /** 返回供 CLI 执行交互式 B 站扫码登录的命令结构 */

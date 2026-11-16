@@ -224,3 +224,22 @@ export const ScheduleJobSchema = z.object({
 });
 /** 定时任务类型 */
 export type ScheduleJob = z.infer<typeof ScheduleJobSchema>;
+
+/** 运行环境自检中单一检查项的诊断结果 */
+export const DoctorCheckItemSchema = z.object({
+  name: z.string().min(1),
+  ok: z.boolean(),
+  detail: z.string(),
+  required: z.boolean(),
+});
+/** 单项环境自检结果类型 */
+export type DoctorCheckItem = z.infer<typeof DoctorCheckItemSchema>;
+
+/** 系统运行环境整体自检报告 */
+export const DoctorReportSchema = z.object({
+  ok: z.boolean(),
+  checkedAt: z.string(),
+  checks: z.array(DoctorCheckItemSchema),
+});
+/** 系统环境自检报告类型 */
+export type DoctorReport = z.infer<typeof DoctorReportSchema>;

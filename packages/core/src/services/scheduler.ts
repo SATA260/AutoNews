@@ -1,0 +1,414 @@
+import crypto from 'node:crypto';
+import fsSync from 'node:fs';
+import fs from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { type ScheduleJob, ScheduleJobSchema, ScheduleTimeSchema } from '@aidaily/contracts';
+import { TZDate } from '@date-fns/tz';
+import { addDays } from 'date-fns';
+import { execa } from 'execa';
+import type { CoreContext } from '../context.js';
+import { writeFileAtomic } from '../storage/files.js';
+
+const SAFE_SCHEDULE_ID_PATTERN = /^[a-zA-Z0-9._-]+$/;
+
+/** 创建定时任务请求参数（每日执行时间和每期新闻条数均为必填，不设默认值） */
+export interface CreateScheduleInput {
+  name?: string;
+  time: string;
+  itemCount: number;
+  enabled?: boolean;
+}
+
+/** 更新定时任务请求参数 */
+export interface UpdateSchedulePatch {
+  name?: string;
+  time?: string;
+  itemCount?: number;
+  enabled?: boolean;
+}
+
+/** 定时任务管理服务接口（负责数据库记录维护与 macOS launchd 同步） */
+export interface SchedulerService {
+  /** 列出全部定时任务及其本地安装状态与下次触发时间 */
+  list(): Promise<ScheduleJob[]>;
+  /** 新建定时任务（必须显式指定 HH:mm 时间与正整数条数）并自动同步到 launchd */
+  create(input: CreateScheduleInput): Promise<ScheduleJob>;
+  /** 修改既有定时任务的配置或启停状态，并实时同步更新 launchd */
+  update(id: string, patch: UpdateSchedulePatch): Promise<ScheduleJob>;
+  /** 删除定时任务并同步卸载对应的 launchd 配置文件 */
+  remove(id: string): Promise<void>;
+  /** 将数据库中的全部定时任务重新全量同步到 launchd */
+  sync(): Promise<void>;
+}
+
+/** 执行 `launchctl` 命令的注入回调签名，便于测试中替换真实系统调用 */
+export type LaunchctlExecutor = (args: string[]) => Promise<{ exitCode: number; stderr: string }>;
+
+/** 对 XML 文本节点与属性值执行标准实体转义，避免路径含特殊字符破坏 plist 格式 */
+function escapeXml(raw: string): string {
+  return raw
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&apos;');
+}
+
+/** 解析命令行工具入口脚本的绝对路径 */
+function resolveCliScriptPath(rootDir: string, overridePath?: string): string {
+  if (overridePath) {
+    return overridePath;
+  }
+  const moduleDir = path.dirname(fileURLToPath(import.meta.url));
+  const candidates = [
+    path.join(path.resolve(rootDir), 'apps', 'cli', 'dist', 'index.js'),
+    path.resolve(moduleDir, '../../../../apps/cli/dist/index.js'),
+    path.resolve(moduleDir, '../../../apps/cli/dist/index.js'),
+  ];
+  for (const candidate of candidates) {
+    if (fsSync.existsSync(candidate)) {
+      return candidate;
+    }
+  }
+  return candidates[0] ?? path.join(path.resolve(rootDir), 'apps', 'cli', 'dist', 'index.js');
+}
+
+/** 生成指定定时任务对应的 `launchd` 标签名称 */
+export function buildScheduleLabel(scheduleId: string): string {
+  if (!SAFE_SCHEDULE_ID_PATTERN.test(scheduleId) || scheduleId === '.' || scheduleId === '..') {
+    throw new Error(`非法的定时任务 ID: ${scheduleId}`);
+  }
+  return `com.aidaily.schedule.${scheduleId}`;
+}
+
+/** 按照配置时区计算已启用定时任务的下一次触发时间（返回 UTC ISO 字符串，未启用则返回 null） */
+export function computeNextScheduleRunAt(
+  timeExpr: string,
+  enabled: boolean,
+  now: Date,
+  timezone: string,
+): string | null {
+  if (!enabled) {
+    return null;
+  }
+  const validated = ScheduleTimeSchema.parse(timeExpr);
+  const [hhStr, mmStr] = validated.split(':');
+  const hour = Number(hhStr);
+  const minute = Number(mmStr);
+
+  const tzNow = new TZDate(now.getTime(), timezone);
+  let target = new TZDate(
+    tzNow.getFullYear(),
+    tzNow.getMonth(),
+    tzNow.getDate(),
+    hour,
+    minute,
+    0,
+    0,
+    timezone,
+  );
+  if (target.getTime() <= now.getTime()) {
+    target = addDays(target, 1);
+  }
+  return new Date(target.getTime()).toISOString();
+}
+
+/** 构造 macOS `launchd` 定时任务的 XML plist 配置内容 */
+export function buildLaunchAgentPlist(opts: {
+  id: string;
+  time: string;
+  itemCount: number;
+  rootDir: string;
+  logsDir: string;
+  cliScriptPath: string;
+  extraBins?: string[];
+}): string {
+  const [hhStr, mmStr] = ScheduleTimeSchema.parse(opts.time).split(':');
+  const hour = Number(hhStr);
+  const minute = Number(mmStr);
+  const label = buildScheduleLabel(opts.id);
+  const logFile = path.join(opts.logsDir, 'scheduler.log');
+
+  const pathList = Array.from(
+    new Set(
+      [
+        path.dirname(process.execPath),
+        ...(opts.extraBins ?? []),
+        path.join(os.homedir(), '.local', 'bin'),
+        '/Applications/Gemini.app/Contents/Helpers',
+        '/opt/homebrew/bin',
+        '/usr/local/bin',
+        '/usr/bin',
+        '/bin',
+        '/usr/sbin',
+        '/sbin',
+      ].filter(Boolean),
+    ),
+  ).join(':');
+
+  const programArgs = [
+    process.execPath,
+    opts.cliScriptPath,
+    '--root',
+    opts.rootDir,
+    'run',
+    '-n',
+    String(opts.itemCount),
+    '--trigger',
+    'schedule',
+    '--schedule-id',
+    opts.id,
+  ];
+
+  const argLines = programArgs.map((arg) => `      <string>${escapeXml(arg)}</string>`).join('\n');
+
+  return [
+    '<?xml version="1.0" encoding="UTF-8"?>',
+    '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">',
+    '<plist version="1.0">',
+    '  <dict>',
+    '    <key>Label</key>',
+    `    <string>${escapeXml(label)}</string>`,
+    '    <key>ProgramArguments</key>',
+    '    <array>',
+    argLines,
+    '    </array>',
+    '    <key>WorkingDirectory</key>',
+    `    <string>${escapeXml(opts.rootDir)}</string>`,
+    '    <key>StartCalendarInterval</key>',
+    '    <dict>',
+    '      <key>Hour</key>',
+    `      <integer>${hour}</integer>`,
+    '      <key>Minute</key>',
+    `      <integer>${minute}</integer>`,
+    '    </dict>',
+    '    <key>EnvironmentVariables</key>',
+    '    <dict>',
+    '      <key>PATH</key>',
+    `      <string>${escapeXml(pathList)}</string>`,
+    '    </dict>',
+    '    <key>StandardOutPath</key>',
+    `    <string>${escapeXml(logFile)}</string>`,
+    '    <key>StandardErrorPath</key>',
+    `    <string>${escapeXml(logFile)}</string>`,
+    '    <key>RunAtLoad</key>',
+    '    <false/>',
+    '  </dict>',
+    '</plist>',
+    '',
+  ].join('\n');
+}
+
+/** 创建默认调用系统 `launchctl` 的执行函数 */
+function createDefaultLaunchctlExec(): LaunchctlExecutor {
+  return async (args: string[]) => {
+    const res = await execa('launchctl', args, { reject: false });
+    return { exitCode: res.exitCode ?? 1, stderr: res.stderr ?? '' };
+  };
+}
+
+/** 创建定时任务管理服务实例，支持注入自定义启动代理目录与 `launchctl` 执行器以便测试 */
+export function createSchedulerService(
+  ctx: CoreContext,
+  opts?: {
+    launchAgentsDir?: string;
+    launchctlExec?: LaunchctlExecutor;
+    cliScriptPath?: string;
+  },
+): SchedulerService {
+  const launchAgentsDir =
+    opts?.launchAgentsDir ?? path.join(os.homedir(), 'Library', 'LaunchAgents');
+  const launchctlExec = opts?.launchctlExec ?? createDefaultLaunchctlExec();
+
+  const plistPathFor = (id: string): string =>
+    path.join(launchAgentsDir, `${buildScheduleLabel(id)}.plist`);
+
+  const domainTarget = (): string => `gui/${process.getuid?.() ?? 501}`;
+
+  const collectExtraBins = (): string[] => {
+    const dirs: string[] = [];
+    for (const cliCfg of Object.values(ctx.settings.clis)) {
+      const bin = cliCfg.bin.trim();
+      if (bin.includes('/') || bin.includes('\\')) {
+        dirs.push(path.dirname(bin));
+      }
+    }
+    return dirs;
+  };
+
+  const toScheduleJob = (row: ReturnType<typeof ctx.repos.schedules.list>[number]): ScheduleJob => {
+    const installed = fsSync.existsSync(plistPathFor(row.id));
+    return ScheduleJobSchema.parse({
+      ...row,
+      installed,
+      nextRunAt: computeNextScheduleRunAt(row.time, row.enabled, ctx.now(), ctx.settings.timezone),
+    });
+  };
+
+  const syncSingleJob = async (
+    row: ReturnType<typeof ctx.repos.schedules.list>[number],
+  ): Promise<void> => {
+    const plistPath = plistPathFor(row.id);
+    const domain = domainTarget();
+
+    // 先尝试卸载旧任务，未曾挂载时忽略返回错误
+    await launchctlExec(['bootout', domain, plistPath]).catch(() => ({
+      exitCode: 0,
+      stderr: '',
+    }));
+
+    if (row.enabled) {
+      const plistXml = buildLaunchAgentPlist({
+        id: row.id,
+        time: row.time,
+        itemCount: row.itemCount,
+        rootDir: ctx.paths.rootDir,
+        logsDir: ctx.paths.logsDir,
+        cliScriptPath: resolveCliScriptPath(ctx.paths.rootDir, opts?.cliScriptPath),
+        extraBins: collectExtraBins(),
+      });
+      await writeFileAtomic(plistPath, plistXml);
+      const res = await launchctlExec(['bootstrap', domain, plistPath]);
+      if (res.exitCode !== 0) {
+        throw new Error(
+          `向系统挂载定时任务失败 (${buildScheduleLabel(row.id)}): ${res.stderr.trim() || `退出码 ${res.exitCode}`}`,
+        );
+      }
+    } else {
+      await fs.rm(plistPath, { force: true });
+    }
+  };
+
+  return {
+    /** 查询全部定时任务，附带系统代理配置文件是否已安装与下次触发时间 */
+    async list(): Promise<ScheduleJob[]> {
+      return ctx.repos.schedules.list().map(toScheduleJob);
+    },
+
+    /** 新建定时任务（时间与每期条数均为必填）并写入挂载 launchd plist */
+    async create(input: CreateScheduleInput): Promise<ScheduleJob> {
+      const time = ScheduleTimeSchema.parse(input?.time);
+      if (!Number.isInteger(input?.itemCount) || input.itemCount <= 0) {
+        throw new RangeError(
+          `新建定时任务必须显式指定正整数条数 itemCount，当前传入: ${String(input?.itemCount)}`,
+        );
+      }
+
+      const name = input.name?.trim() || `每日定时任务 ${time}`;
+      const enabled = input.enabled ?? true;
+      const id = `sched-${crypto.randomBytes(4).toString('hex')}`;
+      const nowIso = ctx.now().toISOString();
+
+      const created = ctx.repos.schedules.create({
+        id,
+        name,
+        time,
+        itemCount: input.itemCount,
+        enabled,
+        now: nowIso,
+      });
+
+      try {
+        await syncSingleJob(created);
+      } catch (err) {
+        // 若系统定时挂载失败，清除孤立数据库记录和半成品配置文件
+        await fs.rm(plistPathFor(id), { force: true }).catch(() => undefined);
+        ctx.repos.schedules.remove(id);
+        throw err;
+      }
+
+      return toScheduleJob(created);
+    },
+
+    /** 修改已有定时任务的执行时间、条数或启停状态并同步到 launchd */
+    async update(id: string, patch: UpdateSchedulePatch): Promise<ScheduleJob> {
+      const existing = ctx.repos.schedules.getById(id);
+      if (!existing) {
+        throw new Error(`未找到定时任务: ${id}`);
+      }
+
+      const nextTime = patch.time !== undefined ? ScheduleTimeSchema.parse(patch.time) : undefined;
+      if (
+        patch.itemCount !== undefined &&
+        (!Number.isInteger(patch.itemCount) || patch.itemCount <= 0)
+      ) {
+        throw new RangeError(`每期新闻条数必须为正整数，当前传入: ${String(patch.itemCount)}`);
+      }
+      const nextName = patch.name !== undefined ? patch.name.trim() : undefined;
+      if (nextName !== undefined && !nextName) {
+        throw new Error('定时任务名称不能为空');
+      }
+
+      const updated = ctx.repos.schedules.update(id, {
+        name: nextName,
+        time: nextTime,
+        itemCount: patch.itemCount,
+        enabled: patch.enabled,
+        now: ctx.now().toISOString(),
+      });
+      if (!updated) {
+        throw new Error(`更新定时任务失败，未找到记录: ${id}`);
+      }
+
+      await syncSingleJob(updated);
+      return toScheduleJob(updated);
+    },
+
+    /** 删除定时任务记录并卸载移除对应的系统 launchd 配置文件 */
+    async remove(id: string): Promise<void> {
+      const existing = ctx.repos.schedules.getById(id);
+      if (!existing) {
+        throw new Error(`未找到定时任务: ${id}`);
+      }
+      const plistPath = plistPathFor(id);
+      await launchctlExec(['bootout', domainTarget(), plistPath]).catch(() => ({
+        exitCode: 0,
+        stderr: '',
+      }));
+      await fs.rm(plistPath, { force: true });
+      ctx.repos.schedules.remove(id);
+    },
+
+    /** 将数据库中的定时任务列表全量同步至 launchd，并清理已删除的本仓库残留配置 */
+    async sync(): Promise<void> {
+      const jobs = ctx.repos.schedules.list();
+      const activeIds = new Set(jobs.map((j) => j.id));
+
+      for (const job of jobs) {
+        await syncSingleJob(job);
+      }
+
+      // 清理属于当前仓库但数据库已无对应记录的残留 plist 文件
+      let entries: string[] = [];
+      try {
+        entries = await fs.readdir(launchAgentsDir);
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+          return;
+        }
+        throw err;
+      }
+
+      const expectedRootTag = `<string>${escapeXml(ctx.paths.rootDir)}</string>`;
+      for (const fileName of entries) {
+        const match = /^com\.aidaily\.schedule\.(.+)\.plist$/.exec(fileName);
+        const schedId = match?.[1];
+        if (!schedId || activeIds.has(schedId)) {
+          continue;
+        }
+        const plistPath = path.join(launchAgentsDir, fileName);
+        const xml = await fs.readFile(plistPath, 'utf8').catch(() => '');
+        if (!xml.includes(expectedRootTag)) {
+          continue;
+        }
+        await launchctlExec(['bootout', domainTarget(), plistPath]).catch(() => ({
+          exitCode: 0,
+          stderr: '',
+        }));
+        await fs.rm(plistPath, { force: true });
+      }
+    },
+  };
+}

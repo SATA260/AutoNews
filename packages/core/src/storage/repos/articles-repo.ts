@@ -357,5 +357,34 @@ export function createHistoryRepo(db: DatabaseSync) {
         publishedAt: row.published_at,
       }));
     },
+
+    /** 按发布时间倒序查询历史已播事件列表（供后台历史页展示） */
+    listAll(limit = 100): PublishedHistoryRecord[] {
+      const safeLimit = clampLimit(limit, 500);
+      const rows = db
+        .prepare(`
+          SELECT * FROM published_history
+          ORDER BY published_at DESC, event_id DESC
+          LIMIT ?
+        `)
+        .all(safeLimit) as unknown as Array<{
+        event_id: string;
+        run_id: string;
+        title: string;
+        title_norm: string;
+        entity: string | null;
+        article_urls: string;
+        published_at: string;
+      }>;
+      return rows.map((row) => ({
+        eventId: row.event_id,
+        runId: row.run_id,
+        title: row.title,
+        titleNorm: row.title_norm,
+        entity: row.entity,
+        articleUrls: JSON.parse(row.article_urls) as string[],
+        publishedAt: row.published_at,
+      }));
+    },
   };
 }
