@@ -1,0 +1,18 @@
+{
+  "name": "@aidaily/cli",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "aidaily": "./dist/index.js"
+  },
+  "scripts": {
+    "build": "tsup",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@aidaily/contracts": "*",
+    "@aidaily/core": "*",
+    "commander": "^15.1.0"
+  }
+}

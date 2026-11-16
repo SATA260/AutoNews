@@ -1,0 +1,71 @@
+{
+  "$schema": "https://biomejs.dev/schemas/2.6.8/schema.json",
+  "vcs": {
+    "enabled": true,
+    "clientKind": "git",
+    "useIgnoreFile": true
+  },
+  "files": {
+    "includes": [
+      "**",
+      "!templates",
+      "!storage",
+      "!docs",
+      "!config",
+      "!AGENTS.md",
+      "!**/*.md",
+      "!**/dist",
+      "!**/.next",
+      "!**/node_modules",
+      "!package-lock.json",
+      "!tsconfig.tsbuildinfo",
+      "!**/*.tsbuildinfo"
+    ]
+  },
+  "formatter": {
+    "enabled": true,
+    "indentStyle": "space",
+    "indentWidth": 2,
+    "lineWidth": 100
+  },
+  "linter": {
+    "enabled": true,
+    "rules": {
+      "preset": "recommended"
+    }
+  },
+  "javascript": {
+    "formatter": {
+      "quoteStyle": "single",
+      "trailingCommas": "all",
+      "semicolons": "always"
+    }
+  },
+  "overrides": [
+    {
+      "includes": ["apps/**"],
+      "linter": {
+        "rules": {
+          "style": {
+            "noRestrictedImports": {
+              "level": "error",
+              "options": {
+                "paths": {
+                  "@aidaily/cli-bridge": "apps/* 必须保持薄壳，禁止直接导入 @aidaily/cli-bridge，请通过 @aidaily/core 调用",
+                  "@aidaily/tts": "apps/* 必须保持薄壳，禁止直接导入 @aidaily/tts，请通过 @aidaily/core 调用",
+                  "@aidaily/core/src": "禁止跨层导入 @aidaily/core 内部源码，请从 @aidaily/core 公开入口导入"
+                },
+                "patterns": [
+                  {
+                    "group": ["@aidaily/core/src/*"],
+                    "message": "禁止跨层导入 @aidaily/core 内部源码，请从 @aidaily/core 公开入口导入"
+                  }
+                ]
+              }
+            }
+          }
+        }
+      }
+    }
+  ]
+}

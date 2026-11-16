@@ -1,0 +1,103 @@
+version: 1
+timezone: Asia/Shanghai
+
+issue:
+  # 每期条数 N 不在全局设默认值，在新建定时任务或手动触发时显式填写
+  reserveFactor: 2          # 候选事件数 = N × reserveFactor（前 N 个为主选，其余为替补）
+  freshnessHours: 48        # 候选新闻的默认时效
+  itemConcurrency: 3        # 同时处理的条目数
+  refill:
+    maxRounds: 3
+    useBackupSources: true
+    lookbackStepHours: 24
+    maxLookbackHours: 96
+
+retry:
+  reservationHoldHours: 48  # 失败/中断/取消的 run 在此时长内可随时重试；到期未重试则自动 abandoned 并释放预留文章
+
+editorial:
+  maxRevisions: 2           # 核查打回润色的最大轮数
+  sourceMaxChars: 20000     # 单个事件送入模型的原文总字数上限
+  historyDedupDays: 14
+  titleSimilarityThreshold: 0.6
+  metaTextBlacklist: ["已依据", "以下是", "根据您提供", "作为AI", "总结如下", "```"]
+
+contentLimits:              # 默认值取自当前模板，模板适配器可以覆盖
+  headline: 42
+  leadSummary: 84
+  title: 48
+  shortTitle: 16
+  category: 8
+  summary: 90
+  keyPointsMax: 3
+  keyPoint: 28
+  detail: 200
+  hostComment: 46
+  narrationSentence: 40
+
+ai:
+  # 每个阶段使用哪个已注册 CLI 与哪个模型均可随时在 Web /settings 或 CLI 中修改
+  maxConcurrentCalls: 3
+  stages:
+    select:    { cli: agy, model: gemini-3.8-flash-medium, timeoutSec: 300, retries: 2 }
+    summarize: { cli: agy, model: gemini-3.8-flash-high,   timeoutSec: 240, retries: 2 }
+    polish:    { cli: agy, model: gemini-3.8-flash-high,   timeoutSec: 180, retries: 2 }
+    factcheck: { cli: agy, model: gemini-4-carbon-high,    timeoutSec: 300, retries: 2 }
+    package:   { cli: agy, model: gemini-3.8-flash-high,   timeoutSec: 240, retries: 2 }
+
+clis:
+  agy:
+    adapter: agy
+    bin: /Applications/Gemini.app/Contents/Helpers/agy
+    extraArgs: []
+  biliup:
+    adapter: generic
+    bin: biliup
+
+tts:
+  provider: silent          # v1 仅内置 silent 测试桩；后续注册具体本地/云端 provider 后在此切换
+  providers:
+    silent: { charsPerSecond: 4.5 }
+  postprocess:
+    sampleRate: 48000
+    loudnessLUFS: -16
+    trimSilence: true
+    sentenceGapMs: 250
+    sectionGapMs: 600
+
+template:
+  active: daily-deck
+  registry:
+    daily-deck:  { dir: templates/daily-deck, adapter: daily-deck }
+    solid-color: { dir: "", adapter: solid-color }   # 测试用
+
+render:
+  width: 1920
+  height: 1080
+  fps: 30
+  pagePaddingSec: 0.6       # 每页语音播完后的停留时间
+  bgm: { file: "", volumeDb: -22, duckDb: -10 }
+
+publish:
+  mode: manual-review       # manual-review | auto（auto 只在 qa 通过时自动发布）
+  bilibili:
+    cli: biliup
+    cookieFile: storage/secrets/bilibili-cookies.json
+    tid: 0                  # 待确认（§14）
+    copyright: 1
+    titleMax: 80
+    descMax: 2000
+    tagsMax: 12
+    defaultTags: [AI, 人工智能, 科技资讯, AI每日报]
+    aiDeclaration: true     # 强制开启 B 站平台 AI 生成内容声明标识
+    aiDisclaimerText: "本视频由 AI 辅助整理与配音，内容均经原文核查，参考来源见简介。"
+
+# 定时任务（执行时间 + 每期条数）不在配置文件设默认值，统一在 SQLite schedules 表中手动新建管理
+
+notify:
+  provider: none            # v1 仅保留抽象接口（none），后期可扩展 feishu 等渠道
+  config: {}
+
+web:
+  host: 127.0.0.1
+  port: 3000
