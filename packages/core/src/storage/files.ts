@@ -59,7 +59,7 @@ export async function readJsonOrNull<T>(filePath: string): Promise<T | null> {
   }
 }
 
-/** 将重跑后作废的旧阶段产物移动归档到 `archive/` 子目录，保留历史现场不直接删除 */
+/** 将重跑后作废的旧阶段产物移动归档到 `archive/` 子目录；若中途失败则自动回滚已移动条目 */
 export async function archiveRunArtifacts(
   runDir: string,
   archiveName: string,
@@ -69,36 +69,69 @@ export async function archiveRunArtifacts(
     throw new Error(`非法的归档名称: ${archiveName}`);
   }
   const baseRunDir = path.resolve(runDir);
-  const moved: string[] = [];
   const archiveRoot = path.resolve(baseRunDir, 'archive', archiveName);
+  const movedPairs: Array<{ rel: string; srcPath: string; destPath: string }> = [];
 
-  for (const rel of relPaths) {
-    if (!rel || rel.includes('\0')) {
-      throw new Error(`非法的归档产物路径: ${rel}`);
+  try {
+    const realBase = await fs.realpath(baseRunDir).catch(() => baseRunDir);
+    for (const rel of relPaths) {
+      if (!rel || rel.includes('\0')) {
+        throw new Error(`非法的归档产物路径: ${rel}`);
+      }
+      const normalizedRel = rel.replace(/^\/+/, '');
+      const srcPath = path.resolve(baseRunDir, normalizedRel);
+      if (!srcPath.startsWith(`${baseRunDir}${path.sep}`)) {
+        throw new Error(`禁止归档任务目录之外的路径: ${rel}`);
+      }
+      try {
+        await fs.access(srcPath);
+      } catch {
+        continue;
+      }
+      const realSrc = await fs.realpath(srcPath);
+      if (!realSrc.startsWith(`${realBase}${path.sep}`)) {
+        throw new Error(`禁止归档指向任务目录之外的软链接: ${rel}`);
+      }
+      const destPath = path.resolve(archiveRoot, normalizedRel);
+      if (!destPath.startsWith(`${archiveRoot}${path.sep}`)) {
+        throw new Error(`非法的归档目标路径: ${rel}`);
+      }
+      await ensureDir(path.dirname(destPath));
+      await fs.rm(destPath, { recursive: true, force: true });
+      await fs.rename(srcPath, destPath);
+      movedPairs.push({ rel: normalizedRel, srcPath, destPath });
     }
-    const normalizedRel = rel.replace(/^\/+/, '');
-    const srcPath = path.resolve(baseRunDir, normalizedRel);
-    if (!srcPath.startsWith(`${baseRunDir}${path.sep}`)) {
-      throw new Error(`禁止归档任务目录之外的路径: ${rel}`);
+    return movedPairs.map((pair) => pair.rel);
+  } catch (err) {
+    // 任一文件归档失败时按逆序将前面已移走的文件恢复原位
+    for (let i = movedPairs.length - 1; i >= 0; i--) {
+      const pair = movedPairs[i];
+      if (!pair) {
+        continue;
+      }
+      await ensureDir(path.dirname(pair.srcPath)).catch(() => undefined);
+      await fs.rename(pair.destPath, pair.srcPath).catch(() => undefined);
     }
-    try {
-      await fs.access(srcPath);
-    } catch {
+    throw err;
+  }
+}
+
+/** 将已移入指定归档子目录的文件按原相对路径恢复回任务目录（用于数据库写入失败时回滚） */
+export async function restoreArchivedArtifacts(
+  runDir: string,
+  archiveName: string,
+  relPaths: string[],
+): Promise<void> {
+  const baseRunDir = path.resolve(runDir);
+  const archiveRoot = path.resolve(baseRunDir, 'archive', archiveName);
+  for (let i = relPaths.length - 1; i >= 0; i--) {
+    const rel = relPaths[i];
+    if (!rel) {
       continue;
     }
-    const realBase = await fs.realpath(baseRunDir);
-    const realSrc = await fs.realpath(srcPath);
-    if (!realSrc.startsWith(`${realBase}${path.sep}`)) {
-      throw new Error(`禁止归档指向任务目录之外的软链接: ${rel}`);
-    }
-    const destPath = path.resolve(archiveRoot, normalizedRel);
-    if (!destPath.startsWith(`${archiveRoot}${path.sep}`)) {
-      throw new Error(`非法的归档目标路径: ${rel}`);
-    }
-    await ensureDir(path.dirname(destPath));
-    await fs.rm(destPath, { recursive: true, force: true });
-    await fs.rename(srcPath, destPath);
-    moved.push(normalizedRel);
+    const srcPath = path.resolve(baseRunDir, rel);
+    const destPath = path.resolve(archiveRoot, rel);
+    await ensureDir(path.dirname(srcPath)).catch(() => undefined);
+    await fs.rename(destPath, srcPath).catch(() => undefined);
   }
-  return moved;
 }

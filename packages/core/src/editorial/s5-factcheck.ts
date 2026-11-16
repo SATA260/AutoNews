@@ -9,8 +9,18 @@ import { invokeStageLlm } from './llm.js';
 import { renderPromptTemplate } from './prompts.js';
 import { type LoadedEventArticle, serializeLoadedArticlesXml } from './s3-summarize.js';
 
-/** 强制校正核查结果与逐条陈述判定之间的一致性，不允许存在问题陈述却直接放行 */
+/** 强制校正核查结果与逐条陈述判定之间的一致性，不允许存在问题陈述或空核查清单却直接放行 */
 export function enforceFactCheckConsistency(result: FactCheckResult): FactCheckResult {
+  if (result.verdict === 'pass' && result.claims.length === 0) {
+    return {
+      ...result,
+      verdict: 'revise',
+      revisionNotes:
+        result.revisionNotes.length > 0
+          ? result.revisionNotes
+          : ['核查结果未包含任何具体陈述核验条目，请补全逐条核查'],
+    };
+  }
   const flawedClaims = result.claims.filter((c) => c.status !== 'supported');
   if (result.verdict === 'pass' && flawedClaims.length > 0) {
     return {

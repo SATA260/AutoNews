@@ -147,6 +147,72 @@ function mapRunEvent(row: RunEventRow): RunEvent {
   };
 }
 
+/** 可更新的任务状态辅助字段集合 */
+export interface RunStatusUpdateFields {
+  currentStage?: Stage | null;
+  errorCode?: ErrorCode | null;
+  error?: string | null;
+  pid?: number | null;
+  heartbeatAt?: string | null;
+  startedAt?: string | null;
+  finishedAt?: string | null;
+  retryDeadlineAt?: string | null;
+  cancelRequested?: number;
+  configSnapshotJson?: string;
+}
+
+/** 构造任务状态更新语句的 SET 子句与参数列表 */
+function buildRunUpdateClause(
+  status: RunStatus,
+  opts?: RunStatusUpdateFields,
+): { sets: string[]; params: Array<string | number | null> } {
+  const sets = ['status = ?'];
+  const params: Array<string | number | null> = [status];
+
+  if (opts?.currentStage !== undefined) {
+    sets.push('current_stage = ?');
+    params.push(opts.currentStage);
+  }
+  if (opts?.errorCode !== undefined) {
+    sets.push('error_code = ?');
+    params.push(opts.errorCode);
+  }
+  if (opts?.error !== undefined) {
+    sets.push('error = ?');
+    params.push(opts.error);
+  }
+  if (opts?.pid !== undefined) {
+    sets.push('pid = ?');
+    params.push(opts.pid);
+  }
+  if (opts?.heartbeatAt !== undefined) {
+    sets.push('heartbeat_at = ?');
+    params.push(opts.heartbeatAt);
+  }
+  if (opts?.startedAt !== undefined) {
+    sets.push('started_at = ?');
+    params.push(opts.startedAt);
+  }
+  if (opts?.finishedAt !== undefined) {
+    sets.push('finished_at = ?');
+    params.push(opts.finishedAt);
+  }
+  if (opts?.retryDeadlineAt !== undefined) {
+    sets.push('retry_deadline_at = ?');
+    params.push(opts.retryDeadlineAt);
+  }
+  if (opts?.cancelRequested !== undefined) {
+    sets.push('cancel_requested = ?');
+    params.push(opts.cancelRequested);
+  }
+  if (opts?.configSnapshotJson !== undefined) {
+    sets.push('config_snapshot = ?');
+    params.push(opts.configSnapshotJson);
+  }
+
+  return { sets, params };
+}
+
 /** 创建任务主表操作对象，管理任务创建、状态流转、心跳与重试期限检查 */
 export function createRunsRepo(db: DatabaseSync) {
   return {
@@ -213,68 +279,39 @@ export function createRunsRepo(db: DatabaseSync) {
     },
 
     /** 更新任务状态及相关时间戳、错误码或配置快照 */
-    updateStatus(
-      id: string,
-      status: RunStatus,
-      opts?: {
-        currentStage?: Stage | null;
-        errorCode?: ErrorCode | null;
-        error?: string | null;
-        pid?: number | null;
-        heartbeatAt?: string | null;
-        startedAt?: string | null;
-        finishedAt?: string | null;
-        retryDeadlineAt?: string | null;
-        cancelRequested?: number;
-        configSnapshotJson?: string;
-      },
-    ): void {
-      const sets = ['status = ?'];
-      const params: Array<string | number | null> = [status];
-
-      if (opts?.currentStage !== undefined) {
-        sets.push('current_stage = ?');
-        params.push(opts.currentStage);
-      }
-      if (opts?.errorCode !== undefined) {
-        sets.push('error_code = ?');
-        params.push(opts.errorCode);
-      }
-      if (opts?.error !== undefined) {
-        sets.push('error = ?');
-        params.push(opts.error);
-      }
-      if (opts?.pid !== undefined) {
-        sets.push('pid = ?');
-        params.push(opts.pid);
-      }
-      if (opts?.heartbeatAt !== undefined) {
-        sets.push('heartbeat_at = ?');
-        params.push(opts.heartbeatAt);
-      }
-      if (opts?.startedAt !== undefined) {
-        sets.push('started_at = ?');
-        params.push(opts.startedAt);
-      }
-      if (opts?.finishedAt !== undefined) {
-        sets.push('finished_at = ?');
-        params.push(opts.finishedAt);
-      }
-      if (opts?.retryDeadlineAt !== undefined) {
-        sets.push('retry_deadline_at = ?');
-        params.push(opts.retryDeadlineAt);
-      }
-      if (opts?.cancelRequested !== undefined) {
-        sets.push('cancel_requested = ?');
-        params.push(opts.cancelRequested);
-      }
-      if (opts?.configSnapshotJson !== undefined) {
-        sets.push('config_snapshot = ?');
-        params.push(opts.configSnapshotJson);
-      }
-
+    updateStatus(id: string, status: RunStatus, opts?: RunStatusUpdateFields): void {
+      const { sets, params } = buildRunUpdateClause(status, opts);
       params.push(id);
       db.prepare(`UPDATE runs SET ${sets.join(', ')} WHERE id = ?`).run(...params);
+    },
+
+    /** 按预期状态与心跳时间戳原子比较并更新任务状态，防止并发覆盖刚恢复的新任务 */
+    compareAndUpdateStatus(
+      id: string,
+      expectedStatuses: RunStatus[],
+      expectedHeartbeatAt: string | null | undefined,
+      status: RunStatus,
+      opts?: RunStatusUpdateFields,
+    ): boolean {
+      if (expectedStatuses.length === 0) {
+        return false;
+      }
+      const { sets, params } = buildRunUpdateClause(status, opts);
+      const statusPlaceholders = expectedStatuses.map(() => '?').join(', ');
+      params.push(id, ...expectedStatuses);
+
+      let whereExtra = '';
+      if (expectedHeartbeatAt !== undefined) {
+        whereExtra = " AND COALESCE(heartbeat_at, '') = COALESCE(?, '')";
+        params.push(expectedHeartbeatAt);
+      }
+
+      const res = db
+        .prepare(
+          `UPDATE runs SET ${sets.join(', ')} WHERE id = ? AND status IN (${statusPlaceholders})${whereExtra}`,
+        )
+        .run(...params);
+      return Number(res.changes) > 0;
     },
 
     /** 更新运行中任务的最新存活心跳时间 */
@@ -476,7 +513,7 @@ export function createLocksRepo(db: DatabaseSync) {
       };
     },
 
-    /** 在独占事务内原子抢占或接管过期无效锁，避免双进程并发同时获得运行锁 */
+    /** 在独占事务内原子抢占或接管过期无效锁，同时核验任务与进程双标识防止同任务双进程并发 */
     tryAcquire(input: {
       name: string;
       ownerRun: string;
@@ -487,7 +524,17 @@ export function createLocksRepo(db: DatabaseSync) {
     }): LockAcquireResult {
       return inTransaction(db, () => {
         const existing = this.get(input.name);
-        if (existing && existing.ownerRun !== null && existing.ownerRun !== input.ownerRun) {
+        if (existing && existing.ownerRun !== null) {
+          if (existing.ownerRun === input.ownerRun && existing.pid === input.pid) {
+            this.upsertLock({
+              name: input.name,
+              ownerRun: input.ownerRun,
+              pid: input.pid,
+              acquiredAt: existing.acquiredAt ?? input.now,
+              heartbeatAt: input.now,
+            });
+            return { acquired: true };
+          }
           const heartbeatMs = existing.heartbeatAt ? Date.parse(existing.heartbeatAt) : Number.NaN;
           const nowMs = Date.parse(input.now);
           const heartbeatStale =
@@ -536,17 +583,31 @@ export function createLocksRepo(db: DatabaseSync) {
       `).run(input.name, input.ownerRun, input.pid, input.acquiredAt, input.heartbeatAt);
     },
 
-    /** 刷新当前持锁任务的最新心跳时间 */
-    updateHeartbeat(name: string, ownerRun: string, heartbeatAt: string): void {
-      db.prepare('UPDATE locks SET heartbeat_at = ? WHERE name = ? AND owner_run = ?').run(
-        heartbeatAt,
-        name,
-        ownerRun,
-      );
+    /** 刷新当前持锁任务与进程的最新心跳时间，若锁已被其他进程接管则返回 false */
+    updateHeartbeat(name: string, ownerRun: string, heartbeatAt: string, pid?: number): boolean {
+      const res =
+        pid !== undefined
+          ? db
+              .prepare(
+                'UPDATE locks SET heartbeat_at = ? WHERE name = ? AND owner_run = ? AND pid = ?',
+              )
+              .run(heartbeatAt, name, ownerRun, pid)
+          : db
+              .prepare('UPDATE locks SET heartbeat_at = ? WHERE name = ? AND owner_run = ?')
+              .run(heartbeatAt, name, ownerRun);
+      return Number(res.changes) > 0;
     },
 
-    /** 释放当前任务持有的互斥锁 */
-    releaseLock(name: string, ownerRun: string): void {
+    /** 释放当前任务持有的互斥锁（传入进程号时仅释放本进程名下的锁，防止误删新接管者的锁） */
+    releaseLock(name: string, ownerRun: string, pid?: number): void {
+      if (pid !== undefined) {
+        db.prepare('DELETE FROM locks WHERE name = ? AND owner_run = ? AND pid = ?').run(
+          name,
+          ownerRun,
+          pid,
+        );
+        return;
+      }
       db.prepare('DELETE FROM locks WHERE name = ? AND owner_run = ?').run(name, ownerRun);
     },
   };

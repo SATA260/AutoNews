@@ -57,15 +57,19 @@ export async function polishItemDraft(opts: {
     signal,
   });
 
+  // 强制保留前序总结提取的原文引文依据，避免润色改写引入未核实的引文
+  const normalized: PolishedItem =
+    summary.evidence.length > 0 ? { ...res.data, evidence: summary.evidence } : res.data;
+
   ctx.repos.runItems.appendVersion({
     itemId,
     kind: 'polish',
     round,
-    payload: res.data,
+    payload: normalized,
     createdAt: ctx.now().toISOString(),
   });
 
-  return res.data;
+  return normalized;
 }
 
 /** 根据规则预检或事实核查批注，只针对问题点对润色稿执行局部微调 */
@@ -117,13 +121,16 @@ export async function revisePolishedItem(opts: {
     signal,
   });
 
+  // 强制保留已核验的原文引文依据，微调只改表达不改引文依据
+  const normalized: PolishedItem = evidence.length > 0 ? { ...res.data, evidence } : res.data;
+
   ctx.repos.runItems.appendVersion({
     itemId,
     kind: 'revise',
     round,
-    payload: res.data,
+    payload: normalized,
     createdAt: ctx.now().toISOString(),
   });
 
-  return res.data;
+  return normalized;
 }

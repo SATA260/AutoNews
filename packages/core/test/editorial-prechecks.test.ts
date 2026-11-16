@@ -2,6 +2,7 @@ import type { ContentLimits, IssuePackage, PolishedItem, Settings } from '@aidai
 import { describe, expect, it } from 'vitest';
 import {
   buildArticlesXml,
+  enforceFactCheckConsistency,
   extractArabicNumbers,
   isDuplicateOfHistory,
   longestCommonSubstringLength,
@@ -246,5 +247,51 @@ describe('editorial foundation: prompts, similarity, and deterministic prechecks
     expect(bad.passed).toBe(false);
     expect(bad.errors.some((e) => e.includes('headlineItemId'))).toBe(true);
     expect(bad.errors.some((e) => e.includes('额外投稿标签数量'))).toBe(true);
+  });
+
+  it('does not ground numbers via publishedAt or unverified fuzzy quotes and requires non-empty claims for pass', () => {
+    const articlesById = new Map([
+      [
+        'art-1',
+        {
+          text: 'OpenAI announced a faster model update today for paying subscribers across all tiers.',
+          publishedAt: '2026-11-16T08:00:00.000Z',
+        },
+      ],
+    ]);
+
+    const item = makeValidPolishedItem();
+    item.title = '2026 年模型迎来三十项重大升级';
+    item.summary = '发布日 16 号公布新计划，价格约为 99 元，覆盖两千家商户。';
+    item.narration = ['本次模型面向付费会员开放。'];
+    item.evidence = [
+      {
+        claim: '速度提升',
+        articleId: 'art-1',
+        // 超过 90% 相似但篡改了一个数字“99”的引语不应放行该数字
+        quote:
+          'OpenAI announced a faster model update 99 today for paying subscribers across all tiers.',
+      },
+    ];
+
+    const res = precheckPolishedItem({
+      item,
+      articlesById,
+      limits: DEFAULT_LIMITS,
+      metaTextBlacklist: BLACKLIST,
+    });
+    expect(res.passed).toBe(false);
+    expect(res.errors.some((e) => e.includes('2026'))).toBe(true);
+    expect(res.errors.some((e) => e.includes('16'))).toBe(true);
+    expect(res.errors.some((e) => e.includes('99'))).toBe(true);
+    expect(res.warnings.some((w) => w.includes('三十') || w.includes('两千'))).toBe(true);
+
+    const emptyClaimsFc = enforceFactCheckConsistency({
+      verdict: 'pass',
+      claims: [],
+      revisionNotes: [],
+    });
+    expect(emptyClaimsFc.verdict).toBe('revise');
+    expect(emptyClaimsFc.revisionNotes.length).toBeGreaterThan(0);
   });
 });

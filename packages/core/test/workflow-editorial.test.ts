@@ -549,7 +549,7 @@ describe('editorial workflow, TTS timeline, interruption recovery, and retry eng
     const archiveEntries = await fs.readdir(path.join(core.context.paths.runDir(runId), 'archive'));
     expect(archiveEntries.some((d) => d.endsWith('-package'))).toBe(true);
 
-    // 验证 fromStage = 'edit' 归档并从 S3 重写所有条目，但保留 DB 中的历史版本供对比
+    // 验证从编辑阶段重跑会归档旧产物并从总结步骤重写所有条目，同时保留数据库历史版本供对比
     const versionsBeforeEditRerun = core.context.repos.runItems.listVersions(firstItemId).length;
     await resumeRun(core.context, runId, {
       fromStage: 'edit',
@@ -595,6 +595,39 @@ describe('editorial workflow, TTS timeline, interruption recovery, and retry eng
     expect(core.context.repos.runs.getById(queuedRun)?.status).toBe('cancelled');
     abandonRun(core.context, queuedRun);
     expect(core.context.repos.runs.getById(queuedRun)?.status).toBe('abandoned');
+
+    // 验证相同任务 ID 在不同存活进程间仍互斥，且误调释放不会删掉其他进程的锁
+    const lockCheck1 = core.context.repos.locks.tryAcquire({
+      name: 'pipeline',
+      ownerRun: 'same-run',
+      pid: process.pid,
+      now: currentTime.toISOString(),
+      staleMs: 60_000,
+      isProcessAlive: () => true,
+    });
+    expect(lockCheck1.acquired).toBe(true);
+
+    const lockCheck2 = core.context.repos.locks.tryAcquire({
+      name: 'pipeline',
+      ownerRun: 'same-run',
+      pid: process.pid + 12345,
+      now: currentTime.toISOString(),
+      staleMs: 60_000,
+      isProcessAlive: () => true,
+    });
+    expect(lockCheck2.acquired).toBe(false);
+
+    // 传入其他进程号尝试释放不应删除当前存活进程持有的锁
+    core.context.repos.locks.releaseLock('pipeline', 'same-run', process.pid + 12345);
+    expect(core.context.repos.locks.get('pipeline')?.pid).toBe(process.pid);
+    core.context.repos.locks.releaseLock('pipeline', 'same-run', process.pid);
+    expect(core.context.repos.locks.get('pipeline')).toBeNull();
+
+    // 验证缺失本地检查点文件时，可重试查询会自动将其识别为需从该步骤继续
+    const qaCkpt = path.join(core.context.paths.runDir(runId), 'qa.json');
+    await fs.rm(qaCkpt, { force: true });
+    const optsMissingCkpt = getRunRetryOptions(core.context, runId);
+    expect(optsMissingCkpt.resumeFrom).toBe('qa');
 
     await core.close();
   });

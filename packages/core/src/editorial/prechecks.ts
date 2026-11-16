@@ -11,7 +11,7 @@ const URL_PATTERN = /https?:\/\/|www\./i;
 const MARKDOWN_PATTERN = /[`*]|\b__|(^|\n)\s*#{1,6}\s|\[[^\]]+\]\([^)]+\)/;
 const CHINESE_CHAR_PATTERN = /[\u4e00-\u9fff]/;
 const CHINESE_NUMBER_PHRASE_PATTERN =
-  /[一二三四五六七八九十百千万亿两][万亿倍成个家款代次年月天小时分秒%％]|[十百千万亿][一二三四五六七八九十]/g;
+  /[零一二两三四五六七八九十百千万亿]{2,}|[一二两三四五六七八九十]+点[零一二三四五六七八九十]+|[一二两三四五六七八九十][万亿倍成个家款代次年月天小时分秒%％]/g;
 
 /** 统计字符串按 Unicode 字符个数计算的长度（准确计入双字节与表情符号） */
 function charLength(text: string): number {
@@ -137,6 +137,7 @@ export function precheckPolishedItem(opts: {
   const { item, articlesById, limits, metaTextBlacklist } = opts;
 
   // 1. 校验每条引文在对应原始文章正文中确实存在（精确子串，或最长公共子串达到 90%）
+  const exactMatchedQuotes: string[] = [];
   for (let i = 0; i < item.evidence.length; i++) {
     const ev = item.evidence[i];
     if (!ev) {
@@ -153,7 +154,9 @@ export function precheckPolishedItem(opts: {
       errors.push(`第 ${i + 1} 条引文依据 quote 为空`);
       continue;
     }
-    if (!normBody.includes(normQuote)) {
+    if (normBody.includes(normQuote)) {
+      exactMatchedQuotes.push(ev.quote);
+    } else {
       const lcsLen = longestCommonSubstringLength(normQuote, normBody);
       const ratio = lcsLen / normQuote.length;
       if (ratio < 0.9) {
@@ -164,16 +167,10 @@ export function precheckPolishedItem(opts: {
     }
   }
 
-  // 2. 校验稿件各展示与口播字段中的阿拉伯数字必须全部在引文依据或原文中出现过
-  const groundedSourceChunks: string[] = [];
-  for (const ev of item.evidence) {
-    groundedSourceChunks.push(ev.quote);
-  }
+  // 2. 校验稿件各展示与口播字段中的阿拉伯数字必须全部在已精确匹配的引文或原文正文中出现过
+  const groundedSourceChunks: string[] = [...exactMatchedQuotes];
   for (const article of articlesById.values()) {
     groundedSourceChunks.push(article.text);
-    if (article.publishedAt) {
-      groundedSourceChunks.push(article.publishedAt);
-    }
   }
   const groundedNumbers = new Set(extractArabicNumbers(groundedSourceChunks.join('\n')));
 

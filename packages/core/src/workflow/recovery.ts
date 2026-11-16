@@ -88,8 +88,8 @@ export function recoverStaleRuns(
     }
 
     const wasPublishing = detail.status === 'publishing';
-    markTakenOverRunInterrupted(ctx, snapSettings, detail.id, nowIso);
-    ctx.repos.locks.releaseLock(PIPELINE_LOCK_NAME, detail.id);
+    markTakenOverRunInterrupted(ctx, snapSettings, detail.id, nowIso, detail.heartbeatAt);
+    ctx.repos.locks.releaseLock(PIPELINE_LOCK_NAME, detail.id, detail.pid ?? undefined);
 
     if (wasPublishing) {
       uncertainPublishRunIds.push(detail.id);

@@ -37,26 +37,46 @@ export function isProcessAlive(pid: number): boolean {
   }
 }
 
-/** 对被死进程或失联进程遗留的旧任务收尾：标为中断或发布状态不明，并完整保留预留文章与检查点 */
+/** 从旧任务快照解析配置，失败时回退到全局默认配置（避免新任务的保持窗口覆盖旧任务） */
+function resolvePreviousRunSettings(rawSnapshot: string, fallback: Settings): Settings {
+  try {
+    return JSON.parse(rawSnapshot) as Settings;
+  } catch {
+    return fallback;
+  }
+}
+
+/** 对被死进程或失联进程遗留的旧任务收尾：通过状态与心跳对比原子标为中断或发布状态不明 */
 export function markTakenOverRunInterrupted(
   ctx: CoreContext,
-  settings: Settings,
+  fallbackSettings: Settings,
   previousRunId: string,
   nowIso: string,
+  expectedHeartbeatAt?: string | null,
 ): void {
   const prevRun = ctx.repos.runs.getById(previousRunId);
   if (!prevRun) {
     return;
   }
+  const prevSettings = resolvePreviousRunSettings(prevRun.configSnapshotJson, fallbackSettings);
 
   inTransaction(ctx.db, () => {
     if (prevRun.status === 'publishing') {
-      ctx.repos.runs.updateStatus(prevRun.id, 'publish_uncertain', {
-        errorCode: 'publish_uncertain',
-        error: '投稿上传过程中执行进程失联，无法确认平台是否已收稿，请人工核对后再操作',
-        pid: null,
-        finishedAt: nowIso,
-      });
+      const updated = ctx.repos.runs.compareAndUpdateStatus(
+        prevRun.id,
+        ['publishing'],
+        expectedHeartbeatAt,
+        'publish_uncertain',
+        {
+          errorCode: 'publish_uncertain',
+          error: '投稿上传过程中执行进程失联，无法确认平台是否已收稿，请人工核对后再操作',
+          pid: null,
+          finishedAt: nowIso,
+        },
+      );
+      if (!updated) {
+        return;
+      }
       const existingPub = ctx.repos.publish.getByRun(prevRun.id);
       if (existingPub && existingPub.status === 'publishing') {
         ctx.repos.publish.updateStatus(prevRun.id, 'uncertain', {
@@ -76,16 +96,25 @@ export function markTakenOverRunInterrupted(
 
     if (prevRun.status === 'running' || prevRun.status === 'queued') {
       const deadlineIso = new Date(
-        Date.parse(nowIso) + settings.retry.reservationHoldHours * 3600_000,
+        Date.parse(nowIso) + prevSettings.retry.reservationHoldHours * 3600_000,
       ).toISOString();
 
-      ctx.repos.runs.updateStatus(prevRun.id, 'interrupted', {
-        errorCode: 'interrupted',
-        error: '执行进程失联或意外崩溃，已完成工作与预留文章已保留，可随时从中断处继续或重跑',
-        pid: null,
-        finishedAt: nowIso,
-        retryDeadlineAt: deadlineIso,
-      });
+      const updated = ctx.repos.runs.compareAndUpdateStatus(
+        prevRun.id,
+        ['running', 'queued'],
+        expectedHeartbeatAt,
+        'interrupted',
+        {
+          errorCode: 'interrupted',
+          error: '执行进程失联或意外崩溃，已完成工作与预留文章已保留，可随时从中断处继续或重跑',
+          pid: null,
+          finishedAt: nowIso,
+          retryDeadlineAt: deadlineIso,
+        },
+      );
+      if (!updated) {
+        return;
+      }
 
       const stages = ctx.repos.runStages.listByRun(prevRun.id);
       for (const stage of stages) {
@@ -144,7 +173,7 @@ export function acquirePipelineLock(
   }
 }
 
-/** 释放当前任务持有的全局互斥运行锁 */
+/** 释放当前任务及进程持有的全局互斥运行锁 */
 export function releasePipelineLock(ctx: CoreContext, runId: string): void {
-  ctx.repos.locks.releaseLock(PIPELINE_LOCK_NAME, runId);
+  ctx.repos.locks.releaseLock(PIPELINE_LOCK_NAME, runId, process.pid);
 }

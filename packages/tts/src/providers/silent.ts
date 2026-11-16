@@ -17,9 +17,12 @@ export function createSilentTtsProvider(settings: TtsSettings, ffmpegBin = 'ffmp
 
     /** 按文本字符数换算大致口播毫秒数，并生成对应长度的静音 WAV 文件 */
     async synthesize(req: SynthesizeRequest): Promise<void> {
+      const reqCps = Number(req.providerConfig?.charsPerSecond ?? charsPerSecond);
+      const effectiveCps = Number.isFinite(reqCps) && reqCps > 0 ? reqCps : charsPerSecond;
+      const effectiveRate = req.sampleRate ?? sampleRate;
       const charCount = Array.from(req.text.trim()).length;
-      const durationMs = Math.max(400, Math.round((charCount / charsPerSecond) * 1000));
-      await generateSilenceWav(req.outFile, durationMs, sampleRate, ffmpegBin, req.signal);
+      const durationMs = Math.max(400, Math.round((charCount / effectiveCps) * 1000));
+      await generateSilenceWav(req.outFile, durationMs, effectiveRate, ffmpegBin, req.signal);
     },
 
     /** 返回可用状态说明，用于环境检查 */

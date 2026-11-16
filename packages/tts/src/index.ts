@@ -48,11 +48,11 @@ export class TtsService {
   }
 
   /** 获取配置中当前启用的语音合成引擎，未注册时抛出清晰错误 */
-  getActiveProvider(): TtsProvider {
-    const provider = this.providers.get(this.settings.provider);
+  getActiveProvider(providerId = this.settings.provider): TtsProvider {
+    const provider = this.providers.get(providerId);
     if (!provider) {
       throw new Error(
-        `未注册语音合成引擎 "${this.settings.provider}"，当前可用: ${this.listProviders().join(', ') || '无'}`,
+        `未注册语音合成引擎 "${providerId}"，当前可用: ${this.listProviders().join(', ') || '无'}`,
       );
     }
     return provider;
@@ -81,11 +81,16 @@ export class TtsService {
       | {
           signal?: AbortSignal;
           onSectionDone?: (audio: SectionAudio) => Promise<void> | void;
+          settingsOverride?: TtsSettings;
         },
   ): Promise<SectionAudio[]> {
     const signal = signalOrOpts && 'aborted' in signalOrOpts ? signalOrOpts : signalOrOpts?.signal;
     const onSectionDone =
       signalOrOpts && 'onSectionDone' in signalOrOpts ? signalOrOpts.onSectionDone : undefined;
+    const effectiveSettings =
+      signalOrOpts && 'settingsOverride' in signalOrOpts && signalOrOpts.settingsOverride
+        ? signalOrOpts.settingsOverride
+        : this.settings;
     const seenKeys = new Set<string>();
     for (const section of sections) {
       if (!SAFE_SECTION_KEY_PATTERN.test(section.key)) {
@@ -97,9 +102,9 @@ export class TtsService {
       seenKeys.add(section.key);
     }
 
-    const provider = this.getActiveProvider();
-    const providerConfig = this.settings.providers[provider.id] ?? {};
-    const { sampleRate, trimSilence, sentenceGapMs } = this.settings.postprocess;
+    const provider = this.getActiveProvider(effectiveSettings.provider);
+    const providerConfig = effectiveSettings.providers[provider.id] ?? {};
+    const { sampleRate, trimSilence, sentenceGapMs } = effectiveSettings.postprocess;
     const resolvedOutDir = path.resolve(outDir);
 
     await fs.mkdir(resolvedOutDir, { recursive: true });
@@ -150,7 +155,13 @@ export class TtsService {
           }
 
           if (durationMs === null) {
-            await provider.synthesize({ text, outFile: rawFile, signal });
+            await provider.synthesize({
+              text,
+              outFile: rawFile,
+              sampleRate,
+              providerConfig,
+              signal,
+            });
             await normalizeSegmentToWav({
               inFile: rawFile,
               outFile: normFile,
@@ -186,11 +197,20 @@ export class TtsService {
           key: section.key,
           file: sectionFile,
           speechMs: concatResult.speechMs,
-          sentences: section.sentences.map((text, idx) => ({
-            text,
-            offsetMs: concatResult.offsetsMs[idx] ?? 0,
-            durationMs: sentenceDurationsMs[idx] ?? 0,
-          })),
+          sentences: section.sentences.map((text, idx) => {
+            const rawOffset = concatResult.offsetsMs[idx] ?? 0;
+            const clampedOffset = Math.min(rawOffset, concatResult.speechMs);
+            const rawDuration = sentenceDurationsMs[idx] ?? 0;
+            const clampedDuration = Math.max(
+              0,
+              Math.min(rawDuration, concatResult.speechMs - clampedOffset),
+            );
+            return {
+              text,
+              offsetMs: clampedOffset,
+              durationMs: clampedDuration,
+            };
+          }),
         };
         await onSectionDone?.(sectionAudio);
         results.push(sectionAudio);

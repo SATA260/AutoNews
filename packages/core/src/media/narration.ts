@@ -107,21 +107,39 @@ export async function runNarrateStage(opts: {
   const pendingSections: NarrationSection[] = [];
   const digestByKey = new Map<string, string>();
 
+  const resolvedAudioDir = path.resolve(audioDir);
+
   for (const section of sections) {
     const digest = computeSectionDigest(section, settings);
     digestByKey.set(section.key, digest);
 
     const prev = savedProgress[section.key];
-    if (prev && prev.hash === digest) {
-      try {
-        await fs.access(prev.audio.file);
-        await probeAudioDurationMs(prev.audio.file, undefined, signal);
-        audioByKey.set(section.key, prev.audio);
-        continue;
-      } catch {
-        // 既有段落音频缺失或损坏时重新合成该段落
+    if (prev && prev.hash === digest && prev.audio.file) {
+      const resolvedAudioFile = path.resolve(prev.audio.file);
+      if (resolvedAudioFile.startsWith(`${resolvedAudioDir}${path.sep}`)) {
+        try {
+          await fs.access(resolvedAudioFile);
+          const probedMs = await probeAudioDurationMs(resolvedAudioFile, undefined, signal);
+          if (Math.abs(probedMs - prev.audio.speechMs) <= 40) {
+            audioByKey.set(section.key, {
+              ...prev.audio,
+              file: resolvedAudioFile,
+            });
+            continue;
+          }
+        } catch {
+          // 既有段落音频缺失、损坏或时长不一致时清理残片后重新合成
+        }
       }
     }
+
+    // 清理可能残留的该段落旧切片或残缺成片后再重新合成
+    await fs
+      .rm(path.join(resolvedAudioDir, section.key), { recursive: true, force: true })
+      .catch(() => undefined);
+    await fs
+      .rm(path.join(resolvedAudioDir, `${section.key}.wav`), { force: true })
+      .catch(() => undefined);
     pendingSections.push(section);
   }
 
@@ -144,6 +162,7 @@ export async function runNarrateStage(opts: {
       const newlySynthesized = await ctx.tts.synthesizeSections(pendingSections, audioDir, {
         signal,
         onSectionDone: persistSectionProgress,
+        settingsOverride: settings.tts,
       });
       for (const audio of newlySynthesized) {
         audioByKey.set(audio.key, audio);

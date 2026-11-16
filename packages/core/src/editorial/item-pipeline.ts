@@ -26,6 +26,40 @@ export interface EditCheckpoint {
 /** 单条新闻人工指定重试时的起始子步骤 */
 export type EditSubStep = 'summarize' | 'polish' | 'factcheck';
 
+/** 单条新闻从特定步骤重做时持久化的基线记录，保障中途崩溃后续跑不会退回旧版本 */
+export interface PendingItemRetryState {
+  fromStep: EditSubStep;
+  baselineVersionId: number;
+}
+
+/** 采编阶段的版本水位与单条重试断点文件结构 */
+export interface EditWatermarkData {
+  versionFloorByItemId?: Record<string, number>;
+  pendingRetryByItemId?: Record<string, PendingItemRetryState>;
+}
+
+const watermarkWriteQueues = new Map<string, Promise<void>>();
+
+/** 按运行目录串行安全更新 `edit-watermark.json`，避免多条新闻并发结束时互相覆盖 */
+export async function updateEditWatermark(
+  runDir: string,
+  updater: (prev: EditWatermarkData) => EditWatermarkData,
+): Promise<EditWatermarkData> {
+  const filePath = path.join(runDir, 'edit-watermark.json');
+  const prevChain = watermarkWriteQueues.get(runDir) ?? Promise.resolve();
+  let result: EditWatermarkData = {};
+  const nextChain = prevChain
+    .catch(() => undefined)
+    .then(async () => {
+      const current = (await readJsonOrNull<EditWatermarkData>(filePath)) ?? {};
+      result = updater(current);
+      await writeJsonAtomic(filePath, result);
+    });
+  watermarkWriteQueues.set(runDir, nextChain);
+  await nextChain;
+  return result;
+}
+
 /** 从历史版本列表中提取最近一次润色或微调得到的稿件 */
 function findLatestPolished(
   versions: ReturnType<CoreContext['repos']['runItems']['listVersions']>,
@@ -52,24 +86,20 @@ function findLatestSummary(
   return null;
 }
 
-/** 计算当前修改轮次里是否已经使用过免费的规则预检修正机会 */
-function hasUsedFreePrecheckInCurrentRound(
+/** 从有序版本列表里判断本轮或之前是否已用掉唯一的免费预检修正机会 */
+function countFailedPrechecks(
   versions: ReturnType<CoreContext['repos']['runItems']['listVersions']>,
-): boolean {
-  let failedPrechecks = 0;
-  for (let i = versions.length - 1; i >= 0; i--) {
-    const v = versions[i];
-    if (!v || v.kind === 'factcheck' || v.kind === 'polish' || v.kind === 'summary') {
-      break;
-    }
+): number {
+  let count = 0;
+  for (const v of versions) {
     if (v.kind === 'precheck') {
       const payload = v.payload as PrecheckResult;
       if (!payload.passed) {
-        failedPrechecks += 1;
+        count += 1;
       }
     }
   }
-  return failedPrechecks >= 1;
+  return count;
 }
 
 /** 将某条新闻标记为通过核查并保存成品单条文件 */
@@ -176,33 +206,92 @@ export async function processSingleItem(opts: {
     articlesForPrecheck.set(id, { text: loaded.text, publishedAt: loaded.publishedAt });
   }
 
+  const runDir = ctx.paths.runDir(runId);
   const rawVersions = ctx.repos.runItems.listVersions(item.id);
-  const watermarkData = await readJsonOrNull<{ versionFloorByItemId?: Record<string, number> }>(
-    path.join(ctx.paths.runDir(runId), 'edit-watermark.json'),
+  const watermarkData = await readJsonOrNull<EditWatermarkData>(
+    path.join(runDir, 'edit-watermark.json'),
   );
   const versionFloor = watermarkData?.versionFloorByItemId?.[item.id] ?? 0;
-  const versions = rawVersions.filter((v) => v.id > versionFloor);
-  let revision = forceFromStep ? 0 : item.revision;
+  const versionsAfterFloor = rawVersions.filter((v) => v.id > versionFloor);
+  const pendingRetry = watermarkData?.pendingRetryByItemId?.[item.id];
+  const effectiveFromStep = forceFromStep ?? pendingRetry?.fromStep;
+
+  let versions = versionsAfterFloor;
+  let revision = item.revision;
+  let skipPrecheckOnce = false;
+  let hasPostRetryWork = true;
+
+  if (effectiveFromStep === 'summarize') {
+    versions = [];
+    revision = 0;
+    hasPostRetryWork = false;
+  } else if (effectiveFromStep === 'polish' || effectiveFromStep === 'factcheck') {
+    const baselineVersionId =
+      pendingRetry?.fromStep === effectiveFromStep
+        ? pendingRetry.baselineVersionId
+        : (versionsAfterFloor[versionsAfterFloor.length - 1]?.id ?? 0);
+    hasPostRetryWork = versionsAfterFloor.some((v) => v.id > baselineVersionId);
+
+    if (effectiveFromStep === 'polish') {
+      versions = versionsAfterFloor.filter((v) => v.kind === 'summary' || v.id > baselineVersionId);
+      if (!hasPostRetryWork) {
+        revision = 0;
+      }
+    } else {
+      versions = versionsAfterFloor.filter(
+        (v) =>
+          v.kind === 'summary' ||
+          v.kind === 'polish' ||
+          v.kind === 'revise' ||
+          v.id > baselineVersionId,
+      );
+      if (!hasPostRetryWork) {
+        revision = 0;
+        skipPrecheckOnce = true;
+      }
+    }
+  }
+
   let summary: SummaryDraft | null =
-    forceFromStep === 'summarize' ? null : findLatestSummary(versions);
+    effectiveFromStep === 'summarize' ? null : findLatestSummary(versions);
   let polished: PolishedItem | null =
-    forceFromStep === 'summarize' || forceFromStep === 'polish'
+    effectiveFromStep === 'summarize' || (effectiveFromStep === 'polish' && !hasPostRetryWork)
       ? null
       : findLatestPolished(versions);
 
-  let skipPrecheckOnce = false;
-  let freePrecheckRetryUsedInRound = false;
+  const failedPrechecksCount = countFailedPrechecks(versions);
+  // 每条新闻仅允许享受一次不计入修改轮次的预检修正额度
+  let freePrecheckUsed = failedPrechecksCount > 0;
 
-  if (!forceFromStep) {
+  const clearPendingRetry = async () => {
+    if (pendingRetry) {
+      await updateEditWatermark(runDir, (prev) => {
+        if (!prev.pendingRetryByItemId?.[item.id]) {
+          return prev;
+        }
+        const nextPending = { ...prev.pendingRetryByItemId };
+        delete nextPending[item.id];
+        return {
+          ...prev,
+          pendingRetryByItemId: nextPending,
+        };
+      });
+    }
+  };
+
+  const canResumeFromLastVer =
+    !effectiveFromStep || (effectiveFromStep !== 'summarize' && hasPostRetryWork);
+
+  if (canResumeFromLastVer) {
     const lastVer = versions[versions.length - 1];
     if (lastVer?.kind === 'precheck' && polished) {
       const preRes = lastVer.payload as PrecheckResult;
       if (preRes.passed) {
         skipPrecheckOnce = true;
       } else {
-        const usedFree = hasUsedFreePrecheckInCurrentRound(versions);
-        if (!usedFree) {
-          freePrecheckRetryUsedInRound = true;
+        const usedFreeEarlier = failedPrechecksCount > 1;
+        if (!usedFreeEarlier) {
+          freePrecheckUsed = true;
           ctx.repos.runItems.updateItem(item.id, {
             status: 'revising',
             revision,
@@ -222,7 +311,9 @@ export async function processSingleItem(opts: {
             signal,
           });
         } else {
-          revision += 1;
+          // 防止在修改轮数递增与保存修订稿之间崩溃导致轮数重复叠加
+          revision = Math.max(revision, lastVer.round + 1);
+          freePrecheckUsed = true;
           if (revision > settings.editorial.maxRevisions) {
             markItemDropped({
               ctx,
@@ -232,9 +323,9 @@ export async function processSingleItem(opts: {
               revision,
               reason: 'exceeded_revisions',
             });
+            await clearPendingRetry();
             return 'dropped';
           }
-          freePrecheckRetryUsedInRound = false;
           ctx.repos.runItems.updateItem(item.id, {
             status: 'revising',
             revision,
@@ -264,9 +355,11 @@ export async function processSingleItem(opts: {
             finalJson: null,
             updatedAt: ctx.now().toISOString(),
           });
+          await clearPendingRetry();
           return 'requeued';
         }
         await markItemPassed({ ctx, runId, item, event, polished, revision });
+        await clearPendingRetry();
         return 'passed';
       }
       if (fc.verdict === 'drop') {
@@ -278,9 +371,10 @@ export async function processSingleItem(opts: {
           revision,
           reason: fc.dropReason || 'factcheck_rejected',
         });
+        await clearPendingRetry();
         return 'dropped';
       }
-      revision += 1;
+      revision = Math.max(revision, lastVer.round + 1);
       if (revision > settings.editorial.maxRevisions) {
         markItemDropped({
           ctx,
@@ -290,6 +384,7 @@ export async function processSingleItem(opts: {
           revision,
           reason: 'exceeded_revisions',
         });
+        await clearPendingRetry();
         return 'dropped';
       }
       ctx.repos.runItems.updateItem(item.id, {
@@ -384,11 +479,10 @@ export async function processSingleItem(opts: {
       });
 
       if (!precheckRes.passed) {
-        if (!freePrecheckRetryUsedInRound) {
-          freePrecheckRetryUsedInRound = true;
+        if (!freePrecheckUsed) {
+          freePrecheckUsed = true;
         } else {
           revision += 1;
-          freePrecheckRetryUsedInRound = false;
           if (revision > settings.editorial.maxRevisions) {
             markItemDropped({
               ctx,
@@ -398,6 +492,7 @@ export async function processSingleItem(opts: {
               revision,
               reason: 'exceeded_revisions',
             });
+            await clearPendingRetry();
             return 'dropped';
           }
         }
@@ -453,9 +548,11 @@ export async function processSingleItem(opts: {
           finalJson: null,
           updatedAt: ctx.now().toISOString(),
         });
+        await clearPendingRetry();
         return 'requeued';
       }
       await markItemPassed({ ctx, runId, item, event, polished, revision });
+      await clearPendingRetry();
       return 'passed';
     }
 
@@ -468,11 +565,11 @@ export async function processSingleItem(opts: {
         revision,
         reason: fcRes.dropReason || 'factcheck_rejected',
       });
+      await clearPendingRetry();
       return 'dropped';
     }
 
     revision += 1;
-    freePrecheckRetryUsedInRound = false;
     if (revision > settings.editorial.maxRevisions) {
       markItemDropped({
         ctx,
@@ -482,6 +579,7 @@ export async function processSingleItem(opts: {
         revision,
         reason: 'exceeded_revisions',
       });
+      await clearPendingRetry();
       return 'dropped';
     }
 
@@ -560,13 +658,28 @@ export async function runEditStage(
   }
 
   let passedCount = allItems.filter((i) => i.status === 'passed').length;
+  const resetLingeringActiveItems = () => {
+    const resetTs = ctx.now().toISOString();
+    for (const item of ctx.repos.runItems.listByRun(runId)) {
+      if (item.status !== 'passed' && item.status !== 'dropped' && item.status !== 'queued') {
+        ctx.repos.runItems.updateItem(item.id, {
+          status: 'queued',
+          finalJson: null,
+          updatedAt: resetTs,
+        });
+      }
+    }
+  };
+
   if (passedCount >= itemCount) {
+    resetLingeringActiveItems();
+    const refreshed = ctx.repos.runItems.listByRun(runId);
     return {
-      passedItemIds: allItems
+      passedItemIds: refreshed
         .filter((i) => i.status === 'passed')
         .slice(0, itemCount)
         .map((i) => i.id),
-      droppedItemIds: allItems.filter((i) => i.status === 'dropped').map((i) => i.id),
+      droppedItemIds: refreshed.filter((i) => i.status === 'dropped').map((i) => i.id),
     };
   }
 
@@ -711,6 +824,7 @@ export async function runEditStage(
     }
   }
 
+  resetLingeringActiveItems();
   const finalItems = ctx.repos.runItems.listByRun(runId);
   return {
     passedItemIds: finalItems.filter((i) => i.status === 'passed').map((i) => i.id),
@@ -778,9 +892,30 @@ export async function retrySingleEditItem(opts: {
   ctx.repos.runItems.updateItem(targetItem.id, {
     status: 'queued',
     position: null,
+    revision: 0,
     dropReason: null,
     finalJson: null,
     updatedAt: ctx.now().toISOString(),
+  });
+
+  const runDir = ctx.paths.runDir(runId);
+  const versions = ctx.repos.runItems.listVersions(itemId);
+  const maxVersionId = versions.reduce((acc, v) => Math.max(v.id, acc), 0);
+  await updateEditWatermark(runDir, (prev) => {
+    const nextFloor = { ...(prev.versionFloorByItemId ?? {}) };
+    const nextPending = { ...(prev.pendingRetryByItemId ?? {}) };
+    if (fromStep === 'summarize') {
+      if (maxVersionId > 0) {
+        nextFloor[itemId] = maxVersionId;
+      }
+      delete nextPending[itemId];
+    } else {
+      nextPending[itemId] = { fromStep, baselineVersionId: maxVersionId };
+    }
+    return {
+      versionFloorByItemId: nextFloor,
+      pendingRetryByItemId: nextPending,
+    };
   });
 
   try {
@@ -794,6 +929,7 @@ export async function retrySingleEditItem(opts: {
         ...targetItem,
         status: 'queued',
         position: null,
+        revision: 0,
         dropReason: null,
         finalJson: null,
       },

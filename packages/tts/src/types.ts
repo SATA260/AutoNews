@@ -5,6 +5,8 @@ import type { TtsSettings } from '@aidaily/contracts';
 export interface SynthesizeRequest {
   text: string;
   outFile: string;
+  sampleRate?: number;
+  providerConfig?: Record<string, unknown>;
   signal?: AbortSignal;
 }
 

@@ -1,4 +1,5 @@
 import crypto from 'node:crypto';
+import fsSync from 'node:fs';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import {
@@ -15,10 +16,18 @@ import {
 import { TZDate } from '@date-fns/tz';
 import { format } from 'date-fns';
 import type { CoreContext } from '../context.js';
-import { type EditSubStep, retrySingleEditItem } from '../editorial/item-pipeline.js';
+import {
+  type EditSubStep,
+  retrySingleEditItem,
+  updateEditWatermark,
+} from '../editorial/item-pipeline.js';
 import { PipelineError } from '../errors.js';
 import { inTransaction } from '../storage/db.js';
-import { archiveRunArtifacts, readJsonOrNull, writeJsonAtomic } from '../storage/files.js';
+import {
+  archiveRunArtifacts,
+  restoreArchivedArtifacts,
+  writeJsonAtomic,
+} from '../storage/files.js';
 import { createRunCancelMonitor } from './cancel.js';
 import { emitRunEvent } from './events.js';
 import { startRunHeartbeat } from './heartbeat.js';
@@ -171,9 +180,16 @@ export function getRunRetryOptions(ctx: CoreContext, runId: string): RetryOption
     };
   }
 
+  const runDir = ctx.paths.runDir(runId);
   const stageRecords = ctx.repos.runStages.listByRun(runId);
   const byStage = new Map(stageRecords.map((r) => [r.stage, r]));
-  const firstIncompleteIdx = PIPELINE_STAGES.findIndex((s) => byStage.get(s)?.status !== 'done');
+  const firstIncompleteIdx = PIPELINE_STAGES.findIndex((s) => {
+    const rec = byStage.get(s);
+    if (rec?.status !== 'done' || !rec.checkpointPath) {
+      return true;
+    }
+    return !fsSync.existsSync(path.join(runDir, rec.checkpointPath));
+  });
 
   if (firstIncompleteIdx === -1) {
     return {
@@ -204,55 +220,66 @@ async function invalidateStagesAndArchive(
   const fromIdx = PIPELINE_STAGES.indexOf(fromStage);
   const stagesToInvalidate = PIPELINE_STAGES.slice(fromIdx);
   const runDir = ctx.paths.runDir(runId);
-
+  const archiveName = `attempt-${attempt}-${fromStage}`;
   const relArtifacts = stagesToInvalidate.flatMap((s) => STAGE_ARTIFACTS[s]);
-  await archiveRunArtifacts(runDir, `attempt-${attempt}-${fromStage}`, relArtifacts);
 
-  if (stagesToInvalidate.includes('edit')) {
-    const watermarkFile = path.join(runDir, 'edit-watermark.json');
-    const existingWatermark =
-      (await readJsonOrNull<{ versionFloorByItemId?: Record<string, number> }>(watermarkFile)) ??
-      {};
-    const nextFloor: Record<string, number> = { ...(existingWatermark.versionFloorByItemId ?? {}) };
-    for (const item of ctx.repos.runItems.listByRun(runId)) {
-      const versions = ctx.repos.runItems.listVersions(item.id);
-      const maxId = versions.reduce((acc, v) => Math.max(v.id, acc), 0);
-      if (maxId > 0) {
-        nextFloor[item.id] = maxId;
-      }
+  const moved = await archiveRunArtifacts(runDir, archiveName, relArtifacts);
+
+  try {
+    if (stagesToInvalidate.includes('edit')) {
+      const items = ctx.repos.runItems.listByRun(runId);
+      await updateEditWatermark(runDir, (existingWatermark) => {
+        const nextFloor: Record<string, number> = {
+          ...(existingWatermark.versionFloorByItemId ?? {}),
+        };
+        for (const item of items) {
+          const versions = ctx.repos.runItems.listVersions(item.id);
+          const maxId = versions.reduce((acc, v) => Math.max(v.id, acc), 0);
+          if (maxId > 0) {
+            nextFloor[item.id] = maxId;
+          }
+        }
+        return {
+          versionFloorByItemId: nextFloor,
+          pendingRetryByItemId: {},
+        };
+      });
     }
-    await writeJsonAtomic(watermarkFile, { versionFloorByItemId: nextFloor });
-  }
 
-  const nowIso = ctx.now().toISOString();
-  inTransaction(ctx.db, () => {
-    ctx.repos.runStages.markStaleFrom(runId, stagesToInvalidate);
+    const nowIso = ctx.now().toISOString();
+    inTransaction(ctx.db, () => {
+      ctx.repos.runStages.markStaleFrom(runId, stagesToInvalidate);
 
-    if (fromStage === 'collect' || fromStage === 'select') {
-      ctx.repos.articles.releaseByRun(runId);
-      ctx.repos.events.deleteByRun(runId);
-    } else if (stagesToInvalidate.includes('edit')) {
-      for (const item of ctx.repos.runItems.listByRun(runId)) {
-        ctx.repos.runItems.updateItem(item.id, {
-          status: 'queued',
-          position: null,
-          revision: 0,
-          dropReason: null,
-          finalJson: null,
-          updatedAt: nowIso,
-        });
-      }
-    } else if (stagesToInvalidate.includes('package')) {
-      for (const item of ctx.repos.runItems.listByRun(runId)) {
-        if (item.position !== null) {
+      if (fromStage === 'collect' || fromStage === 'select') {
+        ctx.repos.articles.releaseByRun(runId);
+        ctx.repos.events.deleteByRun(runId);
+      } else if (stagesToInvalidate.includes('edit')) {
+        for (const item of ctx.repos.runItems.listByRun(runId)) {
           ctx.repos.runItems.updateItem(item.id, {
+            status: 'queued',
             position: null,
+            revision: 0,
+            dropReason: null,
+            finalJson: null,
             updatedAt: nowIso,
           });
         }
+      } else if (stagesToInvalidate.includes('package')) {
+        for (const item of ctx.repos.runItems.listByRun(runId)) {
+          if (item.position !== null) {
+            ctx.repos.runItems.updateItem(item.id, {
+              position: null,
+              updatedAt: nowIso,
+            });
+          }
+        }
       }
-    }
-  });
+    });
+  } catch (err) {
+    // 若数据库重设失败，将已归档文件恢复回原目录以保证磁盘与数据库一致
+    await restoreArchivedArtifacts(runDir, archiveName, moved);
+    throw err;
+  }
 }
 
 /** 内部持锁后的主流程顺序执行器 */
@@ -281,8 +308,16 @@ async function executePipelineStagesLocked(opts: {
   }
 
   const stagesToRun = PIPELINE_STAGES.slice(startIdx, stopIdx + 1);
-  const hb = startRunHeartbeat(ctx, runId);
+  const lockAbort = new AbortController();
+  let lostLock = false;
+  const hb = startRunHeartbeat(ctx, runId, {
+    onLockLost: () => {
+      lostLock = true;
+      lockAbort.abort();
+    },
+  });
   const cancelMonitor = createRunCancelMonitor(ctx, runId);
+  const stageSignal = AbortSignal.any([cancelMonitor.signal, lockAbort.signal]);
 
   const runRow = ctx.repos.runs.getById(runId);
   const nowStartIso = ctx.now().toISOString();
@@ -303,6 +338,9 @@ async function executePipelineStagesLocked(opts: {
   try {
     for (const stage of stagesToRun) {
       activeStage = stage;
+      if (lostLock) {
+        throw new PipelineError('interrupted', '运行锁已被其他进程接管，当前任务已安全停止');
+      }
       if (cancelMonitor.checkNow()) {
         throw new DOMException('任务已取消', 'AbortError');
       }
@@ -340,7 +378,7 @@ async function executePipelineStagesLocked(opts: {
           ctx,
           runId,
           settings,
-          signal: cancelMonitor.signal,
+          signal: stageSignal,
           limitsOverride,
         });
       } catch (stageErr) {
@@ -406,6 +444,12 @@ async function executePipelineStagesLocked(opts: {
       });
     }
   } catch (err) {
+    if (lostLock) {
+      // 运行锁已被接管时，接管方已更新任务状态，当前失联进程不再覆盖数据库记录
+      throw new PipelineError('interrupted', '运行锁已被其他进程接管，当前任务已安全停止', {
+        cause: err,
+      });
+    }
     const errIso = ctx.now().toISOString();
     const code = toErrorCode(err, activeStage);
     const deadlineIso = computeRetryDeadline(ctx, settings);
@@ -478,6 +522,13 @@ export async function executeRun(
   const run = ctx.repos.runs.getById(runId);
   if (!run) {
     throw new Error(`未找到任务记录: ${runId}`);
+  }
+  if (run.status === 'running' || run.status === 'publishing') {
+    const holder = ctx.repos.locks.get('pipeline');
+    if (holder) {
+      throw new LockBusyError(holder);
+    }
+    throw new Error(`任务 ${runId} 正在执行中（状态：${run.status}），无法重复启动`);
   }
   if (run.status === 'published' || run.status === 'abandoned') {
     throw new Error(`任务 ${runId} 状态为 ${run.status}，不允许再次执行`);
@@ -661,8 +712,16 @@ export async function retryRunItem(
   let settings = parseRunSettingsSnapshot(run.configSnapshotJson);
   acquirePipelineLock(ctx, runId, settings);
 
-  const hb = startRunHeartbeat(ctx, runId);
+  const lockAbort = new AbortController();
+  let lostLock = false;
+  const hb = startRunHeartbeat(ctx, runId, {
+    onLockLost: () => {
+      lostLock = true;
+      lockAbort.abort();
+    },
+  });
   const cancelMonitor = createRunCancelMonitor(ctx, runId);
+  const itemSignal = AbortSignal.any([cancelMonitor.signal, lockAbort.signal]);
 
   try {
     if (opts?.useLatestConfig) {
@@ -710,19 +769,6 @@ export async function retryRunItem(
       data: { granularity: 'item', itemId, fromStep, attempt },
     });
 
-    if (fromStep === 'summarize') {
-      const watermarkFile = path.join(ctx.paths.runDir(runId), 'edit-watermark.json');
-      const existingWatermark =
-        (await readJsonOrNull<{ versionFloorByItemId?: Record<string, number> }>(watermarkFile)) ??
-        {};
-      const versions = ctx.repos.runItems.listVersions(itemId);
-      const maxId = versions.reduce((acc, v) => Math.max(v.id, acc), 0);
-      if (maxId > 0) {
-        const nextFloor = { ...(existingWatermark.versionFloorByItemId ?? {}), [itemId]: maxId };
-        await writeJsonAtomic(watermarkFile, { versionFloorByItemId: nextFloor });
-      }
-    }
-
     let editOut: unknown;
     try {
       editOut = await retrySingleEditItem({
@@ -732,9 +778,14 @@ export async function retryRunItem(
         itemId,
         fromStep,
         limitsOverride: opts?.limitsOverride,
-        signal: cancelMonitor.signal,
+        signal: itemSignal,
       });
     } catch (itemErr) {
+      if (lostLock) {
+        throw new PipelineError('interrupted', '运行锁已被其他进程接管，当前单条重试已停止', {
+          cause: itemErr,
+        });
+      }
       const errIso = ctx.now().toISOString();
       const code = toErrorCode(itemErr, 'edit');
       const deadlineIso = computeRetryDeadline(ctx, settings);
