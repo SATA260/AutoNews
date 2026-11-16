@@ -25,7 +25,7 @@ const RUN_STATUS_LABELS: Record<string, string> = {
   abandoned: '已放弃',
 };
 
-/** 计算字符串在等宽终端中的显示宽度（中文及全角字符按 2 列计算） */
+/** 计算字符串在等宽终端中的显示宽度（中日韩表意文字、全角符号及增补平面宽字符按 2 列计算） */
 function displayWidth(text: string): number {
   let width = 0;
   for (const ch of text) {

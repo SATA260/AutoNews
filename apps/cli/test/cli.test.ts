@@ -168,6 +168,12 @@ describe('aidaily CLI commands, JSON output, streaming logs, and exit codes', ()
     const c2 = createBufferedIo();
     expect(await runCli(['run', '-n', '0'], c2.io)).toBe(2);
 
+    const cOverflow = createBufferedIo();
+    expect(await runCli(['run', '-n', '9007199254740993'], cOverflow.io)).toBe(2);
+
+    const cStatusEmpty = createBufferedIo();
+    expect(await runCli(['runs', '--status', ','], cStatusEmpty.io)).toBe(2);
+
     // schedule create 缺省 --time 或 -n 返回退出码 2
     const c3 = createBufferedIo();
     expect(await runCli(['schedule', 'create', '-n', '5'], c3.io)).toBe(2);
@@ -224,6 +230,15 @@ describe('aidaily CLI commands, JSON output, streaming logs, and exit codes', ()
       ),
     ).toBe(0);
     expect(JSON.parse(getBuf.getOut())).toBe('gemini-3.8-flash-medium');
+
+    // 访问数组 .length 必须被拒绝并返回退出码 2
+    const getArrayLenBuf = createBufferedIo();
+    expect(
+      await runCli(
+        ['config', 'get', 'publish.bilibili.defaultTags.length', '--root', rootDir],
+        getArrayLenBuf.io,
+      ),
+    ).toBe(2);
 
     // models
     const modelsBuf = createBufferedIo();

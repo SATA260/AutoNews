@@ -10,7 +10,7 @@ export class CliUsageError extends Error {
   }
 }
 
-/** 将命令行传入的配置值文本解析为布尔值、数字、JSON 数组对象或纯字符串 */
+/** 将命令行传入的配置值文本解析为布尔值、安全精度数字、JSON 值或纯字符串 */
 export function parseCliValue(raw: string): unknown {
   const trimmed = raw.trim();
   if (trimmed === 'true') {
@@ -22,9 +22,14 @@ export function parseCliValue(raw: string): unknown {
   if (trimmed === 'null') {
     return null;
   }
-  if (/^-?\d+(\.\d+)?$/.test(trimmed)) {
+  // 带前导零的数字串（如 03000）按字符串保留，并校验整数转换无精度丢失
+  if (/^-?(0|[1-9]\d*)(\.\d+)?$/.test(trimmed)) {
     const num = Number(trimmed);
-    if (Number.isFinite(num)) {
+    if (trimmed.includes('.')) {
+      if (Number.isFinite(num)) {
+        return num;
+      }
+    } else if (Number.isSafeInteger(num) && String(num) === trimmed) {
       return num;
     }
   }
@@ -32,10 +37,10 @@ export function parseCliValue(raw: string): unknown {
     try {
       return JSON.parse(trimmed);
     } catch {
-      return raw;
+      return trimmed;
     }
   }
-  return raw;
+  return trimmed;
 }
 
 /** 按点号分隔的配置路径校验并返回合法字段片段数组，防止访问原型链保留字段 */
@@ -61,6 +66,17 @@ export function getByDotPath(obj: unknown, dotPath?: string): unknown {
   const parts = splitSafeDotPath(dotPath);
   let cursor: unknown = obj;
   for (const key of parts) {
+    if (Array.isArray(cursor)) {
+      if (!/^(0|[1-9]\d*)$/.test(key)) {
+        throw new CliUsageError(`非法的配置数组索引路径: ${dotPath}`);
+      }
+      const idx = Number.parseInt(key, 10);
+      if (idx >= cursor.length) {
+        throw new CliUsageError(`配置数组下标越界: ${dotPath}`);
+      }
+      cursor = cursor[idx];
+      continue;
+    }
     if (typeof cursor !== 'object' || cursor === null || !Object.hasOwn(cursor, key)) {
       throw new CliUsageError(`未找到配置路径: ${dotPath}`);
     }

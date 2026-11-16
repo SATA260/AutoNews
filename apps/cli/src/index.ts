@@ -57,16 +57,97 @@ function getGlobals(cmd: Command): GlobalCliOpts {
   return cmd.optsWithGlobals<GlobalCliOpts>();
 }
 
-/** 将字符串参数解析并校验为正整数，不合法时抛出退出码 2 对应的参数错误 */
+/** 将字符串参数解析并校验为安全范围内的正整数（禁止前导零与超大整数静默舍入），不合法时抛出退出码 2 对应的参数错误 */
 function parsePositiveInt(raw: string, flagName: string): number {
-  if (!/^\d+$/.test(raw.trim())) {
+  const trimmed = raw.trim();
+  if (!/^[1-9]\d*$/.test(trimmed)) {
     throw new CliUsageError(`参数 ${flagName} 必须为正整数，当前传入: ${raw}`);
   }
-  const num = Number.parseInt(raw.trim(), 10);
-  if (!Number.isSafeInteger(num) || num <= 0) {
-    throw new CliUsageError(`参数 ${flagName} 必须大于 0，当前传入: ${raw}`);
+  const num = Number.parseInt(trimmed, 10);
+  if (!Number.isSafeInteger(num) || num <= 0 || String(num) !== trimmed) {
+    throw new CliUsageError(`参数 ${flagName} 必须为安全范围内的正整数，当前传入: ${raw}`);
   }
   return num;
+}
+
+/** 分页查询指定任务当前已有的最大日志事件编号，避免续跑监听回放过旧事件 */
+async function getLatestEventId(core: Core, runId: string): Promise<number> {
+  let cursor = 0;
+  while (true) {
+    const batch = await core.tasks.events(runId, cursor, 500);
+    if (batch.length === 0) {
+      return cursor;
+    }
+    for (const ev of batch) {
+      if (ev.id > cursor) {
+        cursor = ev.id;
+      }
+    }
+    if (batch.length < 500) {
+      return cursor;
+    }
+  }
+}
+
+/** 注册单次生效的中断信号处理器；首次收到 Ctrl-C 执行回调并立即卸载自身，使二次按键可触发进程默认强退 */
+function attachSingleSigint(onFirstInterrupt: () => void): () => void {
+  const handler = () => {
+    process.off('SIGINT', handler);
+    onFirstInterrupt();
+  };
+  process.on('SIGINT', handler);
+  return () => {
+    process.off('SIGINT', handler);
+  };
+}
+
+/** 递归检测任意命令节点是否已经解析到 `--json` 标志，或检查命令行标志序列中的独立 `--json` 选项 */
+function hasJsonFlag(program: Command, argv: readonly string[]): boolean {
+  const checkCmd = (cmd: Command): boolean => {
+    if ((cmd.opts() as GlobalCliOpts).json) {
+      return true;
+    }
+    return cmd.commands.some((sub) => checkCmd(sub));
+  };
+  if (checkCmd(program)) {
+    return true;
+  }
+
+  const valueFlags = new Set([
+    '-n',
+    '--items',
+    '--root',
+    '--trigger',
+    '--schedule-id',
+    '--from',
+    '--status',
+    '--limit',
+    '--reason',
+    '--title',
+    '--desc-file',
+    '--tags',
+    '--bvid',
+    '--time',
+    '--name',
+    '--cli',
+  ]);
+  let skipNextValue = false;
+  for (const token of argv) {
+    if (token === '--') {
+      break;
+    }
+    if (skipNextValue) {
+      skipNextValue = false;
+      continue;
+    }
+    if (token === '--json' || token === '--json=true') {
+      return true;
+    }
+    if (valueFlags.has(token)) {
+      skipNextValue = true;
+    }
+  }
+  return false;
 }
 
 /** 构造用于写入标准输出的格式化函数（JSON 或人类可读文本） */
@@ -150,11 +231,12 @@ export function buildProgram(io: CliIo = DEFAULT_IO, onExitCode?: (code: number)
     .option('--json', '以结构化 JSON 格式输出命令结果', false)
     .option('--root <dir>', '显式指定项目根目录（包含 config/settings.yaml）');
 
+  /** 记录当前命令结束时的退出码 */
   const setExit = (code: number): void => {
     onExitCode?.(code);
   };
 
-  /** 监听前台执行任务并实时输出进度事件（支持 Ctrl-C 发出安全取消请求） */
+  /** 监听前台执行任务并实时输出进度事件（支持首次 Ctrl-C 发出安全取消请求、二次按键强退） */
   const watchForegroundTask = async (
     core: Core,
     runId: string,
@@ -164,15 +246,15 @@ export function buildProgram(io: CliIo = DEFAULT_IO, onExitCode?: (code: number)
   ): Promise<void> => {
     const watchCtrl = new AbortController();
     const timezone = core.config.getSettings().timezone;
-    let cancelSent = false;
-    const onSigint = () => {
-      if (cancelSent) {
-        return;
-      }
-      cancelSent = true;
-      void core.tasks.cancel(runId).catch(() => undefined);
-    };
-    process.on('SIGINT', onSigint);
+    const detachSigint = attachSingleSigint(() => {
+      void core.tasks.cancel(runId).catch((cancelErr) => {
+        if (!jsonMode) {
+          io.stderr(
+            `发送取消请求失败: ${cancelErr instanceof Error ? cancelErr.message : String(cancelErr)}\n`,
+          );
+        }
+      });
+    });
 
     const watchPromise = core.tasks
       .watch(
@@ -185,7 +267,16 @@ export function buildProgram(io: CliIo = DEFAULT_IO, onExitCode?: (code: number)
         watchCtrl.signal,
         { afterId, pollMs: 120 },
       )
-      .catch(() => undefined);
+      .catch((watchErr) => {
+        if (watchCtrl.signal.aborted) {
+          return;
+        }
+        if (!jsonMode) {
+          io.stderr(
+            `日志监听异常结束: ${watchErr instanceof Error ? watchErr.message : String(watchErr)}\n`,
+          );
+        }
+      });
 
     try {
       await workPromise;
@@ -195,7 +286,8 @@ export function buildProgram(io: CliIo = DEFAULT_IO, onExitCode?: (code: number)
       await watchPromise;
       throw err;
     } finally {
-      process.off('SIGINT', onSigint);
+      watchCtrl.abort();
+      detachSigint();
     }
   };
 
@@ -245,7 +337,7 @@ export function buildProgram(io: CliIo = DEFAULT_IO, onExitCode?: (code: number)
             const watchCtrl = new AbortController();
             const timezone = core.config.getSettings().timezone;
             let watchPromise: Promise<void> = Promise.resolve();
-            let onSigint: (() => void) | undefined;
+            let detachSigint: (() => void) | undefined;
 
             try {
               const res = await core.tasks.start({
@@ -255,15 +347,15 @@ export function buildProgram(io: CliIo = DEFAULT_IO, onExitCode?: (code: number)
                 detach: false,
                 onCreated: (rid) => {
                   createdRunId = rid;
-                  let cancelledOnce = false;
-                  onSigint = () => {
-                    if (cancelledOnce) {
-                      return;
-                    }
-                    cancelledOnce = true;
-                    void core.tasks.cancel(rid).catch(() => undefined);
-                  };
-                  process.on('SIGINT', onSigint);
+                  detachSigint = attachSingleSigint(() => {
+                    void core.tasks.cancel(rid).catch((cancelErr) => {
+                      if (!jsonMode) {
+                        io.stderr(
+                          `发送取消请求失败: ${cancelErr instanceof Error ? cancelErr.message : String(cancelErr)}\n`,
+                        );
+                      }
+                    });
+                  });
                   watchPromise = core.tasks
                     .watch(
                       rid,
@@ -275,7 +367,16 @@ export function buildProgram(io: CliIo = DEFAULT_IO, onExitCode?: (code: number)
                       watchCtrl.signal,
                       { pollMs: 120 },
                     )
-                    .catch(() => undefined);
+                    .catch((watchErr) => {
+                      if (watchCtrl.signal.aborted) {
+                        return;
+                      }
+                      if (!jsonMode) {
+                        io.stderr(
+                          `日志监听异常结束: ${watchErr instanceof Error ? watchErr.message : String(watchErr)}\n`,
+                        );
+                      }
+                    });
                 },
               });
               createdRunId = res.runId;
@@ -285,9 +386,8 @@ export function buildProgram(io: CliIo = DEFAULT_IO, onExitCode?: (code: number)
               await watchPromise;
               throw err;
             } finally {
-              if (onSigint) {
-                process.off('SIGINT', onSigint);
-              }
+              watchCtrl.abort();
+              detachSigint?.();
             }
 
             const detail = await core.tasks.get(createdRunId);
@@ -360,8 +460,7 @@ export function buildProgram(io: CliIo = DEFAULT_IO, onExitCode?: (code: number)
             return 0;
           }
 
-          const existingEvents = await core.tasks.events(runId, 0, 500);
-          const afterId = existingEvents[existingEvents.length - 1]?.id ?? 0;
+          const afterId = await getLatestEventId(core, runId);
           await watchForegroundTask(
             core,
             runId,
@@ -425,8 +524,7 @@ export function buildProgram(io: CliIo = DEFAULT_IO, onExitCode?: (code: number)
             return 0;
           }
 
-          const existingEvents = await core.tasks.events(runId, 0, 500);
-          const afterId = existingEvents[existingEvents.length - 1]?.id ?? 0;
+          const afterId = await getLatestEventId(core, runId);
           await watchForegroundTask(
             core,
             runId,
@@ -506,7 +604,7 @@ export function buildProgram(io: CliIo = DEFAULT_IO, onExitCode?: (code: number)
       const limit = parsePositiveInt(opts.limit, '--limit');
 
       let statuses: RunStatus[] | undefined;
-      if (opts.status) {
+      if (opts.status !== undefined) {
         statuses = opts.status
           .split(',')
           .map((s) => s.trim())
@@ -518,6 +616,9 @@ export function buildProgram(io: CliIo = DEFAULT_IO, onExitCode?: (code: number)
             }
             return parsed.data;
           });
+        if (statuses.length === 0) {
+          throw new CliUsageError('参数 --status 不能为空，请至少指定一个有效任务状态');
+        }
       }
 
       const code = await withCore(gOpts, async (core) => {
@@ -609,8 +710,7 @@ export function buildProgram(io: CliIo = DEFAULT_IO, onExitCode?: (code: number)
         }
 
         const ctrl = new AbortController();
-        const onSigint = () => ctrl.abort();
-        process.on('SIGINT', onSigint);
+        const detachSigint = attachSingleSigint(() => ctrl.abort());
         try {
           await core.tasks.watch(
             runId,
@@ -623,7 +723,7 @@ export function buildProgram(io: CliIo = DEFAULT_IO, onExitCode?: (code: number)
             { afterId: cursor, pollMs: 150 },
           );
         } finally {
-          process.off('SIGINT', onSigint);
+          detachSigint();
         }
         return 0;
       });
@@ -644,8 +744,14 @@ export function buildProgram(io: CliIo = DEFAULT_IO, onExitCode?: (code: number)
         const draft = await core.publish.getDraft(runId);
         const absVideoPath = core.tasks.resolveArtifact(runId, 'output/video.mp4');
         const absCoverPath = core.tasks.resolveArtifact(runId, 'output/cover.jpg');
-        if (opts.open && fsSync.existsSync(absVideoPath)) {
-          await spawnInheritProcess('open', [absVideoPath]).catch(() => 1);
+        if (opts.open) {
+          if (!fsSync.existsSync(absVideoPath)) {
+            throw new Error(`找不到待预览的视频成片文件: ${absVideoPath}`);
+          }
+          const openCode = await spawnInheritProcess('open', [absVideoPath]);
+          if (openCode !== 0) {
+            throw new Error(`调用系统播放器打开视频失败（退出码 ${openCode}）`);
+          }
         }
         print(
           { ...draft, absVideoPath, absCoverPath },
@@ -839,7 +945,11 @@ export function buildProgram(io: CliIo = DEFAULT_IO, onExitCode?: (code: number)
           try {
             updated = await core.config.updateSettings(patch);
           } catch (err) {
-            throw new CliUsageError(err instanceof Error ? err.message : String(err));
+            const msg = err instanceof Error ? err.message : String(err);
+            if (msg.includes('校验失败') || (err instanceof Error && err.name === 'ZodError')) {
+              throw new CliUsageError(msg);
+            }
+            throw err;
           }
           const savedValue = getByDotPath(updated, dotPath);
           print(
@@ -1096,7 +1206,7 @@ export async function runCli(argv: readonly string[], io: CliIo = DEFAULT_IO): P
     return exitCode;
   } catch (err) {
     const mappedCode = mapErrorToExitCode(err);
-    const jsonRequested = argv.includes('--json');
+    const jsonRequested = hasJsonFlag(program, argv);
 
     if (err instanceof CommanderError) {
       if (mappedCode !== 0 && jsonRequested) {
