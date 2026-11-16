@@ -22,6 +22,8 @@ import {
   updateEditWatermark,
 } from '../editorial/item-pipeline.js';
 import { PipelineError } from '../errors.js';
+import { executeBilibiliUpload } from '../publish/bilibili.js';
+import { ensurePublishDraftForRun } from '../publish/description.js';
 import { inTransaction } from '../storage/db.js';
 import {
   archiveRunArtifacts,
@@ -334,6 +336,7 @@ async function executePipelineStagesLocked(opts: {
   });
 
   let activeStage: PipelineStage = startStage;
+  let inPublishPhase = false;
 
   try {
     for (const stage of stagesToRun) {
@@ -414,6 +417,7 @@ async function executePipelineStagesLocked(opts: {
     const finishedIso = ctx.now().toISOString();
     const lastStage = stagesToRun[stagesToRun.length - 1];
     if (lastStage === 'qa') {
+      await ensurePublishDraftForRun(ctx, runId, settings);
       ctx.repos.runs.updateStatus(runId, 'awaiting_review', {
         currentStage: 'review',
         pid: null,
@@ -432,8 +436,22 @@ async function executePipelineStagesLocked(opts: {
         runId,
         message: `第 ${runId} 期成片已完成，等待人工审核发布`,
       });
-      if (settings.publish.mode === 'auto' && opts.onAwaitingReview) {
-        await opts.onAwaitingReview({ ctx, runId, settings });
+      if (settings.publish.mode === 'auto') {
+        inPublishPhase = true;
+        if (opts.onAwaitingReview) {
+          await opts.onAwaitingReview({ ctx, runId, settings });
+        } else {
+          hb.stop();
+          cancelMonitor.stop();
+          await executeBilibiliUpload({
+            ctx,
+            runId,
+            settings,
+            allowedRunStatuses: ['awaiting_review'],
+            alreadyLocked: true,
+            signal: stageSignal,
+          });
+        }
       }
     } else {
       ctx.repos.runs.updateStatus(runId, 'interrupted', {
@@ -449,6 +467,10 @@ async function executePipelineStagesLocked(opts: {
       throw new PipelineError('interrupted', '运行锁已被其他进程接管，当前任务已安全停止', {
         cause: err,
       });
+    }
+    if (inPublishPhase) {
+      // 发布阶段内部已经完成 publish_failed 或 publish_uncertain 的落盘与通知，直接向上抛出
+      throw err;
     }
     const errIso = ctx.now().toISOString();
     const code = toErrorCode(err, activeStage);

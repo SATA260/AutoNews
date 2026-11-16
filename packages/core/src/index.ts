@@ -3,6 +3,7 @@ import type { TtsService } from '@aidaily/tts';
 import type { CoreContext } from './context.js';
 import { createCoreContext } from './context.js';
 import type { Notifier } from './notify/index.js';
+import { createPublishService, type PublishService } from './services/publish.js';
 import { createSourceService, type SourceService } from './services/source.js';
 import { recoverStaleRuns } from './workflow/recovery.js';
 
@@ -17,6 +18,8 @@ export * from './errors.js';
 export * from './media/index.js';
 export * from './notify/index.js';
 export * from './paths.js';
+export * from './publish/index.js';
+export * from './services/publish.js';
 export * from './services/source.js';
 export * from './storage/db.js';
 export * from './storage/files.js';
@@ -29,6 +32,7 @@ export * from './workflow/index.js';
 export interface Core {
   context: CoreContext;
   sources: SourceService;
+  publish: PublishService;
   /** 关闭数据库连接并释放底层资源 */
   close(): Promise<void>;
 }
@@ -47,9 +51,11 @@ export async function createCore(opts?: {
   const context = await createCoreContext(opts);
   recoverStaleRuns(context);
   const sources = createSourceService(context);
+  const publish = createPublishService(context);
   return {
     context,
     sources,
+    publish,
     /** 安全关闭核心引擎持有的 SQLite 数据库连接 */
     async close() {
       context.db.close();
