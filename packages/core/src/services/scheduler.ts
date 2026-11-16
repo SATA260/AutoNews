@@ -136,8 +136,8 @@ export function buildLaunchAgentPlist(opts: {
       [
         path.dirname(process.execPath),
         ...(opts.extraBins ?? []),
+        ...(process.env.PATH ? process.env.PATH.split(path.delimiter) : []),
         path.join(os.homedir(), '.local', 'bin'),
-        '/Applications/Gemini.app/Contents/Helpers',
         '/opt/homebrew/bin',
         '/usr/local/bin',
         '/usr/bin',
@@ -225,14 +225,40 @@ export function createSchedulerService(
   const plistPathFor = (id: string): string =>
     path.join(launchAgentsDir, `${buildScheduleLabel(id)}.plist`);
 
-  const domainTarget = (): string => `gui/${process.getuid?.() ?? 501}`;
+  const domainTarget = (): string => {
+    const uid = process.getuid?.();
+    if (uid === undefined) {
+      throw new Error('当前操作系统不支持按用户 UID 挂载 launchd 定时任务');
+    }
+    if (uid === 0) {
+      throw new Error('不支持在 root 用户会话下自动安装个人 LaunchAgent 定时任务');
+    }
+    return `gui/${uid}`;
+  };
 
   const collectExtraBins = (): string[] => {
     const dirs: string[] = [];
+    const envPathDirs = process.env.PATH
+      ? process.env.PATH.split(path.delimiter).filter(Boolean)
+      : [];
     for (const cliCfg of Object.values(ctx.settings.clis)) {
       const bin = cliCfg.bin.trim();
+      if (!bin) {
+        continue;
+      }
       if (bin.includes('/') || bin.includes('\\')) {
         dirs.push(path.dirname(bin));
+      } else {
+        for (const searchDir of [
+          ...envPathDirs,
+          path.join(os.homedir(), '.local', 'bin'),
+          '/opt/homebrew/bin',
+          '/usr/local/bin',
+        ]) {
+          if (fsSync.existsSync(path.join(searchDir, bin))) {
+            dirs.push(searchDir);
+          }
+        }
       }
     }
     return dirs;
@@ -269,9 +295,10 @@ export function createSchedulerService(
         cliScriptPath: resolveCliScriptPath(ctx.paths.rootDir, opts?.cliScriptPath),
         extraBins: collectExtraBins(),
       });
-      await writeFileAtomic(plistPath, plistXml);
+      await writeFileAtomic(plistPath, plistXml, { mode: 0o644 });
       const res = await launchctlExec(['bootstrap', domain, plistPath]);
       if (res.exitCode !== 0) {
+        await fs.rm(plistPath, { force: true }).catch(() => undefined);
         throw new Error(
           `向系统挂载定时任务失败 (${buildScheduleLabel(row.id)}): ${res.stderr.trim() || `退出码 ${res.exitCode}`}`,
         );
@@ -352,7 +379,20 @@ export function createSchedulerService(
         throw new Error(`更新定时任务失败，未找到记录: ${id}`);
       }
 
-      await syncSingleJob(updated);
+      try {
+        await syncSingleJob(updated);
+      } catch (err) {
+        // 系统同步失败时回滚数据库配置与原先的 launchd 状态
+        ctx.repos.schedules.update(id, {
+          name: existing.name,
+          time: existing.time,
+          itemCount: existing.itemCount,
+          enabled: existing.enabled,
+          now: ctx.now().toISOString(),
+        });
+        await syncSingleJob(existing).catch(() => undefined);
+        throw err;
+      }
       return toScheduleJob(updated);
     },
 

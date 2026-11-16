@@ -203,3 +203,33 @@ export function assertPipelineLockAvailable(
     throw new LockBusyError(existing);
   }
 }
+
+/**
+ * 在分离启动后台子进程后，若任务仍处于启动前的预期状态，则预先将运行锁绑定到新子进程号，
+ * 防止在子进程完成初始化前又有第二个并发请求同时启动。
+ */
+export function reservePipelineLockForChild(
+  ctx: CoreContext,
+  runId: string,
+  childPid: number | undefined,
+  shouldReserve: (current: ReturnType<CoreContext['repos']['runs']['getById']>) => boolean,
+): void {
+  if (!childPid) {
+    return;
+  }
+  const nowIso = ctx.now().toISOString();
+  inTransaction(ctx.db, () => {
+    const current = ctx.repos.runs.getById(runId);
+    if (!shouldReserve(current)) {
+      return;
+    }
+    ctx.repos.locks.tryAcquire({
+      name: PIPELINE_LOCK_NAME,
+      ownerRun: runId,
+      pid: childPid,
+      now: nowIso,
+      staleMs: DEFAULT_LOCK_STALE_MS,
+      isProcessAlive,
+    });
+  });
+}

@@ -170,6 +170,12 @@ describe('M8 services, detached worker, launchd scheduler, and doctor', () => {
       detach: true,
     });
 
+    // 分离启动刚返回时运行锁已立即绑定子进程，并发重复启动必须立刻被拒绝且不留冗余 queued 行
+    await expect(
+      core.tasks.start({ itemCount: 1, trigger: 'manual-cli', detach: true }),
+    ).rejects.toThrow(LockBusyError);
+    expect(await core.tasks.list()).toHaveLength(1);
+
     const watchedEvents: RunEvent[] = [];
     const abortCtrl = new AbortController();
     const timeoutTimer = setTimeout(() => abortCtrl.abort(), 35_000);
@@ -193,6 +199,7 @@ describe('M8 services, detached worker, launchd scheduler, and doctor', () => {
     expect(detail.scheduleId).toBe(sched.id);
     expect(detail.artifacts).toContain('output/video.mp4');
     expect(detail.artifacts).toContain('qa.json');
+    expect(detail.artifacts).toContain('worker.log');
 
     // 验证定时任务已记录最近运行与触发时间
     const updatedSchedList = await core.scheduler.list();

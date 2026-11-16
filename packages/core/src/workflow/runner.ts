@@ -418,18 +418,20 @@ async function executePipelineStagesLocked(opts: {
     const lastStage = stagesToRun[stagesToRun.length - 1];
     if (lastStage === 'qa') {
       await ensurePublishDraftForRun(ctx, runId, settings, { regenerate: true });
-      ctx.repos.runs.updateStatus(runId, 'awaiting_review', {
-        currentStage: 'review',
-        pid: null,
-        finishedAt: finishedIso,
-        retryDeadlineAt: null,
-      });
-      emitRunEvent(ctx, {
-        runId,
-        level: 'info',
-        stage: 'review',
-        type: 'awaiting_review',
-        message: '成片制作与质检已全部完成，等待人工审核发布',
+      inTransaction(ctx.db, () => {
+        ctx.repos.runs.updateStatus(runId, 'awaiting_review', {
+          currentStage: 'review',
+          pid: null,
+          finishedAt: finishedIso,
+          retryDeadlineAt: null,
+        });
+        emitRunEvent(ctx, {
+          runId,
+          level: 'info',
+          stage: 'review',
+          type: 'awaiting_review',
+          message: '成片制作与质检已全部完成，等待人工审核发布',
+        });
       });
       await ctx.notifier.notify({
         type: 'awaiting_review',
@@ -478,36 +480,40 @@ async function executePipelineStagesLocked(opts: {
     const errMsg = err instanceof Error ? err.message : String(err);
 
     if (code === 'cancelled') {
-      ctx.repos.runs.updateStatus(runId, 'cancelled', {
-        errorCode: 'cancelled',
-        error: '任务已被用户取消',
-        cancelRequested: 0,
-        pid: null,
-        finishedAt: errIso,
-        retryDeadlineAt: deadlineIso,
-      });
-      emitRunEvent(ctx, {
-        runId,
-        level: 'warn',
-        stage: activeStage,
-        type: 'run_cancelled',
-        message: '任务已按要求取消，已完成工作与选材已保留以便随时继续',
+      inTransaction(ctx.db, () => {
+        ctx.repos.runs.updateStatus(runId, 'cancelled', {
+          errorCode: 'cancelled',
+          error: '任务已被用户取消',
+          cancelRequested: 0,
+          pid: null,
+          finishedAt: errIso,
+          retryDeadlineAt: deadlineIso,
+        });
+        emitRunEvent(ctx, {
+          runId,
+          level: 'warn',
+          stage: activeStage,
+          type: 'run_cancelled',
+          message: '任务已按要求取消，已完成工作与选材已保留以便随时继续',
+        });
       });
     } else {
-      ctx.repos.runs.updateStatus(runId, 'failed', {
-        errorCode: code,
-        error: errMsg,
-        pid: null,
-        finishedAt: errIso,
-        retryDeadlineAt: deadlineIso,
-      });
-      emitRunEvent(ctx, {
-        runId,
-        level: 'error',
-        stage: activeStage,
-        type: 'run_failed',
-        message: `任务执行失败（${code}）：${errMsg}`,
-        data: { errorCode: code },
+      inTransaction(ctx.db, () => {
+        ctx.repos.runs.updateStatus(runId, 'failed', {
+          errorCode: code,
+          error: errMsg,
+          pid: null,
+          finishedAt: errIso,
+          retryDeadlineAt: deadlineIso,
+        });
+        emitRunEvent(ctx, {
+          runId,
+          level: 'error',
+          stage: activeStage,
+          type: 'run_failed',
+          message: `任务执行失败（${code}）：${errMsg}`,
+          data: { errorCode: code },
+        });
       });
       await ctx.notifier.notify({
         type: 'failed',
@@ -552,8 +558,13 @@ export async function executeRun(
     }
     throw new Error(`任务 ${runId} 正在执行中（状态：${run.status}），无法重复启动`);
   }
-  if (run.status === 'published' || run.status === 'abandoned') {
-    throw new Error(`任务 ${runId} 状态为 ${run.status}，不允许再次执行`);
+  if (
+    run.status === 'published' ||
+    run.status === 'abandoned' ||
+    run.status === 'cancelled' ||
+    run.status === 'rejected'
+  ) {
+    throw new Error(`任务 ${runId} 状态为 ${run.status}，不允许直接重新开始，请使用恢复指令`);
   }
 
   const settings = parseRunSettingsSnapshot(run.configSnapshotJson);

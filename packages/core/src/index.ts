@@ -20,6 +20,7 @@ import {
   type TaskService,
 } from './services/index.js';
 import { spawnDetachedWorker } from './worker/spawn.js';
+import { reservePipelineLockForChild } from './workflow/lock.js';
 import { recoverStaleRuns } from './workflow/recovery.js';
 
 export const CORE_VERSION = '0.1.0';
@@ -76,14 +77,21 @@ export async function createCore(opts?: {
   const tasks = createTaskService(context);
   const publish = createPublishService(context, {
     spawnDetachedPublish: async ({ action, runId, dtimeUnixSec }) => {
+      const expectedStatus = action === 'publish-approve' ? 'awaiting_review' : 'publish_failed';
       const args = ['--root', context.paths.rootDir, '--action', action, '--run-id', runId];
       if (dtimeUnixSec !== undefined) {
         args.push('--dtime', String(Math.floor(dtimeUnixSec)));
       }
-      await spawnDetachedWorker(args, {
+      const { pid } = await spawnDetachedWorker(args, {
         rootDir: context.paths.rootDir,
-        logFile: path.join(context.paths.logsDir, 'worker.log'),
+        logFile: path.join(context.paths.runDir(runId), 'worker.log'),
       });
+      reservePipelineLockForChild(
+        context,
+        runId,
+        pid,
+        (current) => current?.status === expectedStatus,
+      );
     },
   });
   const config = createConfigService(context);

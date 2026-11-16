@@ -79,10 +79,7 @@ export function createSystemService(ctx: CoreContext): SystemService {
       }
 
       // 3. 大模型命令行（检查配置中各 AI 阶段引用的命令行工具）
-      const configuredStageClis = Array.from(
-        new Set(Object.values(ctx.settings.ai.stages).map((s) => s.cli)),
-      );
-      const llmClis = configuredStageClis.length > 0 ? configuredStageClis : ['agy'];
+      const llmClis = Array.from(new Set(Object.values(ctx.settings.ai.stages).map((s) => s.cli)));
       for (const cliName of llmClis) {
         try {
           const cliHealth = await ctx.bridge.health(cliName);
@@ -145,13 +142,17 @@ export function createSystemService(ctx: CoreContext): SystemService {
       const biliCliCfg = ctx.settings.clis[ctx.settings.publish.bilibili.cli];
       const biliBin = resolveBiliupExecutable(biliCliCfg?.bin ?? ctx.settings.publish.bilibili.cli);
       const biliProbe = await probeBinaryVersion(biliBin, ['--version']);
-      const cookiePath = path.resolve(ctx.paths.rootDir, ctx.settings.publish.bilibili.cookieFile);
-      const hasCookie = fsSync.existsSync(cookiePath);
+      const resolvedRoot = path.resolve(ctx.paths.rootDir);
+      const cookiePath = path.resolve(resolvedRoot, ctx.settings.publish.bilibili.cookieFile);
+      const cookieInsideRoot = cookiePath.startsWith(`${resolvedRoot}${path.sep}`);
+      const hasCookie = cookieInsideRoot && fsSync.existsSync(cookiePath);
       checks.push({
         name: 'biliup',
         ok: biliProbe.ok,
         detail: biliProbe.ok
-          ? `${biliProbe.detail}（${hasCookie ? `凭据存在: ${ctx.settings.publish.bilibili.cookieFile}` : '尚未扫码登录，请运行 aidaily bili login'}）`
+          ? !cookieInsideRoot
+            ? `${biliProbe.detail}（警告：Cookie 路径超出项目根目录）`
+            : `${biliProbe.detail}（${hasCookie ? `凭据存在: ${ctx.settings.publish.bilibili.cookieFile}` : '尚未扫码登录，请运行 aidaily bili login'}）`
           : biliProbe.detail,
         required: false,
       });

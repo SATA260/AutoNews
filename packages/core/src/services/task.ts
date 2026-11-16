@@ -1,3 +1,4 @@
+import fsSync from 'node:fs';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import {
@@ -19,10 +20,15 @@ import {
 import type { CoreContext } from '../context.js';
 import type { EditSubStep } from '../editorial/item-pipeline.js';
 import { resolveSafeArtifactPath } from '../paths.js';
+import { inTransaction } from '../storage/db.js';
 import { readJsonOrNull } from '../storage/files.js';
 import { spawnDetachedWorker } from '../worker/spawn.js';
 import { emitRunEvent } from '../workflow/events.js';
-import { assertPipelineLockAvailable, LockBusyError } from '../workflow/lock.js';
+import {
+  assertPipelineLockAvailable,
+  LockBusyError,
+  reservePipelineLockForChild,
+} from '../workflow/lock.js';
 import {
   abandonRun,
   cancelRun,
@@ -104,7 +110,7 @@ export interface TaskService {
   getRunArticles(runId: string): Promise<RunArticleWithContent[]>;
   /** 安全读取指定任务目录下的 JSON 产物文件，不存在时返回 null */
   readArtifactJson<T = unknown>(runId: string, relPath: string): Promise<T | null>;
-  /** 安全读取某次大模型命令行调用落盘的完整提示词与原始响应日志 */
+  /** 安全读取某次外部模型调用落盘保存的完整请求提示词与原始输出 */
   getLlmCallLog(runId: string, callId: number): Promise<unknown | null>;
 }
 
@@ -180,18 +186,27 @@ function isWatchingTerminalStatus(status: RunStatus, configSnapshotJson: string)
   }
 }
 
-/** 将项目根目录下的相对文件路径校验收窄在根目录范围内再读取文本内容 */
-async function readTextWithinRoot(rootDir: string, relPath: string | null): Promise<string | null> {
-  if (!relPath) {
+/** 校验相对于根目录的路径在解析真实物理路径后是否仍严格位于指定安全目录内部 */
+function resolveRealPathInsideDir(
+  rootDir: string,
+  allowedDir: string,
+  relFromRoot: string,
+): string | null {
+  if (!relFromRoot || relFromRoot.includes('\0')) {
     return null;
   }
-  const baseRoot = path.resolve(rootDir);
-  const absPath = path.resolve(baseRoot, relPath);
-  if (!absPath.startsWith(`${baseRoot}${path.sep}`)) {
+  const baseAllowed = path.resolve(allowedDir);
+  const absCandidate = path.resolve(rootDir, relFromRoot);
+  if (!absCandidate.startsWith(`${baseAllowed}${path.sep}`)) {
     return null;
   }
   try {
-    return await fs.readFile(absPath, 'utf8');
+    const realAllowed = fsSync.realpathSync(baseAllowed);
+    const realCandidate = fsSync.realpathSync(absCandidate);
+    if (!realCandidate.startsWith(`${realAllowed}${path.sep}`)) {
+      return null;
+    }
+    return realCandidate;
   } catch {
     return null;
   }
@@ -201,8 +216,6 @@ async function readTextWithinRoot(rootDir: string, relPath: string | null): Prom
  * 创建任务管理服务实例，统一向命令行和网页后台提供任务生命周期操作、实时事件监听与产物安全访问。
  */
 export function createTaskService(ctx: CoreContext): TaskService {
-  const workerLogFile = path.join(ctx.paths.logsDir, 'worker.log');
-
   return {
     /** 启动新一期生产任务：校验条数必填、查锁排重，并支持前台直跑或分离至后台工作进程 */
     async start(opts: TaskStartOptions): Promise<{ runId: string }> {
@@ -242,29 +255,68 @@ export function createTaskService(ctx: CoreContext): TaskService {
         throw err;
       }
 
-      const runId = createRun(ctx, {
-        itemCount: opts.itemCount,
-        trigger,
-        scheduleId: opts.scheduleId ?? null,
-      });
-
-      if (opts.scheduleId) {
-        const nowIso = ctx.now().toISOString();
-        ctx.repos.schedules.update(opts.scheduleId, {
-          lastRunId: runId,
-          lastTriggeredAt: nowIso,
-          now: nowIso,
+      const runId = inTransaction(ctx.db, () => {
+        const createdId = createRun(ctx, {
+          itemCount: opts.itemCount,
+          trigger,
+          scheduleId: opts.scheduleId ?? null,
         });
-      }
+
+        if (opts.scheduleId) {
+          const nowIso = ctx.now().toISOString();
+          ctx.repos.schedules.update(opts.scheduleId, {
+            lastRunId: createdId,
+            lastTriggeredAt: nowIso,
+            now: nowIso,
+          });
+        }
+        return createdId;
+      });
 
       opts.onCreated?.(runId);
 
       if (opts.detach) {
-        await spawnDetachedWorker(
-          ['--root', ctx.paths.rootDir, '--action', 'execute-run', '--run-id', runId],
-          { rootDir: ctx.paths.rootDir, logFile: workerLogFile },
-        );
-        return { runId };
+        const args = [
+          '--root',
+          ctx.paths.rootDir,
+          '--action',
+          'execute-run',
+          '--run-id',
+          runId,
+          '--trigger',
+          trigger,
+        ];
+        if (opts.scheduleId) {
+          args.push('--schedule-id', opts.scheduleId);
+        }
+
+        const logFile = path.join(ctx.paths.runDir(runId), 'worker.log');
+        try {
+          const { pid } = await spawnDetachedWorker(args, {
+            rootDir: ctx.paths.rootDir,
+            logFile,
+          });
+          reservePipelineLockForChild(ctx, runId, pid, (current) => current?.status === 'queued');
+          return { runId };
+        } catch (spawnErr) {
+          const errIso = ctx.now().toISOString();
+          const msg = spawnErr instanceof Error ? spawnErr.message : String(spawnErr);
+          inTransaction(ctx.db, () => {
+            ctx.repos.runs.updateStatus(runId, 'failed', {
+              errorCode: 'interrupted',
+              error: `启动后台工作进程失败: ${msg}`,
+              finishedAt: errIso,
+              pid: null,
+            });
+            emitRunEvent(ctx, {
+              runId,
+              level: 'error',
+              type: 'run_failed',
+              message: `启动后台工作进程失败: ${msg}`,
+            });
+          });
+          throw spawnErr;
+        }
       }
 
       await executeRun(ctx, runId);
@@ -295,6 +347,7 @@ export function createTaskService(ctx: CoreContext): TaskService {
       assertPipelineLockAvailable(ctx);
 
       if (opts?.detach) {
+        const beforeAttempt = ctx.repos.runs.getById(runId)?.attempt;
         const args = ['--root', ctx.paths.rootDir, '--action', 'resume', '--run-id', runId];
         if (opts.fromStage) {
           args.push('--from', opts.fromStage);
@@ -302,7 +355,19 @@ export function createTaskService(ctx: CoreContext): TaskService {
         if (opts.useLatestConfig) {
           args.push('--latest-config');
         }
-        await spawnDetachedWorker(args, { rootDir: ctx.paths.rootDir, logFile: workerLogFile });
+        const { pid } = await spawnDetachedWorker(args, {
+          rootDir: ctx.paths.rootDir,
+          logFile: path.join(ctx.paths.runDir(runId), 'worker.log'),
+        });
+        reservePipelineLockForChild(
+          ctx,
+          runId,
+          pid,
+          (current) =>
+            current !== null &&
+            RETRYABLE_RUN_STATUSES.includes(current.status) &&
+            current.attempt === beforeAttempt,
+        );
         return;
       }
 
@@ -336,6 +401,7 @@ export function createTaskService(ctx: CoreContext): TaskService {
       assertPipelineLockAvailable(ctx);
 
       if (opts?.detach) {
+        const beforeAttempt = run.attempt;
         const args = [
           '--root',
           ctx.paths.rootDir,
@@ -352,7 +418,19 @@ export function createTaskService(ctx: CoreContext): TaskService {
         if (opts.useLatestConfig) {
           args.push('--latest-config');
         }
-        await spawnDetachedWorker(args, { rootDir: ctx.paths.rootDir, logFile: workerLogFile });
+        const { pid } = await spawnDetachedWorker(args, {
+          rootDir: ctx.paths.rootDir,
+          logFile: path.join(ctx.paths.runDir(runId), 'worker.log'),
+        });
+        reservePipelineLockForChild(
+          ctx,
+          runId,
+          pid,
+          (current) =>
+            current !== null &&
+            RETRYABLE_RUN_STATUSES.includes(current.status) &&
+            current.attempt === beforeAttempt,
+        );
         return;
       }
 
@@ -483,7 +561,8 @@ export function createTaskService(ctx: CoreContext): TaskService {
           break;
         }
         if (isWatchingTerminalStatus(currentRun.status, currentRun.configSnapshotJson)) {
-          // 退出前再补刷一次事件表，防止状态更新瞬间落盘的尾随事件遗漏
+          // 稍作等待后再执行两次补刷，避免跨进程状态更新与尾随日志事件之间出现瞬时错位
+          await sleepUntilAbort(Math.min(pollMs, 50), signal);
           drainEvents();
           break;
         }
@@ -491,12 +570,12 @@ export function createTaskService(ctx: CoreContext): TaskService {
       }
     },
 
-    /** 安全解析并校某期任务目录内的产物文件绝对路径 */
+    /** 安全解析并校验某期任务目录内的产物文件绝对路径 */
     resolveArtifact(runId: string, relPath: string): string {
       return resolveSafeArtifactPath(ctx.paths.runsDir, runId, relPath);
     },
 
-    /** 读取指定任务关联事件的全部原文章记录及本地提取的正文内容 */
+    /** 读取指定任务关联事件的全部原文章记录及本地提取的正文内容（仅限文章存储目录内） */
     async getRunArticles(runId: string): Promise<RunArticleWithContent[]> {
       const events = ctx.repos.events.listByRun(runId);
       const items = ctx.repos.runItems.listByRun(runId);
@@ -513,10 +592,21 @@ export function createTaskService(ctx: CoreContext): TaskService {
       }
       const articles = ctx.repos.articles.getByIds(Array.from(articleIdSet));
       return Promise.all(
-        articles.map(async (article) => ({
-          ...article,
-          contentText: await readTextWithinRoot(ctx.paths.rootDir, article.contentPath),
-        })),
+        articles.map(async (article) => {
+          if (!article.contentPath) {
+            return { ...article, contentText: null };
+          }
+          const safePath = resolveRealPathInsideDir(
+            ctx.paths.rootDir,
+            ctx.paths.articlesDir,
+            article.contentPath,
+          );
+          if (!safePath) {
+            return { ...article, contentText: null };
+          }
+          const contentText = await fs.readFile(safePath, 'utf8').catch(() => null);
+          return { ...article, contentText };
+        }),
       );
     },
 
@@ -526,19 +616,23 @@ export function createTaskService(ctx: CoreContext): TaskService {
       return readJsonOrNull<T>(absPath);
     },
 
-    /** 读取某次外部模型调用落盘保存的完整请求提示词与原始输出 */
+    /** 读取某次外部模型调用落盘保存的完整请求提示词与原始输出（严格限定在本期模型日志目录内） */
     async getLlmCallLog(runId: string, callId: number): Promise<unknown | null> {
       const calls = ctx.repos.llmCalls.listByRun(runId);
       const target = calls.find((c) => c.id === callId);
       if (!target?.logPath) {
         return null;
       }
-      const baseRoot = path.resolve(ctx.paths.rootDir);
-      const absPath = path.resolve(baseRoot, target.logPath);
-      if (!absPath.startsWith(`${baseRoot}${path.sep}`)) {
+      const allowedLlmDir = path.join(ctx.paths.runDir(runId), 'llm');
+      const safeLogPath = resolveRealPathInsideDir(
+        ctx.paths.rootDir,
+        allowedLlmDir,
+        target.logPath,
+      );
+      if (!safeLogPath) {
         throw new Error(`非法的模型调用日志路径: ${target.logPath}`);
       }
-      return readJsonOrNull<unknown>(absPath);
+      return readJsonOrNull<unknown>(safeLogPath);
     },
   };
 }

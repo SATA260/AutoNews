@@ -83,7 +83,7 @@ function classifyErrorStatus(err: unknown): LlmCallStatus {
  * 通用外部命令行统一调度器：负责适配器分发、并发数限制、临时空目录隔离、失败自动重试与调用日志记录。
  */
 export class CliBridge {
-  private readonly configs: Record<string, CliConfig>;
+  private configs: Record<string, CliConfig>;
   private readonly tmpDir: string;
   private readonly adapters = new Map<string, CliAdapter>();
   private readonly semaphores = new Map<string, Semaphore>();
@@ -92,7 +92,7 @@ export class CliBridge {
   private readonly logCall?: (record: CallRecord) => Promise<void> | void;
 
   constructor(opts: CliBridgeOptions) {
-    this.configs = opts.configs;
+    this.configs = { ...opts.configs };
     this.tmpDir = opts.tmpDir;
     this.maxConcurrentCalls = opts.maxConcurrentCalls ?? 3;
     this.retryDelaysMs = opts.retryDelaysMs ?? DEFAULT_RETRY_DELAYS_MS;
@@ -100,6 +100,11 @@ export class CliBridge {
 
     this.register(agyAdapter);
     this.register(genericAdapter);
+  }
+
+  /** 热更新内存中的命令行工具配置映射 */
+  updateConfigs(nextConfigs: Record<string, CliConfig>): void {
+    this.configs = { ...nextConfigs };
   }
 
   /** 注册或替换命令行适配器 */

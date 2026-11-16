@@ -23,7 +23,10 @@ export function resolveWorkerScriptPath(rootDir: string): string {
   );
 }
 
-/** 启动脱离当前终端与请求生命周期的独立后台工作进程，并将日志追加到指定文件 */
+/**
+ * 启动脱离当前终端与请求生命周期的独立后台工作进程，并将标准输出与错误分别追加到指定日志文件。
+ * 会等待系统确认子进程已成功拉起并拿到进程号后再返回，防止异步启动报错变为未捕获异常。
+ */
 export async function spawnDetachedWorker(
   args: string[],
   opts: { rootDir: string; logFile: string },
@@ -31,16 +34,32 @@ export async function spawnDetachedWorker(
   const scriptPath = resolveWorkerScriptPath(opts.rootDir);
   fs.mkdirSync(path.dirname(opts.logFile), { recursive: true });
   const outFd = fs.openSync(opts.logFile, 'a');
+  const errFd = fs.openSync(opts.logFile, 'a');
   try {
     const child = spawn(process.execPath, [scriptPath, ...args], {
       cwd: opts.rootDir,
       detached: true,
-      stdio: ['ignore', outFd, outFd],
+      stdio: ['ignore', outFd, errFd],
       env: process.env,
     });
+
+    await new Promise<void>((resolve, reject) => {
+      const onError = (err: Error) => {
+        child.off('spawn', onSpawn);
+        reject(err);
+      };
+      const onSpawn = () => {
+        child.off('error', onError);
+        resolve();
+      };
+      child.once('error', onError);
+      child.once('spawn', onSpawn);
+    });
+
     child.unref();
     return { pid: child.pid };
   } finally {
     fs.closeSync(outFd);
+    fs.closeSync(errFd);
   }
 }

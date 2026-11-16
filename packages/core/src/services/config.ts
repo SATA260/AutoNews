@@ -16,6 +16,17 @@ export interface ConfigService {
 
 /** 创建系统配置服务实例 */
 export function createConfigService(ctx: CoreContext): ConfigService {
+  let reloadQueue = Promise.resolve();
+
+  const serializeConfigUpdate = async <T>(fn: () => Promise<T>): Promise<T> => {
+    const run = reloadQueue.catch(() => undefined).then(fn);
+    reloadQueue = run.then(
+      () => undefined,
+      () => undefined,
+    );
+    return run;
+  };
+
   return {
     /** 读取当前运行时全局配置对象 */
     getSettings(): Settings {
@@ -24,9 +35,11 @@ export function createConfigService(ctx: CoreContext): ConfigService {
 
     /** 局部修订配置文件并在通过格式与规则校验后同步重载上下文 */
     async updateSettings(patch: DeepPartial<Settings>): Promise<Settings> {
-      await updateSettingsFile(ctx.paths.settingsFile, patch);
-      await ctx.reloadConfig();
-      return ctx.settings;
+      return serializeConfigUpdate(async () => {
+        await updateSettingsFile(ctx.paths.settingsFile, patch);
+        await ctx.reloadConfig();
+        return ctx.settings;
+      });
     },
 
     /** 读取当前配置的新闻信源清单 */
@@ -36,8 +49,10 @@ export function createConfigService(ctx: CoreContext): ConfigService {
 
     /** 保存新的新闻信源清单并在原子落盘后重载上下文 */
     async updateSources(next: SourceDef[]): Promise<void> {
-      await updateSourcesFile(ctx.paths.sourcesFile, next);
-      await ctx.reloadConfig();
+      await serializeConfigUpdate(async () => {
+        await updateSourcesFile(ctx.paths.sourcesFile, next);
+        await ctx.reloadConfig();
+      });
     },
   };
 }

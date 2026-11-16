@@ -181,7 +181,7 @@ export async function createCoreContext(opts?: {
     bridge,
     tts,
     now,
-    /** 重新读取最新配置与信源列表，全部校验成功后原子更新内存快照 */
+    /** 重新读取最新配置与信源列表，全部校验成功后原子更新内存快照与命令行桥接配置 */
     async reloadConfig() {
       const [nextSettings, nextSources] = await Promise.all([
         loadSettings(paths.settingsFile),
@@ -189,6 +189,9 @@ export async function createCoreContext(opts?: {
       ]);
       settings = nextSettings;
       sources = nextSources;
+      if (typeof (bridge as { updateConfigs?: unknown }).updateConfigs === 'function') {
+        bridge.updateConfigs(nextSettings.clis);
+      }
     },
   };
 

@@ -3,9 +3,19 @@ import { fileURLToPath } from 'node:url';
 import { StageSchema, type Trigger, TriggerSchema } from '@aidaily/contracts';
 import type { EditSubStep } from '../editorial/item-pipeline.js';
 import { createCore } from '../index.js';
+import { inTransaction } from '../storage/db.js';
 import { emitRunEvent } from '../workflow/events.js';
 import { LockBusyError } from '../workflow/lock.js';
 import { executeRun } from '../workflow/runner.js';
+
+const VALID_WORKER_ACTIONS = new Set([
+  'execute-run',
+  'start',
+  'resume',
+  'retry-item',
+  'publish-approve',
+  'publish-retry',
+]);
 
 /** 后台独立工作进程支持的操作指令 */
 export type WorkerAction =
@@ -59,10 +69,15 @@ export function parseWorkerArgs(argv: readonly string[]): ParsedWorkerArgs {
         rootDir = requireFlagValue(argv, i, '--root');
         i += 1;
         break;
-      case '--action':
-        action = requireFlagValue(argv, i, '--action') as WorkerAction;
+      case '--action': {
+        const rawAction = requireFlagValue(argv, i, '--action');
+        if (!VALID_WORKER_ACTIONS.has(rawAction)) {
+          throw new Error(`不支持的后台工作进程操作 --action: ${rawAction}`);
+        }
+        action = rawAction as WorkerAction;
         i += 1;
         break;
+      }
       case '--run-id':
         runId = requireFlagValue(argv, i, '--run-id');
         i += 1;
@@ -215,6 +230,35 @@ export async function runWorkerMain(
       }
     }
   } catch (err) {
+    // 若预定任务尚未走出 queued 即遇并发冲突或异常失败，妥善收敛其状态避免永久悬停在排队态
+    if (parsed.runId) {
+      const currentRun = core.context.repos.runs.getById(parsed.runId);
+      if (currentRun?.status === 'queued') {
+        const nowIso = core.context.now().toISOString();
+        const isScheduleSkip = err instanceof LockBusyError && parsed.trigger === 'schedule';
+        inTransaction(core.context.db, () => {
+          core.context.repos.runs.updateStatus(
+            currentRun.id,
+            isScheduleSkip ? 'abandoned' : 'failed',
+            {
+              errorCode: isScheduleSkip ? undefined : 'interrupted',
+              error: err instanceof Error ? err.message : String(err),
+              finishedAt: nowIso,
+              pid: null,
+            },
+          );
+          emitRunEvent(core.context, {
+            runId: currentRun.id,
+            level: isScheduleSkip ? 'warn' : 'error',
+            type: isScheduleSkip ? 'schedule_skipped' : 'run_failed',
+            message: isScheduleSkip
+              ? `定时触发检测到已有任务运行，本排队占位已自动取消`
+              : `后台工作进程启动阶段失败: ${err instanceof Error ? err.message : String(err)}`,
+          });
+        });
+      }
+    }
+
     if (err instanceof LockBusyError && parsed.trigger === 'schedule') {
       if (!(err as { scheduleSkipNotified?: boolean }).scheduleSkipNotified) {
         const msg = `定时触发跳过：当前已有任务 ${err.holder.ownerRun ?? '未知'} 正在运行（进程 ${String(err.holder.pid ?? '未知')}）`;
@@ -240,6 +284,7 @@ export async function runWorkerMain(
       process.exitCode = 0;
       return;
     }
+
     core.context.logger.error(
       { err, action: parsed.action, runId: parsed.runId },
       '后台工作进程执行失败',
