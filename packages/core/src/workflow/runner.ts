@@ -417,7 +417,7 @@ async function executePipelineStagesLocked(opts: {
     const finishedIso = ctx.now().toISOString();
     const lastStage = stagesToRun[stagesToRun.length - 1];
     if (lastStage === 'qa') {
-      await ensurePublishDraftForRun(ctx, runId, settings);
+      await ensurePublishDraftForRun(ctx, runId, settings, { regenerate: true });
       ctx.repos.runs.updateStatus(runId, 'awaiting_review', {
         currentStage: 'review',
         pid: null,

@@ -5,6 +5,7 @@ import path from 'node:path';
 import type { Settings } from '@aidaily/contracts';
 import type { CoreContext } from '../context.js';
 import { PipelineError } from '../errors.js';
+import { inTransaction } from '../storage/db.js';
 import { emitRunEvent } from '../workflow/events.js';
 import { startRunHeartbeat } from '../workflow/heartbeat.js';
 import { acquirePipelineLock, releasePipelineLock } from '../workflow/lock.js';
@@ -134,7 +135,7 @@ async function sleepAbortable(ms: number, signal?: AbortSignal): Promise<void> {
 }
 
 /** 校验执行发布动作所需的目标状态与本地成片及封面文件存在性 */
-async function assertReadyToUpload(opts: {
+export async function assertReadyToUpload(opts: {
   ctx: CoreContext;
   runId: string;
   settings: Settings;
@@ -187,13 +188,95 @@ async function assertReadyToUpload(opts: {
   };
 }
 
+/** 将未完成或收到不明结果信号的投稿记录及任务状态原子切至状态不明保护，禁止自动重传 */
+function markPublishUncertainAtomic(
+  ctx: CoreContext,
+  runId: string,
+  errorDetail: string,
+  eventMessage: string,
+): void {
+  const nowIso = ctx.now().toISOString();
+  inTransaction(ctx.db, () => {
+    const pub = ctx.repos.publish.getByRun(runId);
+    if (pub) {
+      ctx.repos.publish.updateStatus(runId, 'uncertain', {
+        error: errorDetail,
+        updatedAt: nowIso,
+      });
+    }
+    ctx.repos.runs.updateStatus(runId, 'publish_uncertain', {
+      currentStage: 'publish',
+      errorCode: 'publish_uncertain',
+      error: errorDetail,
+      pid: null,
+      finishedAt: nowIso,
+    });
+    emitRunEvent(ctx, {
+      runId,
+      level: 'warn',
+      stage: 'publish',
+      type: 'publish_uncertain',
+      message: eventMessage,
+    });
+  });
+}
+
+/** 将明确确认未提交成功的投稿任务原子落盘为失败状态，保留草稿供后续人工重试 */
+async function markPublishFailedAtomic(
+  ctx: CoreContext,
+  runId: string,
+  settings: Settings,
+  failMsg: string,
+): Promise<void> {
+  const failIso = ctx.now().toISOString();
+  const deadlineIso = new Date(
+    ctx.now().getTime() + settings.retry.reservationHoldHours * 3600_000,
+  ).toISOString();
+
+  inTransaction(ctx.db, () => {
+    const pub = ctx.repos.publish.getByRun(runId);
+    if (pub) {
+      ctx.repos.publish.updateStatus(runId, 'failed', {
+        error: failMsg,
+        updatedAt: failIso,
+      });
+    }
+    ctx.repos.runs.updateStatus(runId, 'publish_failed', {
+      currentStage: 'publish',
+      errorCode: 'publish_failed',
+      error: failMsg,
+      pid: null,
+      finishedAt: failIso,
+      retryDeadlineAt: deadlineIso,
+    });
+    emitRunEvent(ctx, {
+      runId,
+      level: 'error',
+      stage: 'publish',
+      type: 'publish_failed',
+      message: `B 站投稿未完成：${failMsg}`,
+    });
+  });
+
+  try {
+    await ctx.notifier.notify({
+      type: 'publish_failed',
+      runId,
+      message: `第 ${runId} 期 B 站发布失败：${failMsg}`,
+      data: { error: failMsg },
+    });
+  } catch (notifyErr) {
+    ctx.logger.warn({ err: notifyErr, runId }, '发送发布失败通知时出错');
+  }
+}
+
 /**
  * 执行一期的 B 站投稿上传流程：
- * - 上传启动前即刻标记 `runs.status = 'publishing'` 与 `publish_records.status = 'publishing'` 并启动心跳，
- *   确保若在上传途中遭遇进程强杀，重启恢复阶段自动转为 `publish_uncertain` 且禁止自动重传；
+ * - 先持有全局互斥锁并在单事务内校验草稿、文件并切换 `runs` 与 `publish_records` 为投稿中状态，防止状态撕裂与并发竞争；
  * - 强制在投稿参数中开启 B 站平台 AI 生成内容声明；
- * - 支持最多 3 次自动退避重试（默认间隔 10 秒 / 60 秒 / 180 秒）；
- * - 投稿成功后在单个事务内提交新闻消费记录、释放未入选预留文章并记录 BV 号；失败则转为 `publish_failed`。
+ * - 仅对明确退出的失败执行最多 3 次退避重试；若命令超时、退出码为 0 却未解析出 BV 号或上传过程中被中止，
+ *   均直接转入状态不明保护并禁止自动重传；
+ * - 投稿成功后在单个事务内提交新闻消费记录、释放未入选预留文章并记录 BV 号；失败则转为明确可重传失败状态。
  */
 export async function executeBilibiliUpload(opts: {
   ctx: CoreContext;
@@ -208,65 +291,93 @@ export async function executeBilibiliUpload(opts: {
   const { ctx, runId, settings, allowedRunStatuses, alreadyLocked, dtimeUnixSec, signal } = opts;
   const retryDelaysMs = opts.retryDelaysMs ?? DEFAULT_UPLOAD_RETRY_DELAYS_MS;
 
-  const payload = await assertReadyToUpload({
-    ctx,
-    runId,
-    settings,
-    allowedRunStatuses,
-  });
-
   if (!alreadyLocked) {
     acquirePipelineLock(ctx, runId, settings);
   }
 
   const lockAbort = new AbortController();
   let lostLock = false;
-  const hb = startRunHeartbeat(ctx, runId, {
-    onLockLost: () => {
-      lostLock = true;
-      lockAbort.abort();
-    },
-  });
-  const combinedSignal = signal ? AbortSignal.any([signal, lockAbort.signal]) : lockAbort.signal;
-
-  const bilibiliCfg = settings.publish.bilibili;
-  const uploadArgs = buildBiliupUploadArgs({
-    cookieFile: payload.cookieFile,
-    copyright: bilibiliCfg.copyright,
-    tid: bilibiliCfg.tid,
-    title: payload.title,
-    description: payload.description,
-    tags: payload.tags,
-    coverFile: payload.coverFile,
-    videoFile: payload.videoFile,
-    dtimeUnixSec,
-  });
-
-  const startIso = ctx.now().toISOString();
-  ctx.repos.runs.updateStatus(runId, 'publishing', {
-    currentStage: 'publish',
-    pid: process.pid,
-    errorCode: null,
-    error: null,
-    heartbeatAt: startIso,
-  });
-  ctx.repos.publish.updateStatus(runId, 'publishing', {
-    error: null,
-    updatedAt: startIso,
-  });
-
-  emitRunEvent(ctx, {
-    runId,
-    level: 'info',
-    stage: 'publish',
-    type: 'publish_started',
-    message: `开始向 B 站投稿《${payload.title}》（已强制开启 AI 生成内容声明）`,
-    data: { aiDeclaration: true, tid: bilibiliCfg.tid },
-  });
+  let hb: ReturnType<typeof startRunHeartbeat> | null = null;
+  let enteredPublishingState = false;
+  let committed = false;
 
   try {
+    const payload = await assertReadyToUpload({
+      ctx,
+      runId,
+      settings,
+      allowedRunStatuses,
+    });
+
+    if (signal?.aborted) {
+      throw new DOMException('已取消', 'AbortError');
+    }
+
     await fs.mkdir(path.dirname(payload.cookieFile), { recursive: true });
+
+    hb = startRunHeartbeat(ctx, runId, {
+      onLockLost: () => {
+        lostLock = true;
+        lockAbort.abort();
+      },
+    });
+    const combinedSignal = signal ? AbortSignal.any([signal, lockAbort.signal]) : lockAbort.signal;
+
+    const bilibiliCfg = settings.publish.bilibili;
+    const uploadArgs = buildBiliupUploadArgs({
+      cookieFile: payload.cookieFile,
+      copyright: bilibiliCfg.copyright,
+      tid: bilibiliCfg.tid,
+      title: payload.title,
+      description: payload.description,
+      tags: payload.tags,
+      coverFile: payload.coverFile,
+      videoFile: payload.videoFile,
+      dtimeUnixSec,
+    });
+
+    const startIso = ctx.now().toISOString();
+    inTransaction(ctx.db, () => {
+      const current = ctx.repos.runs.getById(runId);
+      if (!current) {
+        throw new Error(`未找到任务记录: ${runId}`);
+      }
+      if (current.status === 'publish_uncertain') {
+        throw new PipelineError(
+          'publish_uncertain',
+          `任务 ${runId} 处于投稿状态不明保护，禁止自动重传`,
+        );
+      }
+      if (!allowedRunStatuses.includes(current.status)) {
+        throw new Error(`任务 ${runId} 当前状态已变为 ${current.status}，中止本次上传`);
+      }
+
+      ctx.repos.runs.updateStatus(runId, 'publishing', {
+        currentStage: 'publish',
+        pid: process.pid,
+        errorCode: null,
+        error: null,
+        heartbeatAt: startIso,
+      });
+      ctx.repos.publish.updateStatus(runId, 'publishing', {
+        error: null,
+        updatedAt: startIso,
+      });
+    });
+    enteredPublishingState = true;
+
+    emitRunEvent(ctx, {
+      runId,
+      level: 'info',
+      stage: 'publish',
+      type: 'publish_started',
+      message: `开始向 B 站投稿《${payload.title}》（已强制开启 AI 生成内容声明）`,
+      data: { aiDeclaration: true, tid: bilibiliCfg.tid },
+    });
+
     let lastErr: Error | null = null;
+    let lastAttemptFailedCleanly = false;
+    let uploadedBvid: string | null = null;
     const totalAttempts = MAX_UPLOAD_RETRIES + 1;
 
     for (let attempt = 1; attempt <= totalAttempts; attempt++) {
@@ -274,6 +385,9 @@ export async function executeBilibiliUpload(opts: {
         throw new PipelineError('interrupted', '运行锁已被其他进程接管，停止投稿上传');
       }
       if (combinedSignal.aborted) {
+        if (lastAttemptFailedCleanly) {
+          throw new PipelineError('publish_failed', '重试等待期间收到取消信号，已停止继续上传');
+        }
         throw new DOMException('已取消', 'AbortError');
       }
 
@@ -301,60 +415,47 @@ export async function executeBilibiliUpload(opts: {
         });
 
         if (res.exitCode !== 0) {
+          lastAttemptFailedCleanly = true;
           throw new Error(
             `biliup 上传退出码 ${res.exitCode}: ${(res.stderr || res.stdout).trim().slice(0, 500)}`,
           );
         }
 
-        const bvid = parseBvidFromOutput(res.stdout, res.stderr);
-        if (!bvid) {
-          throw new Error(
-            `biliup 返回成功但未能解析到有效 BV 号，输出: ${(res.stdout || res.stderr).trim().slice(0, 300)}`,
+        const parsedBvid = parseBvidFromOutput(res.stdout, res.stderr);
+        if (!parsedBvid) {
+          lastAttemptFailedCleanly = false;
+          throw new PipelineError(
+            'publish_uncertain',
+            `biliup 返回成功退出码 0 但未能解析出有效 BV 号，请先到 B 站核对是否已收稿（输出: ${(res.stdout || res.stderr).trim().slice(0, 300)}）`,
           );
         }
 
-        const doneIso = ctx.now().toISOString();
-        const stats = commitRunConsumption(ctx, runId, doneIso, () => {
-          ctx.repos.publish.updateStatus(runId, 'published', {
-            bvid,
-            error: null,
-            updatedAt: doneIso,
-          });
-          ctx.repos.runs.updateStatus(runId, 'published', {
-            currentStage: 'publish',
-            pid: null,
-            finishedAt: doneIso,
-            errorCode: null,
-            error: null,
-            retryDeadlineAt: null,
-          });
-        });
-
-        emitRunEvent(ctx, {
-          runId,
-          level: 'info',
-          stage: 'publish',
-          type: 'run_published',
-          message: `B 站投稿成功（BV 号：${bvid}），已消耗 ${stats.consumedArticleCount} 篇文章并释放 ${stats.releasedUnusedCount} 篇未用文章`,
-          data: { bvid, ...stats, aiDeclaration: true },
-        });
-        await ctx.notifier.notify({
-          type: 'published',
-          runId,
-          message: `第 ${runId} 期已成功发布至 B 站（${bvid}）`,
-          data: { bvid },
-        });
-
-        return { bvid };
+        uploadedBvid = parsedBvid;
+        break;
       } catch (err) {
         if (lostLock) {
           throw new PipelineError('interrupted', '运行锁已被其他进程接管，停止投稿上传', {
             cause: err,
           });
         }
-        if (err instanceof Error && err.name === 'AbortError') {
+        if (err instanceof PipelineError && err.code === 'publish_uncertain') {
+          lastAttemptFailedCleanly = false;
           throw err;
         }
+        if (err instanceof Error && err.name === 'CliTimeoutError') {
+          lastAttemptFailedCleanly = false;
+          throw new PipelineError(
+            'publish_uncertain',
+            'biliup 上传等待超时，无法确认平台是否已收到稿件，禁止自动重传',
+            { cause: err },
+          );
+        }
+        if (err instanceof Error && err.name === 'AbortError') {
+          lastAttemptFailedCleanly = false;
+          throw err;
+        }
+
+        lastAttemptFailedCleanly = true;
         lastErr = err instanceof Error ? err : new Error(String(err));
         if (attempt < totalAttempts) {
           const delayMs = retryDelaysMs[Math.min(attempt - 1, retryDelaysMs.length - 1)] ?? 10_000;
@@ -365,73 +466,122 @@ export async function executeBilibiliUpload(opts: {
             type: 'publish_retrying',
             message: `B 站上传第 ${attempt} 次尝试失败（${lastErr.message}），将在 ${Math.round(delayMs / 1000)} 秒后重试`,
           });
-          await sleepAbortable(delayMs, combinedSignal);
+          try {
+            await sleepAbortable(delayMs, combinedSignal);
+          } catch (sleepErr) {
+            if (lostLock) {
+              throw new PipelineError('interrupted', '运行锁已被其他进程接管，停止投稿上传', {
+                cause: sleepErr,
+              });
+            }
+            if (sleepErr instanceof Error && sleepErr.name === 'AbortError') {
+              throw new PipelineError('publish_failed', '重试等待期间收到取消信号，已停止重传', {
+                cause: sleepErr,
+              });
+            }
+            throw sleepErr;
+          }
         }
       }
     }
 
-    const failMsg = lastErr?.message ?? 'B 站视频上传失败';
-    const failIso = ctx.now().toISOString();
-    const deadlineIso = new Date(
-      ctx.now().getTime() + settings.retry.reservationHoldHours * 3600_000,
-    ).toISOString();
+    if (!uploadedBvid) {
+      const failMsg = lastErr?.message ?? 'B 站视频上传失败';
+      await markPublishFailedAtomic(ctx, runId, settings, failMsg);
+      throw new PipelineError('publish_failed', failMsg, { cause: lastErr });
+    }
 
-    ctx.repos.publish.updateStatus(runId, 'failed', {
-      error: failMsg,
-      updatedAt: failIso,
-    });
-    ctx.repos.runs.updateStatus(runId, 'publish_failed', {
-      currentStage: 'publish',
-      errorCode: 'publish_failed',
-      error: failMsg,
-      pid: null,
-      finishedAt: failIso,
-      retryDeadlineAt: deadlineIso,
-    });
+    if (lostLock) {
+      throw new PipelineError('interrupted', '运行锁已被其他进程接管，禁止提交发布结果');
+    }
+
+    const doneIso = ctx.now().toISOString();
+    const stats = commitRunConsumption(
+      ctx,
+      runId,
+      doneIso,
+      () => {
+        ctx.repos.publish.updateStatus(runId, 'published', {
+          bvid: uploadedBvid,
+          error: null,
+          updatedAt: doneIso,
+        });
+        ctx.repos.runs.updateStatus(runId, 'published', {
+          currentStage: 'publish',
+          pid: null,
+          finishedAt: doneIso,
+          errorCode: null,
+          error: null,
+          retryDeadlineAt: null,
+        });
+      },
+      { expectedRunStatuses: ['publishing'] },
+    );
+    committed = true;
+
     emitRunEvent(ctx, {
       runId,
-      level: 'error',
+      level: 'info',
       stage: 'publish',
-      type: 'publish_failed',
-      message: `B 站投稿在多次重试后仍失败：${failMsg}`,
-    });
-    await ctx.notifier.notify({
-      type: 'publish_failed',
-      runId,
-      message: `第 ${runId} 期 B 站发布失败：${failMsg}`,
-      data: { error: failMsg },
+      type: 'run_published',
+      message: `B 站投稿成功（BV 号：${uploadedBvid}），已消耗 ${stats.consumedArticleCount} 篇文章并释放 ${stats.releasedUnusedCount} 篇未用文章`,
+      data: { bvid: uploadedBvid, ...stats, aiDeclaration: true },
     });
 
-    throw new PipelineError('publish_failed', failMsg, { cause: lastErr });
-  } catch (err) {
-    if (!lostLock && err instanceof Error && err.name === 'AbortError') {
-      const abortIso = ctx.now().toISOString();
-      ctx.repos.publish.updateStatus(runId, 'uncertain', {
-        error: '上传任务被手动中断，请核对平台投稿状态后再决定重传或确认结果',
-        updatedAt: abortIso,
-      });
-      ctx.repos.runs.updateStatus(runId, 'publish_uncertain', {
-        currentStage: 'publish',
-        errorCode: 'publish_uncertain',
-        error: '投稿过程收到中止信号，已进入状态不明保护，禁止自动重传',
-        pid: null,
-        finishedAt: abortIso,
-      });
-      emitRunEvent(ctx, {
+    try {
+      await ctx.notifier.notify({
+        type: 'published',
         runId,
-        level: 'warn',
-        stage: 'publish',
-        type: 'publish_uncertain',
-        message: '投稿过程中止，已转为状态不明状态等待人工核对',
+        message: `第 ${runId} 期已成功发布至 B 站（${uploadedBvid}）`,
+        data: { bvid: uploadedBvid },
       });
-      throw new PipelineError('publish_uncertain', '投稿过程中止，请人工核对是否已收稿', {
+    } catch (notifyErr) {
+      ctx.logger.warn({ err: notifyErr, runId, bvid: uploadedBvid }, '发送发布成功通知时出错');
+    }
+
+    return { bvid: uploadedBvid };
+  } catch (err) {
+    if (committed) {
+      return { bvid: ctx.repos.publish.getByRun(runId)?.bvid ?? '' };
+    }
+    if (lostLock) {
+      throw new PipelineError('interrupted', '运行锁已被其他进程接管，停止投稿上传', {
         cause: err,
       });
     }
+    if (enteredPublishingState) {
+      const isUncertain =
+        (err instanceof PipelineError && err.code === 'publish_uncertain') ||
+        (err instanceof Error && err.name === 'AbortError');
+      if (isUncertain) {
+        const msg =
+          err instanceof Error
+            ? err.message
+            : '投稿过程无法确认平台是否已收稿，已进入状态不明保护，禁止自动重传';
+        markPublishUncertainAtomic(
+          ctx,
+          runId,
+          msg,
+          `投稿过程无法确认平台结果（${msg}），已转为状态不明等待人工核对`,
+        );
+        if (err instanceof PipelineError) {
+          throw err;
+        }
+        throw new PipelineError('publish_uncertain', '投稿过程中止，请人工核对是否已收稿', {
+          cause: err,
+        });
+      }
+
+      if (!(err instanceof PipelineError && err.code === 'publish_failed')) {
+        const errMsg = err instanceof Error ? err.message : String(err);
+        await markPublishFailedAtomic(ctx, runId, settings, errMsg);
+        throw new PipelineError('publish_failed', errMsg, { cause: err });
+      }
+    }
     throw err;
   } finally {
-    hb.stop();
-    if (!alreadyLocked) {
+    hb?.stop();
+    if (!alreadyLocked && !lostLock) {
       releasePipelineLock(ctx, runId);
     }
   }

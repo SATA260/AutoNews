@@ -277,17 +277,21 @@ export function createArticlesRepo(db: DatabaseSync) {
       return Number(res.changes);
     },
 
-    /** 在确认发布或人工标记已消费后，将对应文章正式标记为已播出 */
-    markConsumed(articleIds: string[], runId: string): void {
-      if (articleIds.length === 0) {
-        return;
+    /** 在确认发布或人工标记已消费后，将对应文章正式标记为已播出，返回实际更新篇数 */
+    markConsumed(articleIds: string[], runId: string): number {
+      const uniqueIds = Array.from(new Set(articleIds));
+      if (uniqueIds.length === 0) {
+        return 0;
       }
-      const placeholders = articleIds.map(() => '?').join(', ');
-      db.prepare(`
+      const placeholders = uniqueIds.map(() => '?').join(', ');
+      const res = db
+        .prepare(`
         UPDATE articles
         SET status = 'consumed', reserved_by_run = NULL
         WHERE id IN (${placeholders}) AND reserved_by_run = ?
-      `).run(...articleIds, runId);
+      `)
+        .run(...uniqueIds, runId);
+      return Number(res.changes);
     },
 
     /** 将超出最久回溯时效仍未入选的待选文章标记为已过期 */

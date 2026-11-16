@@ -2,6 +2,7 @@ import path from 'node:path';
 import { type PublishDraft, PublishDraftSchema } from '@aidaily/contracts';
 import type { CoreContext } from '../context.js';
 import {
+  assertReadyToUpload,
   buildBiliLoginCommand,
   executeBilibiliUpload,
   normalizeBvid,
@@ -10,6 +11,7 @@ import { commitRunConsumption } from '../publish/consumption.js';
 import { ensurePublishDraftForRun } from '../publish/description.js';
 import { inTransaction } from '../storage/db.js';
 import { emitRunEvent } from '../workflow/events.js';
+import { assertPipelineLockAvailable } from '../workflow/lock.js';
 
 /** 确认或重试发布时可选的后台执行模式及重试间隔参数 */
 export interface PublishActionOptions {
@@ -61,6 +63,7 @@ export function createPublishService(
     spawnDetachedPublish?: (req: {
       action: 'publish-approve' | 'publish-retry';
       runId: string;
+      dtimeUnixSec?: number;
     }) => Promise<void>;
   },
 ): PublishService {
@@ -153,7 +156,18 @@ export function createPublishService(
     /** 确认审核通过并开始向 B 站投稿发布 */
     async approve(runId: string, actionOpts?: PublishActionOptions): Promise<void> {
       if (actionOpts?.detach && opts?.spawnDetachedPublish) {
-        await opts.spawnDetachedPublish({ action: 'publish-approve', runId });
+        assertPipelineLockAvailable(ctx);
+        await assertReadyToUpload({
+          ctx,
+          runId,
+          settings: ctx.settings,
+          allowedRunStatuses: ['awaiting_review'],
+        });
+        await opts.spawnDetachedPublish({
+          action: 'publish-approve',
+          runId,
+          dtimeUnixSec: actionOpts.dtimeUnixSec,
+        });
         return;
       }
       await executeBilibiliUpload({
@@ -169,7 +183,18 @@ export function createPublishService(
     /** 投稿明确失败后重新尝试上传 */
     async retry(runId: string, actionOpts?: PublishActionOptions): Promise<void> {
       if (actionOpts?.detach && opts?.spawnDetachedPublish) {
-        await opts.spawnDetachedPublish({ action: 'publish-retry', runId });
+        assertPipelineLockAvailable(ctx);
+        await assertReadyToUpload({
+          ctx,
+          runId,
+          settings: ctx.settings,
+          allowedRunStatuses: ['publish_failed'],
+        });
+        await opts.spawnDetachedPublish({
+          action: 'publish-retry',
+          runId,
+          dtimeUnixSec: actionOpts.dtimeUnixSec,
+        });
         return;
       }
       await executeBilibiliUpload({
@@ -187,22 +212,24 @@ export function createPublishService(
       runId: string,
       result: { published: false } | { published: true; bvid: string },
     ): Promise<void> {
-      const run = ctx.repos.runs.getById(runId);
-      if (!run) {
-        throw new Error(`未找到任务记录: ${runId}`);
-      }
-      if (run.status !== 'publish_uncertain') {
-        throw new Error(
-          `任务 ${runId} 当前状态为 ${run.status}，仅 publish_uncertain 支持人工确认`,
-        );
-      }
-
+      assertPipelineLockAvailable(ctx);
       const nowIso = ctx.now().toISOString();
+
       if (!result.published) {
         const deadlineIso = new Date(
           ctx.now().getTime() + ctx.settings.retry.reservationHoldHours * 3600_000,
         ).toISOString();
         inTransaction(ctx.db, () => {
+          const run = ctx.repos.runs.getById(runId);
+          if (!run) {
+            throw new Error(`未找到任务记录: ${runId}`);
+          }
+          if (run.status !== 'publish_uncertain') {
+            throw new Error(
+              `任务 ${runId} 当前状态为 ${run.status}，仅 publish_uncertain 支持人工确认`,
+            );
+          }
+
           const pub = ctx.repos.publish.getByRun(runId);
           if (pub) {
             ctx.repos.publish.updateStatus(runId, 'failed', {
@@ -230,24 +257,37 @@ export function createPublishService(
       }
 
       const validBvid = normalizeBvid(result.bvid);
-      const stats = commitRunConsumption(ctx, runId, nowIso, () => {
-        const pub = ctx.repos.publish.getByRun(runId);
-        if (pub) {
+      const stats = commitRunConsumption(
+        ctx,
+        runId,
+        nowIso,
+        () => {
+          const pub = ctx.repos.publish.getByRun(runId);
+          if (!pub) {
+            ctx.repos.publish.upsertDraft({
+              runId,
+              title: `第 ${runId} 期`,
+              description: ctx.settings.publish.bilibili.aiDisclaimerText,
+              tags: ctx.settings.publish.bilibili.defaultTags,
+              updatedAt: nowIso,
+            });
+          }
           ctx.repos.publish.updateStatus(runId, 'published', {
             bvid: validBvid,
             error: null,
             updatedAt: nowIso,
           });
-        }
-        ctx.repos.runs.updateStatus(runId, 'published', {
-          currentStage: 'publish',
-          pid: null,
-          finishedAt: nowIso,
-          errorCode: null,
-          error: null,
-          retryDeadlineAt: null,
-        });
-      });
+          ctx.repos.runs.updateStatus(runId, 'published', {
+            currentStage: 'publish',
+            pid: null,
+            finishedAt: nowIso,
+            errorCode: null,
+            error: null,
+            retryDeadlineAt: null,
+          });
+        },
+        { expectedRunStatuses: ['publish_uncertain'] },
+      );
 
       emitRunEvent(ctx, {
         runId,
@@ -257,24 +297,21 @@ export function createPublishService(
         message: `人工确认平台已收稿（${validBvid}），已提交 ${stats.consumedArticleCount} 篇已播新闻并释放 ${stats.releasedUnusedCount} 篇备用文章`,
         data: { bvid: validBvid, ...stats, manualConfirmed: true },
       });
-      await ctx.notifier.notify({
-        type: 'published',
-        runId,
-        message: `第 ${runId} 期经人工确认已成功发布（${validBvid}）`,
-        data: { bvid: validBvid, manualConfirmed: true },
-      });
+      try {
+        await ctx.notifier.notify({
+          type: 'published',
+          runId,
+          message: `第 ${runId} 期经人工确认已成功发布（${validBvid}）`,
+          data: { bvid: validBvid, manualConfirmed: true },
+        });
+      } catch (notifyErr) {
+        ctx.logger.warn({ err: notifyErr, runId, bvid: validBvid }, '发送人工确认发布通知时出错');
+      }
     },
 
     /** 驳回本期内容，立即释放已占用的新闻文章回到待选库 */
     async reject(runId: string, reason?: string): Promise<void> {
-      const run = ctx.repos.runs.getById(runId);
-      if (!run) {
-        throw new Error(`未找到任务记录: ${runId}`);
-      }
-      if (run.status !== 'awaiting_review' && run.status !== 'publish_failed') {
-        throw new Error(`任务 ${runId} 当前状态为 ${run.status}，不允许执行驳回操作`);
-      }
-
+      assertPipelineLockAvailable(ctx);
       const nowIso = ctx.now().toISOString();
       const deadlineIso = new Date(
         ctx.now().getTime() + ctx.settings.retry.reservationHoldHours * 3600_000,
@@ -282,6 +319,14 @@ export function createPublishService(
       const rejectMsg = reason?.trim() || '人工审核未通过，已驳回本期内容';
 
       inTransaction(ctx.db, () => {
+        const run = ctx.repos.runs.getById(runId);
+        if (!run) {
+          throw new Error(`未找到任务记录: ${runId}`);
+        }
+        if (run.status !== 'awaiting_review' && run.status !== 'publish_failed') {
+          throw new Error(`任务 ${runId} 当前状态为 ${run.status}，不允许执行驳回操作`);
+        }
+
         const released = ctx.repos.articles.releaseByRun(runId);
         ctx.repos.runs.updateStatus(runId, 'rejected', {
           currentStage: 'review',
@@ -303,41 +348,48 @@ export function createPublishService(
 
     /** 跳过外网发布，直接把本期新闻计入历史已播库 */
     async markConsumed(runId: string): Promise<void> {
-      const run = ctx.repos.runs.getById(runId);
-      if (!run) {
+      assertPipelineLockAvailable(ctx);
+      const runBefore = ctx.repos.runs.getById(runId);
+      if (!runBefore) {
         throw new Error(`未找到任务记录: ${runId}`);
       }
-      if (run.status !== 'awaiting_review' && run.status !== 'publish_failed') {
-        throw new Error(`任务 ${runId} 当前状态为 ${run.status}，不能标记为仅已消费完结`);
+      if (runBefore.status !== 'awaiting_review' && runBefore.status !== 'publish_failed') {
+        throw new Error(`任务 ${runId} 当前状态为 ${runBefore.status}，不能标记为仅已消费完结`);
       }
 
-      await ensurePublishDraftForRun(ctx, runId, ctx.settings).catch(() => null);
+      await ensurePublishDraftForRun(ctx, runId, ctx.settings);
       const nowIso = ctx.now().toISOString();
 
-      const stats = commitRunConsumption(ctx, runId, nowIso, () => {
-        const pub = ctx.repos.publish.getByRun(runId);
-        if (!pub) {
-          ctx.repos.publish.upsertDraft({
-            runId,
-            title: `第 ${runId} 期（仅本地完结）`,
-            description: ctx.settings.publish.bilibili.aiDisclaimerText,
-            tags: ctx.settings.publish.bilibili.defaultTags,
+      const stats = commitRunConsumption(
+        ctx,
+        runId,
+        nowIso,
+        () => {
+          const pub = ctx.repos.publish.getByRun(runId);
+          if (!pub) {
+            ctx.repos.publish.upsertDraft({
+              runId,
+              title: `第 ${runId} 期（仅本地完结）`,
+              description: ctx.settings.publish.bilibili.aiDisclaimerText,
+              tags: ctx.settings.publish.bilibili.defaultTags,
+              updatedAt: nowIso,
+            });
+          }
+          ctx.repos.publish.updateStatus(runId, 'consumed_only', {
+            error: null,
             updatedAt: nowIso,
           });
-        }
-        ctx.repos.publish.updateStatus(runId, 'consumed_only', {
-          error: null,
-          updatedAt: nowIso,
-        });
-        ctx.repos.runs.updateStatus(runId, 'published', {
-          currentStage: 'publish',
-          pid: null,
-          finishedAt: nowIso,
-          errorCode: null,
-          error: null,
-          retryDeadlineAt: null,
-        });
-      });
+          ctx.repos.runs.updateStatus(runId, 'published', {
+            currentStage: 'publish',
+            pid: null,
+            finishedAt: nowIso,
+            errorCode: null,
+            error: null,
+            retryDeadlineAt: null,
+          });
+        },
+        { expectedRunStatuses: ['awaiting_review', 'publish_failed'] },
+      );
 
       emitRunEvent(ctx, {
         runId,

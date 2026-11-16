@@ -177,3 +177,29 @@ export function acquirePipelineLock(
 export function releasePipelineLock(ctx: CoreContext, runId: string): void {
   ctx.repos.locks.releaseLock(PIPELINE_LOCK_NAME, runId, process.pid);
 }
+
+/**
+ * 预检全局互斥运行锁是否空闲（若锁正被仍存活且心跳未超期的其他进程持有则抛出 `LockBusyError`）。
+ */
+export function assertPipelineLockAvailable(
+  ctx: CoreContext,
+  opts?: {
+    staleMs?: number;
+    isProcessAliveFn?: (pid: number) => boolean;
+  },
+): void {
+  const existing = ctx.repos.locks.get(PIPELINE_LOCK_NAME);
+  if (!existing || existing.ownerRun === null) {
+    return;
+  }
+  const staleMs = opts?.staleMs ?? DEFAULT_LOCK_STALE_MS;
+  const checkAlive = opts?.isProcessAliveFn ?? isProcessAlive;
+  const heartbeatMs = existing.heartbeatAt ? Date.parse(existing.heartbeatAt) : Number.NaN;
+  const nowMs = ctx.now().getTime();
+  const heartbeatStale =
+    Number.isNaN(heartbeatMs) || Number.isNaN(nowMs) || nowMs - heartbeatMs > staleMs;
+  const pidDead = existing.pid === null || !checkAlive(existing.pid);
+  if (!pidDead && !heartbeatStale) {
+    throw new LockBusyError(existing);
+  }
+}

@@ -415,6 +415,12 @@ describe('Bilibili publishing, AI declaration, consumption, and uncertain recove
       tags: ['OpenAI', 'AI资讯'],
     });
     expect(edited.title).toBe('人工修订标题：OpenAI 推理大提速');
+    // 仅部分更新 tags 或再次读取草稿时，不应覆盖先前保存的标题修改
+    const partialEdited = await core.publish.updateDraft(runId, {
+      tags: ['OpenAI', '大模型'],
+    });
+    expect(partialEdited.title).toBe('人工修订标题：OpenAI 推理大提速');
+    expect((await core.publish.getDraft(runId)).title).toBe('人工修订标题：OpenAI 推理大提速');
 
     // 先模拟上传失败一次，第二次自动重试成功
     await fs.writeFile(
@@ -438,9 +444,10 @@ describe('Bilibili publishing, AI declaration, consumption, and uncertain recove
     expect(core.context.repos.history.listRecent('2026-01-01T00:00:00.000Z')).toHaveLength(1);
     expect(notifications.some((n) => n.type === 'published')).toBe(true);
 
-    // 验证传递给了 biliup 强制开启 AI 声明参数、分区和定时参数
+    // 验证传递给了 biliup 人工修订后的标题、强制开启 AI 声明参数、分区和定时参数
     const recorded = JSON.parse(await fs.readFile(stateFile, 'utf8')) as { calls: string[][] };
     const args = recorded.calls[0] ?? [];
+    expect(args).toContain('人工修订标题：OpenAI 推理大提速');
     expect(args).toContain('--tid');
     expect(args).toContain('231');
     expect(args).toContain('--dtime');
@@ -714,6 +721,30 @@ describe('Bilibili publishing, AI declaration, consumption, and uncertain recove
     expect(core.context.repos.runs.getById(runId)?.status).toBe('published');
     expect(core.context.repos.publish.getByRun(runId)?.bvid).toBe('BV1NM411P7a9');
     expect(core.context.repos.articles.getById('art-used')?.status).toBe('consumed');
+
+    await core.close();
+  });
+
+  it('marks exit-0 missing BV output as publish_uncertain without duplicate retry uploads', async () => {
+    const { rootDir, stateFile } = await setupPublishWorkspace();
+    const core = await createCore({ rootDir });
+    const runId = createRun(core.context, { itemCount: 1, trigger: 'manual-cli' });
+    await seedCompletedRunReadyForReview(core, runId);
+
+    await fs.writeFile(stateFile, JSON.stringify({ mode: 'missing_bvid', calls: [] }), 'utf8');
+
+    let caughtErr: PipelineError | null = null;
+    try {
+      await core.publish.approve(runId, { retryDelaysMs: [0, 0, 0] });
+    } catch (err) {
+      caughtErr = err as PipelineError;
+    }
+
+    expect(caughtErr?.code).toBe('publish_uncertain');
+    expect(core.context.repos.runs.getById(runId)?.status).toBe('publish_uncertain');
+    expect(core.context.repos.publish.getByRun(runId)?.status).toBe('uncertain');
+    const recorded = JSON.parse(await fs.readFile(stateFile, 'utf8')) as { calls: string[][] };
+    expect(recorded.calls).toHaveLength(1);
 
     await core.close();
   });

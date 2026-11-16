@@ -108,6 +108,7 @@ export function buildBilibiliDescription(opts: {
   const disclaimerBlock = publishConfig.aiDisclaimerText.trim();
   const maxChars = publishConfig.descMax;
 
+  /** 按传入的片段列表动态拼接完整简介文本 */
   const assemble = (
     activeSources: string[],
     activeIntro: string,
@@ -180,12 +181,13 @@ export function buildBilibiliTags(
 
 /**
  * 为处于可审阅状态的任务自动生成并落盘 B 站投稿草稿（标题、时间轴及来源简介、标签）；
- * 若已有处于投稿中、已发布或状态不明的正式记录，则保护现有记录不覆盖。
+ * 除非显式指定重新生成（`regenerate: true`），否则一旦已存在完整草稿或正式投稿记录即原样保留，避免覆盖人工编辑或尝试次数。
  */
 export async function ensurePublishDraftForRun(
   ctx: CoreContext,
   runId: string,
   settings: Settings,
+  opts?: { regenerate?: boolean },
 ): Promise<PublishDraft | null> {
   const existing = ctx.repos.publish.getByRun(runId);
   const runDir = ctx.paths.runDir(runId);
@@ -194,14 +196,13 @@ export async function ensurePublishDraftForRun(
   const videoPath = path.relative(ctx.paths.rootDir, videoFile);
   const coverPath = path.relative(ctx.paths.rootDir, coverFile);
 
-  if (
-    existing?.title &&
-    existing.description &&
-    (existing.status === 'publishing' ||
-      existing.status === 'published' ||
-      existing.status === 'uncertain' ||
-      existing.status === 'consumed_only')
-  ) {
+  const isProtectedStatus =
+    existing?.status === 'publishing' ||
+    existing?.status === 'published' ||
+    existing?.status === 'uncertain' ||
+    existing?.status === 'consumed_only';
+
+  if (existing?.title && existing.description && (isProtectedStatus || !opts?.regenerate)) {
     return PublishDraftSchema.parse({
       runId,
       title: existing.title,
