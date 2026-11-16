@@ -1,12 +1,1118 @@
-import fs from 'node:fs';
+import { spawn } from 'node:child_process';
+import fsSync from 'node:fs';
+import fs from 'node:fs/promises';
+import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { Command } from 'commander';
+import {
+  PIPELINE_STAGES,
+  type RunStatus,
+  RunStatusSchema,
+  ScheduleTimeSchema,
+  type Stage,
+  StageSchema,
+  type Trigger,
+  TriggerSchema,
+} from '@aidaily/contracts';
+import { type Core, createCore, LockBusyError } from '@aidaily/core';
+import { Command, CommanderError } from 'commander';
+import {
+  buildPatchFromDotPath,
+  CliUsageError,
+  getByDotPath,
+  parseCliValue,
+} from './config-path.js';
+import {
+  formatDoctorReportText,
+  formatDraftReviewText,
+  formatRetryOptionsText,
+  formatRunDetailText,
+  formatRunEventLine,
+  formatRunsTable,
+  formatSchedulesTable,
+  formatSourcesTable,
+  formatSourceTestText,
+} from './format.js';
 
-/** 构建 `aidaily` 命令行程序的根命令与参数解析器 */
-export function buildProgram(): Command {
+/** 命令行输出流注入接口，便于测试捕获标准输出与错误输出 */
+export interface CliIo {
+  stdout: (text: string) => void;
+  stderr: (text: string) => void;
+}
+
+/** 全局公共命令行选项 */
+interface GlobalCliOpts {
+  json?: boolean;
+  root?: string;
+}
+
+const DEFAULT_IO: CliIo = {
+  stdout: (text) => process.stdout.write(text),
+  stderr: (text) => process.stderr.write(text),
+};
+
+const EDIT_SUB_STEPS = ['summarize', 'polish', 'factcheck'] as const;
+
+/** 从当前执行的子命令向上合并全局选项，同时支持在子命令前后传入 `--json` 与 `--root` */
+function getGlobals(cmd: Command): GlobalCliOpts {
+  return cmd.optsWithGlobals<GlobalCliOpts>();
+}
+
+/** 将字符串参数解析并校验为正整数，不合法时抛出退出码 2 对应的参数错误 */
+function parsePositiveInt(raw: string, flagName: string): number {
+  if (!/^\d+$/.test(raw.trim())) {
+    throw new CliUsageError(`参数 ${flagName} 必须为正整数，当前传入: ${raw}`);
+  }
+  const num = Number.parseInt(raw.trim(), 10);
+  if (!Number.isSafeInteger(num) || num <= 0) {
+    throw new CliUsageError(`参数 ${flagName} 必须大于 0，当前传入: ${raw}`);
+  }
+  return num;
+}
+
+/** 构造用于写入标准输出的格式化函数（JSON 或人类可读文本） */
+function createPrinter(io: CliIo, jsonMode: boolean) {
+  return (payload: unknown, text: string): void => {
+    if (jsonMode) {
+      io.stdout(`${JSON.stringify(payload, null, 2)}\n`);
+    } else {
+      io.stdout(`${text}\n`);
+    }
+  };
+}
+
+/** 递归为命令及全部子命令挂载公共选项、统一输出回调与异常捕获钩子，防止直接调用 process.exit */
+function configureCommandTree(cmd: Command, io: CliIo, isRoot = false): void {
+  cmd.exitOverride();
+  cmd.configureOutput({
+    writeOut: (str) => io.stdout(str),
+    writeErr: (str) => io.stderr(str),
+  });
+  if (!isRoot) {
+    cmd.option('--json', '以结构化 JSON 格式输出命令结果');
+    cmd.option('--root <dir>', '显式指定项目根目录（包含 config/settings.yaml）');
+  }
+  for (const sub of cmd.commands) {
+    configureCommandTree(sub, io, false);
+  }
+}
+
+/** 调用外部交互式或系统工具子进程并等待退出，返回其退出码 */
+async function spawnInheritProcess(bin: string, args: string[]): Promise<number> {
+  return new Promise<number>((resolve, reject) => {
+    const child = spawn(bin, args, { stdio: 'inherit' });
+    child.on('error', reject);
+    child.on('close', (code) => resolve(code ?? 1));
+  });
+}
+
+/** 根据命令行动作中发生的异常归类标准进程退出码 */
+function mapErrorToExitCode(err: unknown): number {
+  if (err instanceof CommanderError) {
+    if (err.code === 'commander.helpDisplayed' || err.code === 'commander.version') {
+      return 0;
+    }
+    return 2;
+  }
+  if (
+    err instanceof CliUsageError ||
+    err instanceof RangeError ||
+    (err instanceof Error && err.name === 'ZodError')
+  ) {
+    return 2;
+  }
+  if (err instanceof LockBusyError || (err instanceof Error && err.name === 'LockBusyError')) {
+    return 3;
+  }
+  return 1;
+}
+
+/** 绑定核心引擎的辅助执行器：自动打开与关闭数据库连接，并把返回值转为进程退出码 */
+async function withCore(
+  globalOpts: GlobalCliOpts,
+  fn: (core: Core) => Promise<number | undefined>,
+): Promise<number> {
+  const core = await createCore(globalOpts.root ? { rootDir: globalOpts.root } : undefined);
+  try {
+    const code = await fn(core);
+    return code ?? 0;
+  } finally {
+    await core.close();
+  }
+}
+
+/** 构建完整的 `aidaily` 命令行命令树并连接所有核心业务操作 */
+export function buildProgram(io: CliIo = DEFAULT_IO, onExitCode?: (code: number) => void): Command {
   const program = new Command();
-  program.name('aidaily').description('AI 每日报自动化视频工作流命令行工具').version('0.1.0');
+  program
+    .name('aidaily')
+    .description('AI 每日报自动化视频生产与发布命令行工具')
+    .version('0.1.0')
+    .option('--json', '以结构化 JSON 格式输出命令结果', false)
+    .option('--root <dir>', '显式指定项目根目录（包含 config/settings.yaml）');
+
+  const setExit = (code: number): void => {
+    onExitCode?.(code);
+  };
+
+  /** 监听前台执行任务并实时输出进度事件（支持 Ctrl-C 发出安全取消请求） */
+  const watchForegroundTask = async (
+    core: Core,
+    runId: string,
+    afterId: number,
+    jsonMode: boolean,
+    workPromise: Promise<unknown>,
+  ): Promise<void> => {
+    const watchCtrl = new AbortController();
+    const timezone = core.config.getSettings().timezone;
+    let cancelSent = false;
+    const onSigint = () => {
+      if (cancelSent) {
+        return;
+      }
+      cancelSent = true;
+      void core.tasks.cancel(runId).catch(() => undefined);
+    };
+    process.on('SIGINT', onSigint);
+
+    const watchPromise = core.tasks
+      .watch(
+        runId,
+        (ev) => {
+          if (!jsonMode) {
+            io.stdout(`${formatRunEventLine(ev, timezone)}\n`);
+          }
+        },
+        watchCtrl.signal,
+        { afterId, pollMs: 120 },
+      )
+      .catch(() => undefined);
+
+    try {
+      await workPromise;
+      await watchPromise;
+    } catch (err) {
+      watchCtrl.abort();
+      await watchPromise;
+      throw err;
+    } finally {
+      process.off('SIGINT', onSigint);
+    }
+  };
+
+  // 1. aidaily run -n <N> [--detach] [--trigger ...] [--schedule-id ...]
+  program
+    .command('run')
+    .description('生成并运行一期 AI 每日报任务（必须通过 -n 指定新闻条数）')
+    .requiredOption('-n, --items <N>', '本期新闻条数（必填正整数，无默认值）')
+    .option('--detach', '在后台独立工作进程中执行并立即返回', false)
+    .option('--trigger <trigger>', '触发来源 (manual-cli | manual-web | schedule)', 'manual-cli')
+    .option('--schedule-id <id>', '关联定时任务 ID')
+    .action(
+      async (
+        opts: { items: string; detach: boolean; trigger: string; scheduleId?: string },
+        cmd: Command,
+      ) => {
+        const gOpts = getGlobals(cmd);
+        const jsonMode = Boolean(gOpts.json);
+        const print = createPrinter(io, jsonMode);
+
+        const itemCount = parsePositiveInt(opts.items, '-n/--items');
+        const triggerResult = TriggerSchema.safeParse(opts.trigger);
+        if (!triggerResult.success) {
+          throw new CliUsageError(
+            `非法的 --trigger 取值 "${opts.trigger}"，仅支持 manual-cli / manual-web / schedule`,
+          );
+        }
+        const trigger: Trigger = triggerResult.data;
+
+        const code = await withCore(gOpts, async (core) => {
+          try {
+            if (opts.detach) {
+              const { runId } = await core.tasks.start({
+                itemCount,
+                trigger,
+                scheduleId: opts.scheduleId,
+                detach: true,
+              });
+              print(
+                { runId, itemCount, trigger, detached: true },
+                `已提交后台任务 ${runId}（目标 ${itemCount} 条新闻），可用 aidaily logs ${runId} -f 查看进度。`,
+              );
+              return 0;
+            }
+
+            let createdRunId = '';
+            const watchCtrl = new AbortController();
+            const timezone = core.config.getSettings().timezone;
+            let watchPromise: Promise<void> = Promise.resolve();
+            let onSigint: (() => void) | undefined;
+
+            try {
+              const res = await core.tasks.start({
+                itemCount,
+                trigger,
+                scheduleId: opts.scheduleId,
+                detach: false,
+                onCreated: (rid) => {
+                  createdRunId = rid;
+                  let cancelledOnce = false;
+                  onSigint = () => {
+                    if (cancelledOnce) {
+                      return;
+                    }
+                    cancelledOnce = true;
+                    void core.tasks.cancel(rid).catch(() => undefined);
+                  };
+                  process.on('SIGINT', onSigint);
+                  watchPromise = core.tasks
+                    .watch(
+                      rid,
+                      (ev) => {
+                        if (!jsonMode) {
+                          io.stdout(`${formatRunEventLine(ev, timezone)}\n`);
+                        }
+                      },
+                      watchCtrl.signal,
+                      { pollMs: 120 },
+                    )
+                    .catch(() => undefined);
+                },
+              });
+              createdRunId = res.runId;
+              await watchPromise;
+            } catch (err) {
+              watchCtrl.abort();
+              await watchPromise;
+              throw err;
+            } finally {
+              if (onSigint) {
+                process.off('SIGINT', onSigint);
+              }
+            }
+
+            const detail = await core.tasks.get(createdRunId);
+            print(
+              detail,
+              `\n任务 ${detail.id} 当前状态：${detail.status}（阶段：${detail.currentStage ?? '-'}）`,
+            );
+            return 0;
+          } catch (err) {
+            if (
+              (err instanceof LockBusyError ||
+                (err instanceof Error && err.name === 'LockBusyError')) &&
+              trigger === 'schedule'
+            ) {
+              print({ skipped: true, reason: err.message }, `定时任务已跳过：${err.message}`);
+              return 0;
+            }
+            throw err;
+          }
+        });
+        setExit(code);
+      },
+    );
+
+  // 2. aidaily resume <runId> [--from <stage>] [--latest-config] [--detach]
+  program
+    .command('resume')
+    .description('恢复中断/失败的任务，或从指定历史阶段重新执行')
+    .argument('<runId>', '任务 ID')
+    .option('--from <stage>', '从指定自动化阶段重新开始并作废归档之后产物')
+    .option('--latest-config', '使用磁盘最新配置刷新本期任务快照', false)
+    .option('--detach', '在后台独立进程中异步恢复', false)
+    .action(
+      async (
+        runId: string,
+        opts: { from?: string; latestConfig: boolean; detach: boolean },
+        cmd: Command,
+      ) => {
+        const gOpts = getGlobals(cmd);
+        const jsonMode = Boolean(gOpts.json);
+        const print = createPrinter(io, jsonMode);
+
+        let fromStage: Stage | undefined;
+        if (opts.from !== undefined) {
+          const parsed = StageSchema.safeParse(opts.from);
+          if (!parsed.success || !(PIPELINE_STAGES as readonly string[]).includes(parsed.data)) {
+            throw new CliUsageError(
+              `非法的重跑阶段 "${opts.from}"，支持: ${PIPELINE_STAGES.join(', ')}`,
+            );
+          }
+          fromStage = parsed.data;
+        }
+
+        const code = await withCore(gOpts, async (core) => {
+          if (opts.detach) {
+            await core.tasks.resume(runId, {
+              fromStage,
+              useLatestConfig: opts.latestConfig,
+              detach: true,
+            });
+            print(
+              {
+                runId,
+                fromStage: fromStage ?? null,
+                latestConfig: opts.latestConfig,
+                detached: true,
+              },
+              `已提交后台恢复任务 ${runId}${fromStage ? `（起点：${fromStage}）` : '（从断点继续）'}。`,
+            );
+            return 0;
+          }
+
+          const existingEvents = await core.tasks.events(runId, 0, 500);
+          const afterId = existingEvents[existingEvents.length - 1]?.id ?? 0;
+          await watchForegroundTask(
+            core,
+            runId,
+            afterId,
+            jsonMode,
+            core.tasks.resume(runId, {
+              fromStage,
+              useLatestConfig: opts.latestConfig,
+              detach: false,
+            }),
+          );
+          const detail = await core.tasks.get(runId);
+          print(detail, `\n任务 ${detail.id} 恢复完成，当前状态：${detail.status}`);
+          return 0;
+        });
+        setExit(code);
+      },
+    );
+
+  // 3. aidaily retry-item <runId> <itemId> [--from summarize|polish|factcheck] [--latest-config] [--detach]
+  program
+    .command('retry-item')
+    .description('只重新处理某一条新闻，并在完成后自动重跑整期编排与合成')
+    .argument('<runId>', '任务 ID')
+    .argument('<itemId>', '新闻条目 ID')
+    .option('--from <step>', '起始处理子步骤 (summarize | polish | factcheck)')
+    .option('--latest-config', '使用磁盘最新配置刷新本期快照', false)
+    .option('--detach', '在后台独立进程中异步重做', false)
+    .action(
+      async (
+        runId: string,
+        itemId: string,
+        opts: { from?: string; latestConfig: boolean; detach: boolean },
+        cmd: Command,
+      ) => {
+        const gOpts = getGlobals(cmd);
+        const jsonMode = Boolean(gOpts.json);
+        const print = createPrinter(io, jsonMode);
+
+        let fromStep: (typeof EDIT_SUB_STEPS)[number] | undefined;
+        if (opts.from !== undefined) {
+          if (!(EDIT_SUB_STEPS as readonly string[]).includes(opts.from)) {
+            throw new CliUsageError(
+              `非法的条目重跑步骤 "${opts.from}"，支持: ${EDIT_SUB_STEPS.join(', ')}`,
+            );
+          }
+          fromStep = opts.from as (typeof EDIT_SUB_STEPS)[number];
+        }
+
+        const code = await withCore(gOpts, async (core) => {
+          if (opts.detach) {
+            await core.tasks.retryItem(runId, itemId, {
+              fromStep,
+              useLatestConfig: opts.latestConfig,
+              detach: true,
+            });
+            print(
+              { runId, itemId, fromStep: fromStep ?? 'summarize', detached: true },
+              `已提交后台单条重试：任务 ${runId} 条目 ${itemId}。`,
+            );
+            return 0;
+          }
+
+          const existingEvents = await core.tasks.events(runId, 0, 500);
+          const afterId = existingEvents[existingEvents.length - 1]?.id ?? 0;
+          await watchForegroundTask(
+            core,
+            runId,
+            afterId,
+            jsonMode,
+            core.tasks.retryItem(runId, itemId, {
+              fromStep,
+              useLatestConfig: opts.latestConfig,
+              detach: false,
+            }),
+          );
+          const detail = await core.tasks.get(runId);
+          print(detail, `\n单条重试完成，任务 ${detail.id} 当前状态：${detail.status}`);
+          return 0;
+        });
+        setExit(code);
+      },
+    );
+
+  // 4. aidaily retry-options <runId>
+  program
+    .command('retry-options')
+    .description('查询指定任务当前允许的断点续跑点、可重跑阶段与截止时间')
+    .argument('<runId>', '任务 ID')
+    .action(async (runId: string, _opts: Record<string, unknown>, cmd: Command) => {
+      const gOpts = getGlobals(cmd);
+      const print = createPrinter(io, Boolean(gOpts.json));
+      const code = await withCore(gOpts, async (core) => {
+        const opts = await core.tasks.getRetryOptions(runId);
+        print(opts, formatRetryOptionsText(opts, core.config.getSettings().timezone));
+        return 0;
+      });
+      setExit(code);
+    });
+
+  // 5. aidaily abandon <runId>
+  program
+    .command('abandon')
+    .description('放弃未完成或不再发布的任务，并立即释放其预留的新闻文章')
+    .argument('<runId>', '任务 ID')
+    .action(async (runId: string, _opts: Record<string, unknown>, cmd: Command) => {
+      const gOpts = getGlobals(cmd);
+      const print = createPrinter(io, Boolean(gOpts.json));
+      const code = await withCore(gOpts, async (core) => {
+        await core.tasks.abandon(runId);
+        print({ runId, abandoned: true }, `已放弃任务 ${runId} 并释放占用的候选文章。`);
+        return 0;
+      });
+      setExit(code);
+    });
+
+  // 6. aidaily cancel <runId>
+  program
+    .command('cancel')
+    .description('向排队中或正在执行的任务发出停止信号（停止后仍可随时恢复）')
+    .argument('<runId>', '任务 ID')
+    .action(async (runId: string, _opts: Record<string, unknown>, cmd: Command) => {
+      const gOpts = getGlobals(cmd);
+      const print = createPrinter(io, Boolean(gOpts.json));
+      const code = await withCore(gOpts, async (core) => {
+        await core.tasks.cancel(runId);
+        print({ runId, cancelRequested: true }, `已向任务 ${runId} 发送取消请求。`);
+        return 0;
+      });
+      setExit(code);
+    });
+
+  // 7. aidaily runs [--status <s,...>] [--limit 20]
+  program
+    .command('runs')
+    .description('查看历史与当前视频生成任务列表')
+    .option('--status <statuses>', '按任务状态筛选（支持逗号分隔多状态）')
+    .option('--limit <n>', '返回最大条数', '20')
+    .action(async (opts: { status?: string; limit: string }, cmd: Command) => {
+      const gOpts = getGlobals(cmd);
+      const print = createPrinter(io, Boolean(gOpts.json));
+      const limit = parsePositiveInt(opts.limit, '--limit');
+
+      let statuses: RunStatus[] | undefined;
+      if (opts.status) {
+        statuses = opts.status
+          .split(',')
+          .map((s) => s.trim())
+          .filter(Boolean)
+          .map((raw) => {
+            const parsed = RunStatusSchema.safeParse(raw);
+            if (!parsed.success) {
+              throw new CliUsageError(`无效的任务状态过滤条件: ${raw}`);
+            }
+            return parsed.data;
+          });
+      }
+
+      const code = await withCore(gOpts, async (core) => {
+        const list = await core.tasks.list({ status: statuses, limit });
+        print(list, formatRunsTable(list, core.config.getSettings().timezone));
+        return 0;
+      });
+      setExit(code);
+    });
+
+  // 8. aidaily show <runId> [--items]
+  program
+    .command('show')
+    .description('查看单期任务的阶段进展、新闻条目与产物清单')
+    .argument('<runId>', '任务 ID')
+    .option('--items', '同时输出各条新闻在写稿与核查阶段的全部版本历史', false)
+    .action(async (runId: string, opts: { items: boolean }, cmd: Command) => {
+      const gOpts = getGlobals(cmd);
+      const jsonMode = Boolean(gOpts.json);
+      const print = createPrinter(io, jsonMode);
+
+      const code = await withCore(gOpts, async (core) => {
+        const detail = await core.tasks.get(runId);
+        if (!opts.items) {
+          print(detail, formatRunDetailText(detail, core.config.getSettings().timezone, false));
+          return 0;
+        }
+        const itemHistories = await Promise.all(
+          detail.items.map(async (item) => ({
+            itemId: item.id,
+            versions: await core.tasks.getItemHistory(item.id),
+          })),
+        );
+        const text = `${formatRunDetailText(detail, core.config.getSettings().timezone, true)}\n\n版本与核查历史条数:\n${itemHistories
+          .map(
+            (h) =>
+              `  - ${h.itemId}: ${h.versions.map((v) => `${v.kind}(#${v.round})`).join(' -> ') || '暂无'}`,
+          )
+          .join('\n')}`;
+        print({ ...detail, itemHistories }, text);
+        return 0;
+      });
+      setExit(code);
+    });
+
+  // 9. aidaily logs <runId> [-f]
+  program
+    .command('logs')
+    .description('查看或实时追踪某期任务的执行事件日志')
+    .argument('<runId>', '任务 ID')
+    .option('-f, --follow', '持续实时跟随最新事件日志', false)
+    .action(async (runId: string, opts: { follow: boolean }, cmd: Command) => {
+      const gOpts = getGlobals(cmd);
+      const jsonMode = Boolean(gOpts.json);
+
+      const code = await withCore(gOpts, async (core) => {
+        const timezone = core.config.getSettings().timezone;
+        await core.tasks.get(runId);
+
+        const collected: Awaited<ReturnType<Core['tasks']['events']>> = [];
+        let cursor = 0;
+        while (true) {
+          const batch = await core.tasks.events(runId, cursor, 500);
+          if (batch.length === 0) {
+            break;
+          }
+          for (const ev of batch) {
+            cursor = Math.max(cursor, ev.id);
+            collected.push(ev);
+          }
+          if (batch.length < 500) {
+            break;
+          }
+        }
+
+        if (!opts.follow) {
+          if (jsonMode) {
+            io.stdout(`${JSON.stringify(collected, null, 2)}\n`);
+          } else {
+            for (const ev of collected) {
+              io.stdout(`${formatRunEventLine(ev, timezone)}\n`);
+            }
+          }
+          return 0;
+        }
+
+        for (const ev of collected) {
+          io.stdout(jsonMode ? `${JSON.stringify(ev)}\n` : `${formatRunEventLine(ev, timezone)}\n`);
+        }
+
+        const ctrl = new AbortController();
+        const onSigint = () => ctrl.abort();
+        process.on('SIGINT', onSigint);
+        try {
+          await core.tasks.watch(
+            runId,
+            (ev) => {
+              io.stdout(
+                jsonMode ? `${JSON.stringify(ev)}\n` : `${formatRunEventLine(ev, timezone)}\n`,
+              );
+            },
+            ctrl.signal,
+            { afterId: cursor, pollMs: 150 },
+          );
+        } finally {
+          process.off('SIGINT', onSigint);
+        }
+        return 0;
+      });
+      setExit(code);
+    });
+
+  // 10. aidaily review <runId> [--open]
+  program
+    .command('review')
+    .description('查看待审核成片标题、章节简介、标签与文件位置')
+    .argument('<runId>', '任务 ID')
+    .option('--open', '使用系统默认视频播放器打开成片', false)
+    .action(async (runId: string, opts: { open: boolean }, cmd: Command) => {
+      const gOpts = getGlobals(cmd);
+      const print = createPrinter(io, Boolean(gOpts.json));
+
+      const code = await withCore(gOpts, async (core) => {
+        const draft = await core.publish.getDraft(runId);
+        const absVideoPath = core.tasks.resolveArtifact(runId, 'output/video.mp4');
+        const absCoverPath = core.tasks.resolveArtifact(runId, 'output/cover.jpg');
+        if (opts.open && fsSync.existsSync(absVideoPath)) {
+          await spawnInheritProcess('open', [absVideoPath]).catch(() => 1);
+        }
+        print(
+          { ...draft, absVideoPath, absCoverPath },
+          formatDraftReviewText(draft, absVideoPath, absCoverPath),
+        );
+        return 0;
+      });
+      setExit(code);
+    });
+
+  // 11. aidaily approve <runId> [--title <t>] [--desc-file <f>] [--tags a,b] [--detach]
+  program
+    .command('approve')
+    .description('确认成片审核通过，可选更新文案后立即投稿 B 站（强制开启 AI 声明）')
+    .argument('<runId>', '任务 ID')
+    .option('--title <title>', '投稿前覆盖视频标题')
+    .option('--desc-file <file>', '从本地文本文件读取并覆盖视频简介')
+    .option('--tags <tags>', '用逗号分隔覆盖视频标签列表')
+    .option('--detach', '在后台独立进程中执行上传并返回', false)
+    .action(
+      async (
+        runId: string,
+        opts: { title?: string; descFile?: string; tags?: string; detach: boolean },
+        cmd: Command,
+      ) => {
+        const gOpts = getGlobals(cmd);
+        const print = createPrinter(io, Boolean(gOpts.json));
+
+        let description: string | undefined;
+        if (opts.descFile) {
+          description = await fs.readFile(path.resolve(opts.descFile), 'utf8');
+        }
+        const tags =
+          opts.tags !== undefined
+            ? opts.tags
+                .split(',')
+                .map((t) => t.trim())
+                .filter(Boolean)
+            : undefined;
+
+        const code = await withCore(gOpts, async (core) => {
+          if (opts.title !== undefined || description !== undefined || tags !== undefined) {
+            await core.publish.updateDraft(runId, {
+              title: opts.title,
+              description,
+              tags,
+            });
+          }
+          await core.publish.approve(runId, { detach: opts.detach });
+          const pub = (await core.tasks.get(runId)).publishRecord;
+          print(
+            { runId, detached: opts.detach, publishRecord: pub },
+            opts.detach
+              ? `已提交后台上传任务 ${runId}。`
+              : `任务 ${runId} 已完成 B 站投稿${pub?.bvid ? `（BV 号：${pub.bvid}）` : ''}。`,
+          );
+          return 0;
+        });
+        setExit(code);
+      },
+    );
+
+  // 12. aidaily reject <runId> [--reason <r>]
+  program
+    .command('reject')
+    .description('人工审核驳回本期内容，并立即释放所占用的候选文章')
+    .argument('<runId>', '任务 ID')
+    .option('--reason <reason>', '填写驳回原因说明')
+    .action(async (runId: string, opts: { reason?: string }, cmd: Command) => {
+      const gOpts = getGlobals(cmd);
+      const print = createPrinter(io, Boolean(gOpts.json));
+      const code = await withCore(gOpts, async (core) => {
+        await core.publish.reject(runId, opts.reason);
+        print({ runId, rejected: true, reason: opts.reason ?? null }, `已驳回任务 ${runId}。`);
+        return 0;
+      });
+      setExit(code);
+    });
+
+  // 13. aidaily consume <runId>
+  program
+    .command('consume')
+    .description('不向 B 站投稿发布，仅将本期已选新闻计入历史已播库并释放多余文章')
+    .argument('<runId>', '任务 ID')
+    .action(async (runId: string, _opts: Record<string, unknown>, cmd: Command) => {
+      const gOpts = getGlobals(cmd);
+      const print = createPrinter(io, Boolean(gOpts.json));
+      const code = await withCore(gOpts, async (core) => {
+        await core.publish.markConsumed(runId);
+        print({ runId, consumedOnly: true }, `已将任务 ${runId} 标记为本地仅消费完结。`);
+        return 0;
+      });
+      setExit(code);
+    });
+
+  // 14. aidaily publish-retry <runId> [--detach]
+  program
+    .command('publish-retry')
+    .description('对明确发布失败的期次重新发起 B 站上传（不适用于状态不明任务）')
+    .argument('<runId>', '任务 ID')
+    .option('--detach', '在后台独立进程中重传', false)
+    .action(async (runId: string, opts: { detach: boolean }, cmd: Command) => {
+      const gOpts = getGlobals(cmd);
+      const print = createPrinter(io, Boolean(gOpts.json));
+      const code = await withCore(gOpts, async (core) => {
+        await core.publish.retry(runId, { detach: opts.detach });
+        const pub = (await core.tasks.get(runId)).publishRecord;
+        print(
+          { runId, detached: opts.detach, publishRecord: pub },
+          opts.detach
+            ? `已提交后台重传任务 ${runId}。`
+            : `任务 ${runId} 重试上传成功${pub?.bvid ? `（BV 号：${pub.bvid}）` : ''}。`,
+        );
+        return 0;
+      });
+      setExit(code);
+    });
+
+  // 15. aidaily publish-confirm <runId> (--not-published | --bvid <BV>)
+  program
+    .command('publish-confirm')
+    .description('对上传途中中断且状态不明的期次人工核对定案')
+    .argument('<runId>', '任务 ID')
+    .option('--not-published', '确认平台未收到稿件，重置为可重传状态', false)
+    .option('--bvid <bvid>', '确认平台已收稿并填写对应 BV 号完成消费提交')
+    .action(async (runId: string, opts: { notPublished: boolean; bvid?: string }, cmd: Command) => {
+      const gOpts = getGlobals(cmd);
+      const print = createPrinter(io, Boolean(gOpts.json));
+
+      const hasNotPublished = Boolean(opts.notPublished);
+      const hasBvid = Boolean(opts.bvid);
+      if (hasNotPublished === hasBvid) {
+        throw new CliUsageError('必须且仅能传入 --not-published 或 --bvid <BV号> 其中之一');
+      }
+
+      const code = await withCore(gOpts, async (core) => {
+        if (hasNotPublished) {
+          await core.publish.confirmUncertain(runId, { published: false });
+          print(
+            { runId, published: false },
+            `已确认任务 ${runId} 平台尚未收稿，现在可通过 publish-retry 重试上传。`,
+          );
+        } else if (opts.bvid) {
+          await core.publish.confirmUncertain(runId, { published: true, bvid: opts.bvid });
+          print(
+            { runId, published: true, bvid: opts.bvid },
+            `已确认任务 ${runId} 收稿成功（${opts.bvid}）并完成新闻消费提交。`,
+          );
+        }
+        return 0;
+      });
+      setExit(code);
+    });
+
+  // 16. aidaily config get [path] / set <path> <value>
+  const configCmd = program.command('config').description('读写全局系统配置（支持点号嵌套路径）');
+
+  configCmd
+    .command('get')
+    .description('读取整份系统配置或指定点号路径的当前值')
+    .argument('[dotPath]', '可选配置路径，例如 ai.stages.polish.model')
+    .action(async (dotPath: string | undefined, _opts: Record<string, unknown>, cmd: Command) => {
+      const gOpts = getGlobals(cmd);
+      const print = createPrinter(io, Boolean(gOpts.json));
+      const code = await withCore(gOpts, async (core) => {
+        const val = getByDotPath(core.config.getSettings(), dotPath);
+        const text =
+          typeof val === 'string' || typeof val === 'number' || typeof val === 'boolean'
+            ? String(val)
+            : JSON.stringify(val, null, 2);
+        print(val, text);
+        return 0;
+      });
+      setExit(code);
+    });
+
+  configCmd
+    .command('set')
+    .description('修改指定配置路径的值并写回 YAML 配置文件（保留原注释）')
+    .argument('<dotPath>', '配置路径，例如 ai.stages.polish.model')
+    .argument('<rawValue>', '新的配置值（支持数字、布尔值、JSON 或纯文本）')
+    .action(
+      async (dotPath: string, rawValue: string, _opts: Record<string, unknown>, cmd: Command) => {
+        const gOpts = getGlobals(cmd);
+        const print = createPrinter(io, Boolean(gOpts.json));
+        const parsedVal = parseCliValue(rawValue);
+        const patch = buildPatchFromDotPath(dotPath, parsedVal);
+
+        const code = await withCore(gOpts, async (core) => {
+          let updated: Awaited<ReturnType<Core['config']['updateSettings']>>;
+          try {
+            updated = await core.config.updateSettings(patch);
+          } catch (err) {
+            throw new CliUsageError(err instanceof Error ? err.message : String(err));
+          }
+          const savedValue = getByDotPath(updated, dotPath);
+          print(
+            { path: dotPath, value: savedValue },
+            `已更新配置 ${dotPath} = ${JSON.stringify(savedValue)}`,
+          );
+          return 0;
+        });
+        setExit(code);
+      },
+    );
+
+  // 17. aidaily sources [list | test <id>]
+  const sourcesCmd = program
+    .command('sources')
+    .description('查看订阅信源健康状态或试抓单个信源')
+    .action(async (_opts: Record<string, unknown>, cmd: Command) => {
+      const gOpts = getGlobals(cmd);
+      const print = createPrinter(io, Boolean(gOpts.json));
+      const code = await withCore(gOpts, async (core) => {
+        const list = await core.sources.list();
+        print(list, formatSourcesTable(list, core.config.getSettings().timezone));
+        return 0;
+      });
+      setExit(code);
+    });
+
+  sourcesCmd
+    .command('list')
+    .description('列出全部订阅信源及其抓取健康统计')
+    .action(async (_opts: Record<string, unknown>, cmd: Command) => {
+      const gOpts = getGlobals(cmd);
+      const print = createPrinter(io, Boolean(gOpts.json));
+      const code = await withCore(gOpts, async (core) => {
+        const list = await core.sources.list();
+        print(list, formatSourcesTable(list, core.config.getSettings().timezone));
+        return 0;
+      });
+      setExit(code);
+    });
+
+  sourcesCmd
+    .command('test')
+    .description('对指定信源立即执行一次直接试抓诊断')
+    .argument('<sourceId>', '信源 ID')
+    .action(async (sourceId: string, _opts: Record<string, unknown>, cmd: Command) => {
+      const gOpts = getGlobals(cmd);
+      const print = createPrinter(io, Boolean(gOpts.json));
+      const code = await withCore(gOpts, async (core) => {
+        const result = await core.sources.test(sourceId);
+        print(result, formatSourceTestText(result));
+        return result.ok ? 0 : 1;
+      });
+      setExit(code);
+    });
+
+  // 18. aidaily schedule list | create | update | remove | sync
+  const scheduleCmd = program.command('schedule').description('管理每天自动运行的 macOS 定时任务');
+
+  scheduleCmd
+    .command('list')
+    .description('查看所有已配置的定时任务与系统挂载状态')
+    .action(async (_opts: Record<string, unknown>, cmd: Command) => {
+      const gOpts = getGlobals(cmd);
+      const print = createPrinter(io, Boolean(gOpts.json));
+      const code = await withCore(gOpts, async (core) => {
+        const jobs = await core.scheduler.list();
+        print(jobs, formatSchedulesTable(jobs, core.config.getSettings().timezone));
+        return 0;
+      });
+      setExit(code);
+    });
+
+  scheduleCmd
+    .command('create')
+    .description('新建每日定时任务（执行时间和新闻条数均必须显式填写，不设默认值）')
+    .requiredOption('--time <HH:mm>', '每日执行时间（24 小时制 HH:mm，必填）')
+    .requiredOption('-n, --items <N>', '每次抓取制作的新闻条数（正整数，必填）')
+    .option('--name <name>', '自定义定时任务名称')
+    .option('--disabled', '创建后先保持停用状态，暂不挂载到系统调度器', false)
+    .action(
+      async (
+        opts: { time: string; items: string; name?: string; disabled: boolean },
+        cmd: Command,
+      ) => {
+        const gOpts = getGlobals(cmd);
+        const print = createPrinter(io, Boolean(gOpts.json));
+
+        const timeRes = ScheduleTimeSchema.safeParse(opts.time);
+        if (!timeRes.success) {
+          throw new CliUsageError(
+            timeRes.error.issues[0]?.message ?? `非法的定时时间: ${opts.time}`,
+          );
+        }
+        const itemCount = parsePositiveInt(opts.items, '-n/--items');
+
+        const code = await withCore(gOpts, async (core) => {
+          const job = await core.scheduler.create({
+            name: opts.name,
+            time: timeRes.data,
+            itemCount,
+            enabled: !opts.disabled,
+          });
+          print(job, formatSchedulesTable([job], core.config.getSettings().timezone));
+          return 0;
+        });
+        setExit(code);
+      },
+    );
+
+  scheduleCmd
+    .command('update')
+    .description('修改指定定时任务的触发时间、每期条数或启停状态')
+    .argument('<id>', '定时任务 ID')
+    .option('--name <name>', '新的任务名称')
+    .option('--time <HH:mm>', '新的每日触发时间（HH:mm）')
+    .option('-n, --items <N>', '新的每期新闻条数')
+    .option('--enable', '启用并挂载到系统调度器', false)
+    .option('--disable', '停用并从系统调度器卸载', false)
+    .action(
+      async (
+        id: string,
+        opts: { name?: string; time?: string; items?: string; enable: boolean; disable: boolean },
+        cmd: Command,
+      ) => {
+        const gOpts = getGlobals(cmd);
+        const print = createPrinter(io, Boolean(gOpts.json));
+
+        if (opts.enable && opts.disable) {
+          throw new CliUsageError('不能同时传入 --enable 和 --disable');
+        }
+        let nextTime: string | undefined;
+        if (opts.time !== undefined) {
+          const parsedTime = ScheduleTimeSchema.safeParse(opts.time);
+          if (!parsedTime.success) {
+            throw new CliUsageError(
+              parsedTime.error.issues[0]?.message ?? `非法的定时时间: ${opts.time}`,
+            );
+          }
+          nextTime = parsedTime.data;
+        }
+        const nextItems =
+          opts.items !== undefined ? parsePositiveInt(opts.items, '-n/--items') : undefined;
+        const nextEnabled = opts.enable ? true : opts.disable ? false : undefined;
+
+        const code = await withCore(gOpts, async (core) => {
+          const updated = await core.scheduler.update(id, {
+            name: opts.name,
+            time: nextTime,
+            itemCount: nextItems,
+            enabled: nextEnabled,
+          });
+          print(updated, formatSchedulesTable([updated], core.config.getSettings().timezone));
+          return 0;
+        });
+        setExit(code);
+      },
+    );
+
+  scheduleCmd
+    .command('remove')
+    .description('删除指定定时任务并移除对应系统调度配置')
+    .argument('<id>', '定时任务 ID')
+    .action(async (id: string, _opts: Record<string, unknown>, cmd: Command) => {
+      const gOpts = getGlobals(cmd);
+      const print = createPrinter(io, Boolean(gOpts.json));
+      const code = await withCore(gOpts, async (core) => {
+        await core.scheduler.remove(id);
+        print({ id, removed: true }, `已删除并卸载定时任务 ${id}。`);
+        return 0;
+      });
+      setExit(code);
+    });
+
+  scheduleCmd
+    .command('sync')
+    .description('将数据库中的所有定时任务重新同步到 macOS launchd')
+    .action(async (_opts: Record<string, unknown>, cmd: Command) => {
+      const gOpts = getGlobals(cmd);
+      const print = createPrinter(io, Boolean(gOpts.json));
+      const code = await withCore(gOpts, async (core) => {
+        await core.scheduler.sync();
+        const jobs = await core.scheduler.list();
+        print({ synced: jobs.length, jobs }, `已全量同步 ${jobs.length} 条定时任务到系统调度器。`);
+        return 0;
+      });
+      setExit(code);
+    });
+
+  // 19. aidaily models [--cli agy]
+  program
+    .command('models')
+    .description('查询指定大模型命令行工具当前可用的模型列表')
+    .option('--cli <cli>', '命令行工具配置名称', 'agy')
+    .action(async (opts: { cli: string }, cmd: Command) => {
+      const gOpts = getGlobals(cmd);
+      const print = createPrinter(io, Boolean(gOpts.json));
+      const code = await withCore(gOpts, async (core) => {
+        const models = await core.system.listModels(opts.cli);
+        const text =
+          models.length > 0 ? models.map((m) => `  - ${m}`).join('\n') : '未查询到可用模型。';
+        print(
+          { cli: opts.cli, models },
+          `命令行工具 "${opts.cli}" 可用模型（共 ${models.length} 个）:\n${text}`,
+        );
+        return 0;
+      });
+      setExit(code);
+    });
+
+  // 20. aidaily doctor
+  program
+    .command('doctor')
+    .description('检查 Node、大模型工具、音视频依赖、Chromium、投稿工具、语音合成与磁盘空间')
+    .action(async (_opts: Record<string, unknown>, cmd: Command) => {
+      const gOpts = getGlobals(cmd);
+      const print = createPrinter(io, Boolean(gOpts.json));
+      const code = await withCore(gOpts, async (core) => {
+        const report = await core.system.doctor();
+        print(report, formatDoctorReportText(report, core.config.getSettings().timezone));
+        return report.ok ? 0 : 1;
+      });
+      setExit(code);
+    });
+
+  // 21. aidaily bili login
+  const biliCmd = program.command('bili').description('B 站账号登录与凭据辅助操作');
+
+  biliCmd
+    .command('login')
+    .description('调用 biliup 启动交互式扫码登录，Cookie 保存到配置指定路径')
+    .action(async (_opts: Record<string, unknown>, cmd: Command) => {
+      const gOpts = getGlobals(cmd);
+      const code = await withCore(gOpts, async (core) => {
+        const { bin, args } = core.publish.biliLoginCommand();
+        return spawnInheritProcess(bin, args);
+      });
+      setExit(code);
+    });
+
+  configureCommandTree(program, io, true);
   return program;
+}
+
+/** 执行一次完整的命令行解析与业务分发，并返回标准退出码（0 成功 / 1 运行错误 / 2 参数错误 / 3 锁被占用） */
+export async function runCli(argv: readonly string[], io: CliIo = DEFAULT_IO): Promise<number> {
+  let exitCode = 0;
+  const program = buildProgram(io, (code) => {
+    exitCode = code;
+  });
+
+  try {
+    await program.parseAsync([...argv], { from: 'user' });
+    return exitCode;
+  } catch (err) {
+    const mappedCode = mapErrorToExitCode(err);
+    const jsonRequested = argv.includes('--json');
+
+    if (err instanceof CommanderError) {
+      if (mappedCode !== 0 && jsonRequested) {
+        io.stderr(`${JSON.stringify({ error: err.message, code: mappedCode })}\n`);
+      }
+      return mappedCode;
+    }
+
+    const msg = err instanceof Error ? err.message : String(err);
+    if (jsonRequested) {
+      io.stderr(`${JSON.stringify({ error: msg, code: mappedCode })}\n`);
+    } else {
+      io.stderr(`错误: ${msg}\n`);
+    }
+    return mappedCode;
+  }
 }
 
 /** 判断当前文件是否直接作为可执行入口脚本启动（兼容含中文的路径对比） */
@@ -16,12 +1122,12 @@ function isMainModule(metaUrl: string): boolean {
     return false;
   }
   try {
-    return fs.realpathSync(fileURLToPath(metaUrl)) === fs.realpathSync(arg);
+    return fsSync.realpathSync(fileURLToPath(metaUrl)) === fsSync.realpathSync(arg);
   } catch {
     return false;
   }
 }
 
 if (isMainModule(import.meta.url)) {
-  await buildProgram().parseAsync(process.argv);
+  process.exitCode = await runCli(process.argv.slice(2));
 }
