@@ -160,7 +160,10 @@ export async function selectCandidateEvents(opts: {
   const selected: CandidateSelectionOutput['selected'] = [];
 
   for (const ev of llmRes.data.events) {
-    if (ev.duplicateOfHistory) {
+    if (
+      ev.duplicateOfHistory ||
+      (settings.issue.minScore !== undefined && ev.score < settings.issue.minScore)
+    ) {
       continue;
     }
     const evDup = isDuplicateOfHistory(
@@ -207,7 +210,10 @@ export async function selectCandidateEvents(opts: {
   }
 
   return {
-    selected,
+    selected:
+      settings.issue.minScore === undefined
+        ? selected
+        : selected.sort((a, b) => b.candidate.score - a.candidate.score).slice(0, itemCount + 2),
     consideredArticleIds: dedupedGroups.flatMap((g) => g.aliases),
   };
 }

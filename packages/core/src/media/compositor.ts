@@ -14,6 +14,7 @@ import type {
   TemplateAdapter,
   Timeline,
 } from '@aidaily/contracts';
+import { HostMascotIdSchema } from '@aidaily/contracts';
 import { TZDate } from '@date-fns/tz';
 import { format } from 'date-fns';
 import { chromium } from 'playwright';
@@ -231,7 +232,16 @@ export async function buildRenderableIssue(opts: {
     const stagedImageRel = await stageArticleAssetIntoRunDir({
       ctx,
       runDir,
-      relImagePath: primaryArticle?.imagePath,
+      relImagePath:
+        item.imageMode === 'none'
+          ? null
+          : item.imageMode === 'custom' && item.customImagePath
+            ? path.relative(ctx.paths.rootDir, path.join(runDir, item.customImagePath))
+            : item.finalJson.preferArticleImage === false ||
+                (settings.issue.minScore !== undefined &&
+                  item.finalJson.preferArticleImage !== true)
+              ? null
+              : primaryArticle?.imagePath,
       itemIndex: i,
     });
 
@@ -241,6 +251,9 @@ export async function buildRenderableIssue(opts: {
 
     renderItems.push({
       ...item.finalJson,
+      ...(item.imageMode === 'custom' && item.customImageCaption
+        ? { imageCaption: item.customImageCaption }
+        : {}),
       id: item.id,
       position: i + 1,
       source: sourceDisplay,
@@ -251,7 +264,21 @@ export async function buildRenderableIssue(opts: {
     });
   }
 
+  const hostRow = ctx.db.prepare('SELECT host_id FROM runs WHERE id = ?').get(runId) as
+    | { host_id: string | null }
+    | undefined;
+  const host = HostMascotIdSchema.safeParse(hostRow?.host_id);
+  const hostMascotPath = host.success
+    ? await stageArticleAssetIntoRunDir({
+        ctx,
+        runDir,
+        relImagePath: path.join('assets', 'mascots', `${host.data}.png`),
+        itemIndex: 999,
+      })
+    : undefined;
   return {
+    ...(hostMascotPath ? { hostMascotPath } : {}),
+    ...(host.success ? { hostId: host.data } : {}),
     date: dateStr,
     issueNumber,
     headline: packageData.headline,
@@ -444,6 +471,12 @@ export async function runRenderStage(opts: {
       signal,
     });
 
+    const musicRow = ctx.db.prepare('SELECT bgm_file FROM runs WHERE id = ?').get(runId) as
+      | { bgm_file: string | null }
+      | undefined;
+    const bgmName = musicRow?.bgm_file;
+    if (bgmName && (path.basename(bgmName) !== bgmName || !/\.(mp3|wav|flac|m4a)$/i.test(bgmName)))
+      throw new Error('背景音乐文件名不合法');
     await buildMasterAudioWav({
       timeline,
       runDir,
@@ -451,7 +484,9 @@ export async function runRenderStage(opts: {
       sampleRate: settings.tts.postprocess.sampleRate,
       loudnessLUFS: settings.tts.postprocess.loudnessLUFS,
       isSilentProvider: settings.tts.provider === 'silent',
-      bgm: settings.render.bgm,
+      bgm: bgmName
+        ? { ...settings.render.bgm, file: path.join('assets', 'bgm', bgmName) }
+        : settings.render.bgm,
       rootDir: ctx.paths.rootDir,
       ffmpegBin,
       signal,

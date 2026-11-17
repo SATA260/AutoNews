@@ -1,4 +1,4 @@
-import React from 'react';
+import type React from 'react';
 import type { SanitizedDailyIssue } from '../../schema/newsSchema';
 
 /** 顶部刊头栏组件入参属性 */

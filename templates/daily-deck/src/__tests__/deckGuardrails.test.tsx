@@ -1,6 +1,6 @@
-import React from 'react';
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { parseTransitionStyle } from '../bridge/videoSynthBridge';
 import { NewsDeck } from '../components/deck/NewsDeck';
 import { PAGE_TURN_DURATION_MS } from '../components/deck/PageTransitionStage';
 import { DeckErrorBoundary } from '../components/guard/DeckErrorBoundary';
@@ -12,6 +12,10 @@ beforeEach(() => {
   vi.spyOn(mediaReadyTracker, 'waitForAll').mockResolvedValue(undefined);
   vi.spyOn(transitionTiming, 'wait').mockResolvedValue(undefined);
 });
+
+const BrokenChild = () => {
+  throw new Error('Simulated crash');
+};
 
 describe('Layer 1: Zero-Throw Sanitizer & Editorial Contract Limits', () => {
   it('validates the built-in sample issue with zero warnings', () => {
@@ -77,14 +81,18 @@ describe('Layer 1: Zero-Throw Sanitizer & Editorial Contract Limits', () => {
   });
 });
 
-describe('Layer 2-5: Editorial Deck, 3D Page Turn, Corner Mascot & Error Isolation', () => {
-  it('renders 7 editorial slides, shows DeepSeek corner mascot, and clamps bridge pagination safely', async () => {
+describe('Layer 2-5: Editorial Deck, Smooth Page Turn, Corner Mascot & Error Isolation', () => {
+  it('renders 7 editorial slides, defaults to glide transition, shows DeepSeek mascot, and clamps pagination safely', async () => {
     const { container } = render(<NewsDeck />);
 
     expect(window.__NEWS_DECK__).toBeDefined();
     expect(window.__NEWS_DECK__!.getPageCount()).toBe(7);
     expect(window.__NEWS_DECK__!.getCurrentPage()).toBe(0);
-    expect(window.__NEWS_DECK__!.getState().transition).toBe('flip');
+    expect(window.__NEWS_DECK__!.getState().transition).toBe('glide');
+    expect(parseTransitionStyle('shutter')).toBe('fade');
+    expect(parseTransitionStyle('slide')).toBe('glide');
+    expect(parseTransitionStyle('flip')).toBe('flip');
+    expect(parseTransitionStyle('unknown')).toBe('glide');
     expect(screen.getByText('今日要闻')).toBeInTheDocument();
 
     const mascotImg = container.querySelector('.corner-mascot-img') as HTMLImageElement | null;
@@ -117,42 +125,65 @@ describe('Layer 2-5: Editorial Deck, 3D Page Turn, Corner Mascot & Error Isolati
     expect(window.__NEWS_DECK__!.getHealthReport().runtimeErrors).toHaveLength(0);
   });
 
-  it('mounts dual exiting/entering sheets during page turn, cleans up after transition, and cycles transition styles', async () => {
+  it('mounts dual exiting/entering sheets in the same atomic turn without flash and cycles transition styles', async () => {
     vi.useFakeTimers();
     try {
       const { container } = render(<NewsDeck />);
 
-      // Cycle transition style via T shortcut: flip -> glide -> shutter -> none -> flip
+      // Cycle transition style via T shortcut: glide -> flip -> fade -> none -> glide
       fireEvent.keyDown(window, { key: 't' });
-      expect(window.__NEWS_DECK__!.getState().transition).toBe('glide');
+      expect(window.__NEWS_DECK__!.getState().transition).toBe('flip');
       fireEvent.keyDown(window, { key: 't' });
-      expect(window.__NEWS_DECK__!.getState().transition).toBe('shutter');
+      expect(window.__NEWS_DECK__!.getState().transition).toBe('fade');
       fireEvent.keyDown(window, { key: 't' });
       expect(window.__NEWS_DECK__!.getState().transition).toBe('none');
       fireEvent.keyDown(window, { key: 't' });
-      expect(window.__NEWS_DECK__!.getState().transition).toBe('flip');
+      expect(window.__NEWS_DECK__!.getState().transition).toBe('glide');
 
-      // Trigger forward page turn
+      // Trigger forward page turn and verify atomic zero-flash dual-sheet mounting
       fireEvent.click(screen.getByRole('button', { name: '下一页' }));
 
       const stage = container.querySelector('.page-turn-stage');
-      expect(stage).toHaveClass('mode-flip', 'is-turning', 'dir-next');
-      expect(container.querySelector('.page-sheet.is-exiting')).toBeInTheDocument();
-      expect(container.querySelector('.page-sheet.is-active.is-entering')).toBeInTheDocument();
+      expect(stage).toHaveClass('mode-glide', 'is-turning', 'dir-next');
+      const exitingForward = container.querySelector('.page-sheet.is-exiting');
+      const enteringForward = container.querySelector('.page-sheet.is-active.is-entering');
+      expect(exitingForward).toBeInTheDocument();
+      expect(enteringForward).toBeInTheDocument();
+      expect(exitingForward!.textContent).toContain('今日要闻');
+      expect(enteringForward!.textContent).toContain(SAMPLE_DAILY_ISSUE.items[0]!.title);
 
-      // Advance past flip animation duration
+      // Advance past glide animation duration
       await act(async () => {
-        vi.advanceTimersByTime(PAGE_TURN_DURATION_MS.flip + 20);
+        vi.advanceTimersByTime(PAGE_TURN_DURATION_MS.glide + 20);
       });
 
       expect(container.querySelector('.page-sheet.is-exiting')).not.toBeInTheDocument();
+      expect(container.querySelector('.page-turn-stage')).toHaveClass('is-settled');
+
+      // Trigger backward page turn and verify symmetric dual-sheet mounting
+      fireEvent.click(screen.getByRole('button', { name: '上一页' }));
+      expect(container.querySelector('.page-turn-stage')).toHaveClass(
+        'mode-glide',
+        'is-turning',
+        'dir-prev',
+      );
+      const exitingBack = container.querySelector('.page-sheet.is-exiting');
+      const enteringBack = container.querySelector('.page-sheet.is-active.is-entering');
+      expect(exitingBack).toBeInTheDocument();
+      expect(enteringBack).toBeInTheDocument();
+      expect(exitingBack!.textContent).toContain(SAMPLE_DAILY_ISSUE.items[0]!.title);
+      expect(enteringBack!.textContent).toContain('今日要闻');
+
+      await act(async () => {
+        vi.advanceTimersByTime(PAGE_TURN_DURATION_MS.glide + 20);
+      });
       expect(container.querySelector('.page-turn-stage')).toHaveClass('is-settled');
     } finally {
       vi.useRealTimers();
     }
   });
 
-  it('switches cleanly to the Official Disclosure Excerpt sheet when an official image fails to load', async () => {
+  it('switches cleanly to a full-width panel when an official image fails to load', async () => {
     render(
       <NewsDeck
         initialData={{
@@ -181,8 +212,8 @@ describe('Layer 2-5: Editorial Deck, 3D Page Turn, Corner Mascot & Error Isolati
     await waitFor(() => {
       expect(screen.queryByAltText('官方配图失效自动切换测试')).not.toBeInTheDocument();
     });
-    expect(screen.getByText('官方披露摘录 / PRIMARY SOURCE NOTES')).toBeInTheDocument();
-    expect(screen.getByText('官方摘录表')).toBeInTheDocument();
+    expect(document.querySelector('.news-editorial-layout')).toHaveClass('is-full-panel');
+    expect(screen.queryByText('官方摘录表')).not.toBeInTheDocument();
     expect(window.__NEWS_DECK__!.getHealthReport().runtimeErrors).toHaveLength(0);
   });
 
@@ -215,9 +246,6 @@ describe('Layer 2-5: Editorial Deck, 3D Page Turn, Corner Mascot & Error Isolati
     expect(container.querySelector('.corner-mascot-dock')).toBeNull();
 
     const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
-    const BrokenChild = () => {
-      throw new Error('Simulated crash');
-    };
     render(
       <DeckErrorBoundary scopeName="unit-probe">
         <BrokenChild />

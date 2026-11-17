@@ -50,6 +50,7 @@ export interface DailyIssueInput {
   headline?: string;
   footerCta?: string;
   hostMascotId?: PresetMascotId | string;
+  hostMascotUrl?: string | null;
   mascotMode?: MascotMode | string;
   coverDurationSec?: number;
   outroDurationSec?: number;
@@ -86,6 +87,7 @@ export interface SanitizedDailyIssue {
   headline: string;
   footerCta: string;
   hostMascotId: PresetMascotId;
+  hostMascotUrl: string | null;
   mascotMode: MascotMode;
   coverDurationSec: number;
   outroDurationSec: number;
@@ -151,14 +153,19 @@ function normalizeText(value: unknown): string {
   if (typeof value !== 'string') {
     return '';
   }
-  return value
-    .replace(/[\u0000-\u001F\u007F]/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim();
+  let sanitized = '';
+  for (const ch of value) {
+    const code = ch.charCodeAt(0);
+    sanitized += code < 32 || code === 127 ? ' ' : ch;
+  }
+  return sanitized.replace(/\s+/g, ' ').trim();
 }
 
 /** 按完整字符码点安全截断文本，避免把表情符号从中间劈开产生乱码 */
-export function truncateCodepoints(str: string, maxLen: number): { text: string; truncated: boolean } {
+export function truncateCodepoints(
+  str: string,
+  maxLen: number,
+): { text: string; truncated: boolean } {
   const chars = Array.from(str);
   if (chars.length <= maxLen) {
     return { text: str, truncated: false };
@@ -167,7 +174,10 @@ export function truncateCodepoints(str: string, maxLen: number): { text: string;
     return { text: chars.slice(0, Math.max(0, maxLen)).join(''), truncated: true };
   }
   return {
-    text: `${chars.slice(0, maxLen - 1).join('').trimEnd()}…`,
+    text: `${chars
+      .slice(0, maxLen - 1)
+      .join('')
+      .trimEnd()}…`,
     truncated: true,
   };
 }
@@ -322,7 +332,13 @@ function sanitizeSingleNewsItem(
   }
 
   const indexLabel = String(index + 1).padStart(2, '0');
-  const category = cleanAndTruncate(obj.category, HARD_LIMITS.category, 'AI 动向', `${basePath}.category`, warnings);
+  const category = cleanAndTruncate(
+    obj.category,
+    HARD_LIMITS.category,
+    'AI 动向',
+    `${basePath}.category`,
+    warnings,
+  );
   const title = cleanAndTruncate(
     obj.title,
     HARD_LIMITS.title,
@@ -335,7 +351,13 @@ function sanitizeSingleNewsItem(
   // Derive shortTitle cleanly from title when omitted without generating a warning
   const rawShortTitle = normalizeText(obj.shortTitle);
   const shortTitle = rawShortTitle
-    ? cleanAndTruncate(rawShortTitle, HARD_LIMITS.shortTitle, title, `${basePath}.shortTitle`, warnings)
+    ? cleanAndTruncate(
+        rawShortTitle,
+        HARD_LIMITS.shortTitle,
+        title,
+        `${basePath}.shortTitle`,
+        warnings,
+      )
     : truncateCodepoints(title, HARD_LIMITS.shortTitle).text;
 
   const rawSummary = normalizeText(obj.summary);
@@ -419,8 +441,20 @@ function sanitizeSingleNewsItem(
     `${basePath}.officialQuote`,
     warnings,
   );
-  const source = cleanAndTruncate(obj.source, HARD_LIMITS.source, '官方发布', `${basePath}.source`, warnings);
-  const sourceUrl = cleanAndTruncate(obj.sourceUrl, HARD_LIMITS.sourceUrl, '', `${basePath}.sourceUrl`, warnings);
+  const source = cleanAndTruncate(
+    obj.source,
+    HARD_LIMITS.source,
+    '官方发布',
+    `${basePath}.source`,
+    warnings,
+  );
+  const sourceUrl = cleanAndTruncate(
+    obj.sourceUrl,
+    HARD_LIMITS.sourceUrl,
+    '',
+    `${basePath}.sourceUrl`,
+    warnings,
+  );
   const publishedAt = cleanAndTruncate(
     obj.publishedAt,
     HARD_LIMITS.publishedAt,
@@ -476,8 +510,13 @@ function createEmergencyFallbackIssue(): SanitizedDailyIssue {
       shortTitle: '等待导入本期 AI 日报数据',
       title: '等待导入本期 AI 日报数据',
       summary: '当前输入数据为空或结构不完整，已自动启用安全示范页，保证视频画面零报错。',
-      keyPoints: ['左侧展示精炼新闻梗概', '右侧引用官方图片或披露要点', '按 E 键打开编辑抽屉导入 JSON'],
-      officialQuote: '模板支持通过 window.__NEWS_DECK__.setNewsData(json) 动态注入各期数据并自动对齐配音时长。',
+      keyPoints: [
+        '左侧展示精炼新闻梗概',
+        '右侧引用官方图片或披露要点',
+        '按 E 键打开编辑抽屉导入 JSON',
+      ],
+      officialQuote:
+        '模板支持通过 window.__NEWS_DECK__.setNewsData(json) 动态注入各期数据并自动对齐配音时长。',
       metrics: [
         { label: '画幅规格', value: '1920 × 1080' },
         { label: '容错机制', value: '零报错兜底' },
@@ -497,6 +536,7 @@ function createEmergencyFallbackIssue(): SanitizedDailyIssue {
     headline: '等待导入本期精选 AI 动态',
     footerCta: '感谢收看 · 各条新闻原始信源链接已附于视频简介',
     hostMascotId: 'deepseek',
+    hostMascotUrl: null,
     mascotMode: 'per-item',
     coverDurationSec: HARD_LIMITS.defaultCoverDurationSec,
     outroDurationSec: HARD_LIMITS.defaultOutroDurationSec,
@@ -550,7 +590,13 @@ export function sanitizeDailyIssue(raw: unknown): SanitizedIssueResult {
         : createEmergencyFallbackIssue().items;
 
     const firstItem = sanitizedItems[0]!;
-    const issueTitle = cleanAndTruncate(root.issueTitle, HARD_LIMITS.issueTitle, 'AI 每日报', 'issueTitle', warnings);
+    const issueTitle = cleanAndTruncate(
+      root.issueTitle,
+      HARD_LIMITS.issueTitle,
+      'AI 每日报',
+      'issueTitle',
+      warnings,
+    );
     const issueNumber = cleanAndTruncate(
       root.issueNumber,
       HARD_LIMITS.issueNumber,
@@ -597,6 +643,7 @@ export function sanitizeDailyIssue(raw: unknown): SanitizedIssueResult {
         headline,
         footerCta,
         hostMascotId,
+        hostMascotUrl: sanitizeMediaUrl(root.hostMascotUrl, 'hostMascotUrl', warnings),
         mascotMode,
         coverDurationSec,
         outroDurationSec,

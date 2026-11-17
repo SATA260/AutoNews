@@ -5,6 +5,7 @@ import path from 'node:path';
 import {
   type ContentLimits,
   type ErrorCode,
+  type HostMascotId,
   PIPELINE_STAGES,
   RETRYABLE_RUN_STATUSES,
   type RetryOptions,
@@ -123,6 +124,8 @@ export function createRun(
   ctx: CoreContext,
   opts: {
     itemCount: number;
+    hostId?: HostMascotId;
+    bgmFile?: string;
     trigger?: Trigger;
     scheduleId?: string | null;
   },
@@ -148,12 +151,16 @@ export function createRun(
       configSnapshotJson,
       createdAt: nowIso,
     });
+    if (opts.hostId || opts.bgmFile)
+      ctx.db
+        .prepare('UPDATE runs SET host_id = ?, bgm_file = ? WHERE id = ?')
+        .run(opts.hostId ?? null, opts.bgmFile ?? null, runId);
     ctx.repos.runStages.initStages(runId);
     emitRunEvent(ctx, {
       runId,
       level: 'info',
       type: 'run_created',
-      message: `已创建第 ${runId} 期任务（目标 ${opts.itemCount} 条新闻，触发方式：${trigger}）`,
+      message: `已创建第 ${runId} 期任务（最多 ${opts.itemCount} 条新闻，触发方式：${trigger}）`,
       data: {
         itemCount: opts.itemCount,
         trigger,
@@ -418,6 +425,39 @@ async function executePipelineStagesLocked(opts: {
         type: 'stage_done',
         message: `阶段执行完成：${stage}`,
       });
+      if (
+        settings.issue.minScore !== undefined &&
+        !stageOverrides?.[stage] &&
+        stageOut &&
+        typeof stageOut === 'object' &&
+        ((stage === 'select' && 'selectedCount' in stageOut && stageOut.selectedCount === 0) ||
+          (stage === 'edit' &&
+            'passedItemIds' in stageOut &&
+            Array.isArray(stageOut.passedItemIds) &&
+            stageOut.passedItemIds.length === 0))
+      ) {
+        const finished = ctx.now().toISOString();
+        inTransaction(ctx.db, () => {
+          ctx.repos.articles.releaseByRun(runId);
+          for (const later of PIPELINE_STAGES.slice(PIPELINE_STAGES.indexOf(stage) + 1)) {
+            ctx.repos.runStages.markStage(runId, later, 'skipped', { finishedAt: finished });
+          }
+          ctx.repos.runs.updateStatus(runId, 'skipped', {
+            currentStage: stage,
+            pid: null,
+            finishedAt: finished,
+            retryDeadlineAt: null,
+          });
+          emitRunEvent(ctx, {
+            runId,
+            level: 'info',
+            stage,
+            type: 'run_skipped',
+            message: '没有符合条件的新闻，本期已跳过',
+          });
+        });
+        return;
+      }
     }
 
     const finishedIso = ctx.now().toISOString();

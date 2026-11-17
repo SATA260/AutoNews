@@ -127,6 +127,7 @@ const SettingsFieldsSchema = z.object({
   timezone: z.string().min(1),
   issue: z.object({
     reserveFactor: z.number().int().min(1).max(5),
+    minScore: z.number().min(1).max(10).optional(),
     freshnessHours: z.number().int().positive(),
     itemConcurrency: z.number().int().min(1).max(10),
     refill: z.object({

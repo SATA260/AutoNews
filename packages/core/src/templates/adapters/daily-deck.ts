@@ -135,8 +135,11 @@ export function createDailyDeckAdapter(): TemplateAdapter {
         date: issue.date.replace(/-/g, '.'),
         headline: issue.headline,
         footerCta: issue.outro.cta,
-        hostMascotId: 'gemini',
-        mascotMode: 'per-item',
+        hostMascotId: issue.hostId ?? 'gemini',
+        hostMascotUrl: issue.hostMascotPath
+          ? `/__run_assets__/${issue.hostMascotPath.replace(/^\/+/, '')}`
+          : null,
+        mascotMode: issue.hostId ? 'fixed-host' : 'per-item',
         coverDurationSec,
         outroDurationSec,
         items: issue.items.map((item) => {
@@ -150,11 +153,11 @@ export function createDailyDeckAdapter(): TemplateAdapter {
             category: item.category,
             shortTitle: item.shortTitle,
             title: item.title,
-            summary: item.summary,
+            summary: item.highlight ?? item.summary,
             keyPoints: item.keyPoints.slice(0, 3),
             imageUrl: assetPath,
             secondaryImageUrl: null,
-            imageCaption: assetPath ? `${item.source} 配图` : null,
+            imageCaption: assetPath ? (item.imageCaption ?? `${item.source} 配图`) : null,
             officialQuote: item.officialQuote ?? item.evidence[0]?.quote ?? item.detail,
             metrics: item.metrics ?? [],
             source: item.source,

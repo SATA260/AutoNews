@@ -19,7 +19,8 @@ describe('@aidaily/contracts', () => {
     const raw = fs.readFileSync(path.join(REPO_ROOT, 'config', 'settings.yaml'), 'utf8');
     const parsed = SettingsSchema.parse(parse(raw));
     expect(parsed.version).toBe(1);
-    expect(parsed.tts.provider).toBe('silent');
+    expect(parsed.tts.provider).toBe('qwen-local');
+    expect(parsed.issue.minScore).toBe(7.5);
     expect(parsed.publish.bilibili.aiDeclaration).toBe(true);
     expect('itemCount' in parsed.issue).toBe(false);
     expect('schedule' in parsed).toBe(false);

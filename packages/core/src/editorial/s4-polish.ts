@@ -9,6 +9,7 @@ import {
 } from '@aidaily/contracts';
 import type { CoreContext } from '../context.js';
 import { invokeStageLlm } from './llm.js';
+import { getRunPersona } from './personas.js';
 import { renderPromptTemplate } from './prompts.js';
 import { type LoadedEventArticle, serializeLoadedArticlesXml } from './s3-summarize.js';
 
@@ -37,7 +38,13 @@ export async function polishItemDraft(opts: {
 }): Promise<PolishedItem> {
   const { ctx, settings, limits, runId, itemId, event, summary, round, signal } = opts;
 
+  const persona = await getRunPersona(ctx, runId);
   const prompt = await renderPromptTemplate('s4-polish.md', {
+    personaJson: persona ? JSON.stringify(persona, null, 2) : '无特定角色',
+    narrationRules:
+      settings.issue.minScore !== undefined
+        ? '严格要求：4～7句，总字数110～180字，每句14～30字；标题不超过22字，短标题不超过16字，highlight不超过18字，keyPoints为2～3条且每条不超过15字。百分比和货币应写成中文读法，不要使用括号、波浪号或多余空格。'
+        : '',
     eventTitle: event.title,
     category: event.category ?? 'AI 资讯',
     entity: event.entity ?? 'AI',
@@ -101,7 +108,13 @@ export async function revisePolishedItem(opts: {
   } = opts;
 
   const articlesXml = serializeLoadedArticlesXml(articlesMap, settings.editorial.sourceMaxChars);
+  const persona = await getRunPersona(ctx, runId);
   const prompt = await renderPromptTemplate('s4-revise.md', {
+    personaJson: persona ? JSON.stringify(persona, null, 2) : '无特定角色',
+    narrationRules:
+      settings.issue.minScore !== undefined
+        ? '严格要求：4～7句，总字数110～180字，每句14～30字；标题不超过22字，短标题不超过16字，highlight不超过18字，keyPoints为2～3条且每条不超过15字。百分比和货币应写成中文读法，不要使用括号、波浪号或多余空格。'
+        : '',
     previousItemJson: JSON.stringify(previous, null, 2),
     revisionNotesJson: JSON.stringify(revisionNotes, null, 2),
     evidenceJson: JSON.stringify(evidence, null, 2),

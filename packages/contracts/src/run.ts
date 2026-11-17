@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { AiStageNameSchema } from './config.js';
 import { EventRecordSchema, RunItemRecordSchema } from './editorial.js';
+import { HostMascotIdSchema } from './persona.js';
 import { PublishRecordSchema } from './publish.js';
 
 /** 视频生成任务按先后顺序执行的七个自动处理步骤 */
@@ -46,6 +47,7 @@ export type StageStatus = z.infer<typeof StageStatusSchema>;
 export const RunStatusSchema = z.enum([
   'queued',
   'running',
+  'skipped',
   'failed',
   'cancelled',
   'interrupted',
@@ -132,6 +134,8 @@ export const RunSummarySchema = z.object({
   status: RunStatusSchema,
   currentStage: StageSchema.nullable(),
   itemCount: z.number().int().positive(),
+  hostId: HostMascotIdSchema.nullable().optional(),
+  bgmFile: z.string().nullable().optional(),
   attempt: z.number().int().positive(),
   errorCode: ErrorCodeSchema.nullable(),
   error: z.string().nullable(),
@@ -214,6 +218,7 @@ export const ScheduleJobSchema = z.object({
   name: z.string().min(1),
   time: ScheduleTimeSchema,
   itemCount: z.number().int().positive(),
+  bgmFile: z.string().nullable().optional(),
   enabled: z.boolean(),
   installed: z.boolean(),
   lastRunId: z.string().nullable(),

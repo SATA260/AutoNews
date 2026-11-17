@@ -3,8 +3,8 @@ import type { ValidationWarning } from '../schema/newsSchema';
 /** 页面在整期新闻中的角色类型 */
 export type DeckPageType = 'cover' | 'news' | 'outro';
 
-/** 翻页过渡动画样式：立体翻页、层叠滑移、折页快门、无动效 */
-export type DeckTransitionStyle = 'flip' | 'glide' | 'shutter' | 'none';
+/** 翻页过渡动画样式：纸张滑移、轻柔翻页、平滑叠化、无动效 */
+export type DeckTransitionStyle = 'glide' | 'flip' | 'fade' | 'none';
 
 /** 外部脚本或控制台查询的当前播放状态 */
 export interface DeckBridgeState {
@@ -63,17 +63,17 @@ export function clampPageIndex(index: number, totalPages: number): number {
   return Math.min(safeTotal - 1, Math.max(0, rounded));
 }
 
-/** 解析网址参数或配置中的翻页动效名称，未知值默认启用立体翻页 */
+/** 解析网址参数或配置中的翻页动效名称，未知值默认启用纸张滑移 */
 export function parseTransitionStyle(raw: string | null | undefined): DeckTransitionStyle {
   const normalized = (raw ?? '').trim().toLowerCase();
   if (normalized === 'none') {
     return 'none';
   }
-  if (normalized === 'glide' || normalized === 'slide') {
-    return 'glide';
+  if (normalized === 'flip') {
+    return 'flip';
   }
-  if (normalized === 'shutter') {
-    return 'shutter';
+  if (normalized === 'fade' || normalized === 'shutter' || normalized === 'dissolve') {
+    return 'fade';
   }
-  return 'flip';
+  return 'glide';
 }

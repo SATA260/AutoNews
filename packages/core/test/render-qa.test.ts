@@ -59,6 +59,8 @@ async function setupRenderWorkspace(templateName: 'solid-color' | 'daily-deck') 
   const settingsFile = path.join(rootDir, 'config', 'settings.yaml');
   await editSettingsFile(settingsFile, (doc) => {
     doc.setIn(['ai', 'providers'], {});
+    doc.setIn(['tts', 'provider'], 'silent');
+    doc.deleteIn(['issue', 'minScore']);
   });
   await updateSettingsFile(settingsFile, {
     clis: {

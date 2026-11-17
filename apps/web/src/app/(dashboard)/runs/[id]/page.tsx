@@ -10,6 +10,7 @@ import Link from 'next/link';
 import { notFound } from 'next/navigation';
 import { PublishControls } from '@/components/PublishControls';
 import { RunCancelButton } from '@/components/RunCancelAndItemActions';
+import { MediaAdjustments } from '@/components/run-detail/MediaAdjustments';
 import { RunItemsTab } from '@/components/run-detail/RunItemsTab';
 import { RunLlmTab } from '@/components/run-detail/RunLlmTab';
 import { RunMediaTab } from '@/components/run-detail/RunMediaTab';
@@ -115,7 +116,9 @@ export default async function RunDetailPage({
             </div>
             <h2 className="font-mono text-xl font-bold text-slate-900">{detail.id}</h2>
             <div className="flex flex-wrap gap-x-5 gap-y-1 text-xs text-slate-600">
-              <span>目标条数：{detail.itemCount} 条</span>
+              <span>最多播报：{detail.itemCount} 条</span>
+              {detail.hostId ? <span>主播：{detail.hostId}</span> : null}
+              {detail.bgmFile ? <span>背景音乐：{detail.bgmFile}</span> : null}
               <span>执行轮次：第 {detail.attempt} 轮</span>
               <span>
                 当前步骤：{detail.currentStage ? STAGE_LABELS[detail.currentStage] : '未开始'}
@@ -309,6 +312,30 @@ export default async function RunDetailPage({
                       <p key={w}>{w}</p>
                     ))}
                   </div>
+                ) : null}
+                {detail.status === 'awaiting_review' ? (
+                  <MediaAdjustments
+                    runId={detail.id}
+                    items={detail.items
+                      .filter((item) => item.position !== null)
+                      .map((item) => ({
+                        id: item.id,
+                        title: item.finalJson?.title ?? item.id,
+                        imageMode: item.imageMode,
+                      }))}
+                    bgmFiles={await core.tasks.listBgm()}
+                    bgmFile={detail.bgmFile}
+                  />
+                ) : null}
+                {timeline ? (
+                  <section className="rounded-xl border border-slate-200 bg-white p-5">
+                    <h3 className="font-semibold">本期口播稿</h3>
+                    <p className="mt-2 whitespace-pre-line text-sm">
+                      {timeline.sections
+                        .flatMap((section) => section.sentences.map((sentence) => sentence.text))
+                        .join('\n')}
+                    </p>
+                  </section>
                 ) : null}
                 <RunMediaTab
                   runId={detail.id}

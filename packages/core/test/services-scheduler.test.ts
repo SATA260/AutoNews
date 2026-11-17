@@ -98,6 +98,8 @@ async function setupServiceWorkspace(feedBaseUrl: string) {
 
   await editSettingsFile(path.join(rootDir, 'config', 'settings.yaml'), (doc) => {
     doc.setIn(['ai', 'providers'], {});
+    doc.setIn(['tts', 'provider'], 'silent');
+    doc.deleteIn(['issue', 'minScore']);
   });
   await updateSettingsFile(path.join(rootDir, 'config', 'settings.yaml'), {
     clis: {
@@ -469,7 +471,10 @@ describe('M8 services, detached worker, launchd scheduler, and doctor', () => {
       /itemCount|正整数/,
     );
 
+    await fs.mkdir(path.join(rootDir, 'assets', 'bgm'), { recursive: true });
+    await fs.writeFile(path.join(rootDir, 'assets', 'bgm', 'morning.mp3'), 'test');
     const job = await core.scheduler.create({
+      bgmFile: 'morning.mp3',
       name: '上午八点半',
       time: '08:30',
       itemCount: 6,
@@ -482,6 +487,9 @@ describe('M8 services, detached worker, launchd scheduler, and doctor', () => {
     expect(plistXml).toContain('<integer>30</integer>');
     expect(plistXml).toContain('apps/cli/dist/index.js');
     expect(plistXml).toContain(`<string>${job.id}</string>`);
+    expect(job.bgmFile).toBe('morning.mp3');
+    expect(plistXml).toContain('<string>--bgm</string>');
+    expect(plistXml).toContain('<string>morning.mp3</string>');
     expect(launchctlCalls.some((c) => c[0] === 'bootstrap')).toBe(true);
 
     // 修改时间为当天已过的 07:00 CST -> 次日 07:00 CST = 前一天 UTC 23:00

@@ -26,6 +26,7 @@ const TRIGGER_TEXT: Record<Trigger, string> = {
 export default async function DashboardPage() {
   const core = await getCore();
   const settings = core.config.getSettings();
+  const bgmFiles = await core.tasks.listBgm();
   const [recentRuns, sourceHealth, schedules] = await Promise.all([
     core.tasks.list({ limit: 10 }),
     core.sources.list(),
@@ -63,7 +64,7 @@ export default async function DashboardPage() {
             ）
           </p>
         </div>
-        <StartRunModalButton label="手动启动一期任务" />
+        <StartRunModalButton bgmFiles={bgmFiles} label="手动启动一期任务" />
       </div>
 
       {reviewPendingRuns.length > 0 && (

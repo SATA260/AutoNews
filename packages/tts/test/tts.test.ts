@@ -209,3 +209,13 @@ describe('@aidaily/tts', () => {
     expect(healedOut[0]?.speechMs).toBeGreaterThan(0);
   });
 });
+
+describe('口播文字清洗', () => {
+  it('保留英文词组空格，移除中英之间的空格、括号和干扰符号', async () => {
+    const { sanitizeNarrationSentence } = await import('../src/index.js');
+    expect(sanitizeNarrationSentence('今天 Open AI 发布了 新模型（注释）～ ♪')).toBe(
+      '今天Open AI发布了新模型。',
+    );
+    expect(sanitizeNarrationSentence('这是测试！')).toBe('这是测试!');
+  });
+});

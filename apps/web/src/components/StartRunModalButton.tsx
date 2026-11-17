@@ -5,7 +5,13 @@ import { useState, useTransition } from 'react';
 import { startRunAction } from '@/app/actions';
 
 /** 打开「立即运行」弹窗的按钮与表单组件（必须由用户显式填写正整数条数，不预填任何默认值） */
-export function StartRunModalButton({ label = '立即运行' }: { label?: string }) {
+export function StartRunModalButton({
+  label = '立即运行',
+  bgmFiles = [],
+}: {
+  label?: string;
+  bgmFiles?: string[];
+}) {
   const router = useRouter();
   const [open, setOpen] = useState(false);
   const [itemCountInput, setItemCountInput] = useState('');
@@ -51,7 +57,7 @@ export function StartRunModalButton({ label = '立即运行' }: { label?: string
           <div className="w-full max-w-md rounded-xl border border-slate-200 bg-white p-6 shadow-xl">
             <h2 className="text-lg font-semibold text-slate-900">立即运行一期 AI 每日报</h2>
             <p className="mt-1 text-sm text-slate-600">
-              系统不预设默认新闻条数，请手动指定本期最终要产出并播报的新闻数量。
+              请指定本期最多播报的新闻数量，系统会根据新闻质量选择。
             </p>
             <form onSubmit={handleSubmit} className="mt-4 space-y-4">
               <div>
@@ -59,7 +65,7 @@ export function StartRunModalButton({ label = '立即运行' }: { label?: string
                   htmlFor="start-run-items"
                   className="block text-sm font-medium text-slate-700"
                 >
-                  本期新闻条数 *
+                  本期新闻条数上限 *
                 </label>
                 <input
                   id="start-run-items"
@@ -75,6 +81,42 @@ export function StartRunModalButton({ label = '立即运行' }: { label?: string
                 />
               </div>
 
+              <div>
+                <label
+                  htmlFor="start-run-host"
+                  className="block text-sm font-medium text-slate-700"
+                >
+                  主播
+                </label>
+                <select
+                  id="start-run-host"
+                  name="hostId"
+                  className="mt-1.5 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm"
+                >
+                  <option value="">自动选择</option>
+                  <option value="deepseek">DeepSeek 娘</option>
+                  <option value="gpt">GPT 娘</option>
+                  <option value="gemini">Gemini 娘</option>
+                  <option value="claude">Claude 娘</option>
+                </select>
+              </div>
+              <div>
+                <label htmlFor="start-run-bgm" className="block text-sm font-medium text-slate-700">
+                  背景音乐
+                </label>
+                <select
+                  id="start-run-bgm"
+                  name="bgmFile"
+                  className="mt-1.5 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm"
+                >
+                  <option value="">自动选择</option>
+                  {bgmFiles.map((file) => (
+                    <option key={file} value={file}>
+                      {file}
+                    </option>
+                  ))}
+                </select>
+              </div>
               {errorMsg && (
                 <div className="rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-700">
                   {errorMsg}

@@ -4,6 +4,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
+  HostMascotIdSchema,
   PIPELINE_STAGES,
   type RunStatus,
   RunStatusSchema,
@@ -296,12 +297,21 @@ export function buildProgram(io: CliIo = DEFAULT_IO, onExitCode?: (code: number)
     .command('run')
     .description('生成并运行一期 AI 每日报任务（必须通过 -n 指定新闻条数）')
     .requiredOption('-n, --items <N>', '本期新闻条数（必填正整数，无默认值）')
+    .option('--host <id>', '指定主播：deepseek、gpt、gemini 或 claude')
+    .option('--bgm <file>', '指定曲库中的背景音乐文件名')
     .option('--detach', '在后台独立工作进程中执行并立即返回', false)
     .option('--trigger <trigger>', '触发来源 (manual-cli | manual-web | schedule)', 'manual-cli')
     .option('--schedule-id <id>', '关联定时任务 ID')
     .action(
       async (
-        opts: { items: string; detach: boolean; trigger: string; scheduleId?: string },
+        opts: {
+          items: string;
+          detach: boolean;
+          trigger: string;
+          scheduleId?: string;
+          host?: string;
+          bgm?: string;
+        },
         cmd: Command,
       ) => {
         const gOpts = getGlobals(cmd);
@@ -316,12 +326,16 @@ export function buildProgram(io: CliIo = DEFAULT_IO, onExitCode?: (code: number)
           );
         }
         const trigger: Trigger = triggerResult.data;
+        const host = opts.host ? HostMascotIdSchema.safeParse(opts.host) : null;
+        if (host && !host.success) throw new CliUsageError('无效的主播标识');
 
         const code = await withCore(gOpts, async (core) => {
           try {
             if (opts.detach) {
               const { runId } = await core.tasks.start({
                 itemCount,
+                hostId: host?.success ? host.data : undefined,
+                bgmFile: opts.bgm,
                 trigger,
                 scheduleId: opts.scheduleId,
                 detach: true,
@@ -342,6 +356,8 @@ export function buildProgram(io: CliIo = DEFAULT_IO, onExitCode?: (code: number)
             try {
               const res = await core.tasks.start({
                 itemCount,
+                hostId: host?.success ? host.data : undefined,
+                bgmFile: opts.bgm,
                 trigger,
                 scheduleId: opts.scheduleId,
                 detach: false,
@@ -1029,10 +1045,11 @@ export function buildProgram(io: CliIo = DEFAULT_IO, onExitCode?: (code: number)
     .requiredOption('--time <HH:mm>', '每日执行时间（24 小时制 HH:mm，必填）')
     .requiredOption('-n, --items <N>', '每次抓取制作的新闻条数（正整数，必填）')
     .option('--name <name>', '自定义定时任务名称')
+    .option('--bgm <file>', '指定曲库中的背景音乐文件名')
     .option('--disabled', '创建后先保持停用状态，暂不挂载到系统调度器', false)
     .action(
       async (
-        opts: { time: string; items: string; name?: string; disabled: boolean },
+        opts: { time: string; items: string; name?: string; bgm?: string; disabled: boolean },
         cmd: Command,
       ) => {
         const gOpts = getGlobals(cmd);
@@ -1051,6 +1068,7 @@ export function buildProgram(io: CliIo = DEFAULT_IO, onExitCode?: (code: number)
             name: opts.name,
             time: timeRes.data,
             itemCount,
+            bgmFile: opts.bgm,
             enabled: !opts.disabled,
           });
           print(job, formatSchedulesTable([job], core.config.getSettings().timezone));
@@ -1066,13 +1084,21 @@ export function buildProgram(io: CliIo = DEFAULT_IO, onExitCode?: (code: number)
     .argument('<id>', '定时任务 ID')
     .option('--name <name>', '新的任务名称')
     .option('--time <HH:mm>', '新的每日触发时间（HH:mm）')
-    .option('-n, --items <N>', '新的每期新闻条数')
+    .option('-n, --items <N>', '新的每期新闻条数上限')
+    .option('--bgm <file>', '曲库文件名；传 auto 恢复自动选择')
     .option('--enable', '启用并挂载到系统调度器', false)
     .option('--disable', '停用并从系统调度器卸载', false)
     .action(
       async (
         id: string,
-        opts: { name?: string; time?: string; items?: string; enable: boolean; disable: boolean },
+        opts: {
+          name?: string;
+          time?: string;
+          items?: string;
+          bgm?: string;
+          enable: boolean;
+          disable: boolean;
+        },
         cmd: Command,
       ) => {
         const gOpts = getGlobals(cmd);
@@ -1100,6 +1126,7 @@ export function buildProgram(io: CliIo = DEFAULT_IO, onExitCode?: (code: number)
             name: opts.name,
             time: nextTime,
             itemCount: nextItems,
+            bgmFile: opts.bgm === 'auto' ? null : opts.bgm,
             enabled: nextEnabled,
           });
           print(updated, formatSchedulesTable([updated], core.config.getSettings().timezone));

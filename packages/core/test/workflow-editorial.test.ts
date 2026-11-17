@@ -5,7 +5,7 @@ import { fileURLToPath } from 'node:url';
 import type { Timeline } from '@aidaily/contracts';
 import { probeAudioDurationMs, type TtsProvider, TtsService } from '@aidaily/tts';
 import { execa } from 'execa';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   abandonRun,
   cancelRun,
@@ -24,6 +24,7 @@ import {
   updateSettingsFile,
   updateSourcesFile,
 } from '../src/index.js';
+import { runNarrateStage } from '../src/media/narration.js';
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..', '..');
 const FAKE_AGY_BIN = path.resolve(
@@ -67,6 +68,8 @@ async function setupWorkflowWorkspace(
   const settingsFile = path.join(rootDir, 'config', 'settings.yaml');
   await editSettingsFile(settingsFile, (doc) => {
     doc.setIn(['ai', 'providers'], {});
+    doc.setIn(['tts', 'provider'], 'silent');
+    doc.deleteIn(['issue', 'minScore']);
   });
   await updateSettingsFile(settingsFile, {
     clis: {
@@ -763,4 +766,157 @@ describe('editorial workflow, TTS timeline, interruption recovery, and retry eng
 
     await core.close();
   }, 30_000);
+
+  it('允许少于上限的新闻继续制作，并在没有重点新闻时跳过', async () => {
+    const { rootDir } = await setupWorkflowWorkspace();
+    await updateSettingsFile(path.join(rootDir, 'config', 'settings.yaml'), {
+      issue: { minScore: 7.5 },
+    });
+    await fs.copyFile(
+      path.join(REPO_ROOT, 'config', 'personas.yaml'),
+      path.join(rootDir, 'config', 'personas.yaml'),
+    );
+    const core = await createCore({
+      rootDir,
+      now: () => new Date('2026-11-16T10:00:00.000Z'),
+      fetchImpl: makeFeedMockFetch([
+        {
+          slug: 'important',
+          title: '重要人工智能进展',
+          pubDate: 'Mon, 16 Nov 2026 09:00:00 GMT',
+          body: '有关团队公布一项人工智能进展，并说明目前的使用范围。',
+        },
+      ]),
+    });
+    try {
+      const runId = createRun(core.context, { itemCount: 5, trigger: 'manual-cli' });
+      await executeRun(core.context, runId, { stopAfterStage: 'package' });
+      const events = core.context.repos.events.listByRun(runId);
+      expect(events.filter((event) => event.role === 'primary')).toHaveLength(1);
+      expect(
+        core.context.repos.runItems.listByRun(runId).filter((item) => item.status === 'passed'),
+      ).toHaveLength(1);
+      expect(core.context.repos.runs.getById(runId)?.hostId).toBe('gpt');
+      expect(
+        await fs.readFile(path.join(core.context.paths.runDir(runId), 'narration.txt'), 'utf8'),
+      ).toContain('\n');
+      const packageCheckpoint = await readJsonOrNull<PackageCheckpoint>(
+        path.join(core.context.paths.runDir(runId), 'stages', 'package.json'),
+      );
+      expect(packageCheckpoint).not.toBeNull();
+      if (!packageCheckpoint) throw new Error('缺少整期编排结果');
+      const synthesize = vi
+        .spyOn(core.context.tts, 'synthesizeSections')
+        .mockImplementation(async (sections, outDir) =>
+          sections.map((section) => ({
+            key: section.key,
+            file: path.join(outDir, `${section.key}.wav`),
+            speechMs: section.kind === 'item' ? 60_001 : 120_001,
+            sentences: section.sentences.map((text) => ({ text, offsetMs: 0, durationMs: 1 })),
+          })),
+        );
+      try {
+        const { timeline } = await runNarrateStage({
+          ctx: core.context,
+          runId,
+          settings: core.context.settings,
+          packageData: packageCheckpoint.packageData,
+        });
+        expect(timeline.totalMs).toBeGreaterThan(300_000);
+        expect(
+          timeline.sections.find((section) => section.kind === 'item')?.pageMs,
+        ).toBeGreaterThan(60_000);
+      } finally {
+        synthesize.mockRestore();
+      }
+      const item = core.context.repos.runItems
+        .listByRun(runId)
+        .find((entry) => entry.status === 'passed');
+      expect(item).toBeDefined();
+      if (!item) throw new Error('缺少已过审条目');
+      core.context.repos.runs.updateStatus(runId, 'awaiting_review');
+      await core.tasks.setItemImage(runId, item.id, { mode: 'none' });
+      expect(core.context.repos.runItems.getById(item.id)?.imageMode).toBe('none');
+      await expect(
+        core.tasks.setItemImage(runId, item.id, {
+          mode: 'custom',
+          data: Buffer.from('not an image'),
+        }),
+      ).rejects.toThrow();
+      const png = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 0]);
+      await core.tasks.setItemImage(runId, item.id, {
+        mode: 'custom',
+        data: png,
+        caption: '官方图示',
+      });
+      const changed = core.context.repos.runItems.getById(item.id);
+      expect(changed?.imageMode).toBe('custom');
+      expect(changed?.customImageCaption).toBe('官方图示');
+      expect(changed?.customImagePath).toMatch(/^custom-assets/);
+      await expect(core.tasks.setBgm(runId, '../bad.mp3')).rejects.toThrow();
+      const next = createRun(core.context, { itemCount: 5, trigger: 'manual-cli' });
+      await executeRun(core.context, next);
+      expect(core.context.repos.runs.getById(next)?.status).toBe('skipped');
+      expect(
+        core.context.repos.runStages.listByRun(next).find((stage) => stage.stage === 'narrate')
+          ?.status,
+      ).toBe('skipped');
+    } finally {
+      await core.close();
+    }
+  });
+
+  it.skipIf(process.env.AIDAILY_QWEN_LIVE !== '1')(
+    '以本地语音和视频模板生成隔离测试成片',
+    async () => {
+      const { rootDir } = await setupWorkflowWorkspace();
+      await fs.cp(path.join(REPO_ROOT, 'assets'), path.join(rootDir, 'assets'), {
+        recursive: true,
+      });
+      await fs.copyFile(
+        path.join(REPO_ROOT, 'config', 'personas.yaml'),
+        path.join(rootDir, 'config', 'personas.yaml'),
+      );
+      await updateSettingsFile(path.join(rootDir, 'config', 'settings.yaml'), {
+        issue: { minScore: 7.5 },
+        tts: { provider: 'qwen-local' },
+        template: {
+          active: 'daily-deck',
+          registry: {
+            'daily-deck': {
+              dir: path.join(REPO_ROOT, 'templates', 'daily-deck'),
+              adapter: 'daily-deck',
+            },
+          },
+        },
+      });
+      const core = await createCore({
+        rootDir,
+        now: () => new Date('2026-11-16T10:00:00.000Z'),
+        fetchImpl: makeFeedMockFetch([
+          {
+            slug: 'live-sample',
+            title: '人工智能技术发布更新',
+            pubDate: 'Mon, 16 Nov 2026 09:00:00 GMT',
+            body: '有关团队公布一项人工智能进展，并说明目前的使用范围。',
+          },
+        ]),
+      });
+      try {
+        const runId = createRun(core.context, { itemCount: 1, trigger: 'manual-cli' });
+        await executeRun(core.context, runId);
+        expect(core.context.repos.runs.getById(runId)?.status).toBe('awaiting_review');
+        const qa = await core.tasks.readArtifactJson<{ passed: boolean }>(runId, 'qa.json');
+        expect(qa?.passed).toBe(true);
+        await fs.mkdir(path.join(REPO_ROOT, 'tmp'), { recursive: true });
+        await fs.copyFile(
+          path.join(core.context.paths.runDir(runId), 'output', 'video.mp4'),
+          path.join(REPO_ROOT, 'tmp', '本地语音联调示例.mp4'),
+        );
+      } finally {
+        await core.close();
+      }
+    },
+    240_000,
+  );
 });

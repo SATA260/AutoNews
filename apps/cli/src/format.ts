@@ -13,6 +13,7 @@ import type {
 const RUN_STATUS_LABELS: Record<string, string> = {
   queued: '排队中',
   running: '运行中',
+  skipped: '已跳过',
   failed: '已失败',
   cancelled: '已取消',
   interrupted: '已中断',

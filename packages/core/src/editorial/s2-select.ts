@@ -1,8 +1,10 @@
 import crypto from 'node:crypto';
 import type { EventRecord, RunItemRecord, Settings } from '@aidaily/contracts';
+import { collectSources } from '../collector/index.js';
 import type { CoreContext } from '../context.js';
 import { PipelineError } from '../errors.js';
 import { inTransaction } from '../storage/db.js';
+import { chooseHost, loadPersonas } from './personas.js';
 import { runRefillRound } from './refill.js';
 import { selectCandidateEvents } from './selection-core.js';
 
@@ -43,7 +45,7 @@ export async function runSelectStage(
   ).toISOString();
   const targetCount = itemCount * settings.issue.reserveFactor;
 
-  const initialSelection = await selectCandidateEvents({
+  let initialSelection = await selectCandidateEvents({
     ctx,
     runId,
     settings,
@@ -53,6 +55,30 @@ export async function runSelectStage(
     itemCount,
     signal,
   });
+
+  let modernBackupUsed = false;
+  if (
+    settings.issue.minScore !== undefined &&
+    initialSelection.selected.length === 0 &&
+    settings.issue.refill.useBackupSources
+  ) {
+    modernBackupUsed = true;
+    try {
+      await collectSources(ctx, { pool: 'backup', runId, signal, settings });
+    } catch (error) {
+      if (!(error instanceof PipelineError && error.code === 'collect_all_failed')) throw error;
+    }
+    initialSelection = await selectCandidateEvents({
+      ctx,
+      runId,
+      settings,
+      sinceIso,
+      includeExpired: false,
+      targetCount,
+      itemCount,
+      signal,
+    });
+  }
 
   const nowIso = ctx.now().toISOString();
   const allEvents: EventRecord[] = [];
@@ -113,7 +139,9 @@ export async function runSelectStage(
   let refillRoundsUsed = 0;
   for (
     let round = 1;
-    round <= settings.issue.refill.maxRounds && allEvents.length < itemCount;
+    settings.issue.minScore === undefined &&
+    round <= settings.issue.refill.maxRounds &&
+    allEvents.length < itemCount;
     round++
   ) {
     if (signal?.aborted) {
@@ -135,12 +163,30 @@ export async function runSelectStage(
     allItems.push(...refillRes.addedItems);
   }
 
-  if (allEvents.length < itemCount) {
+  if (settings.issue.minScore === undefined && allEvents.length < itemCount) {
     throw new PipelineError(
       'insufficient_items',
       `候选新闻事件不足：目标 ${itemCount} 条，经 ${refillRoundsUsed} 轮补充后仍仅有 ${allEvents.length} 条`,
     );
   }
+
+  const personas = await loadPersonas(ctx);
+  const previous = ctx.db
+    .prepare(
+      'SELECT host_id FROM runs WHERE id != ? AND host_id IS NOT NULL ORDER BY created_at DESC LIMIT 1',
+    )
+    .get(runId) as { host_id: string } | undefined;
+  const current = ctx.db.prepare('SELECT host_id FROM runs WHERE id = ?').get(runId) as {
+    host_id: string | null;
+  };
+  const host =
+    current.host_id ??
+    chooseHost(
+      allEvents.filter((event) => event.role === 'primary'),
+      personas,
+      previous?.host_id ?? null,
+    );
+  if (host) ctx.db.prepare('UPDATE runs SET host_id = ? WHERE id = ?').run(host, runId);
 
   const primaryCount = allEvents.filter((e) => e.role === 'primary').length;
   const reserveCount = allEvents.length - primaryCount;
@@ -150,6 +196,6 @@ export async function runSelectStage(
     primaryCount,
     reserveCount,
     eventIds: allEvents.map((e) => e.id),
-    refillRoundsUsed,
+    refillRoundsUsed: modernBackupUsed ? 1 : refillRoundsUsed,
   };
 }

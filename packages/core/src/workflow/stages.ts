@@ -40,7 +40,7 @@ export const STAGE_ARTIFACTS: Record<PipelineStage, readonly string[]> = {
   collect: ['stages/collect.json'],
   select: ['stages/select.json'],
   edit: ['stages/edit.json', 'items'],
-  package: ['stages/package.json'],
+  package: ['stages/package.json', 'narration.txt'],
   narrate: ['stages/narrate.json', 'timeline.json', 'audio'],
   render: [
     'stages/render.json',

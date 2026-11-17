@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import type { IssuePackage, PolishedItem } from './editorial.js';
 import type { Timeline } from './media.js';
+import type { HostMascotId } from './persona.js';
 
 /** 视频模板各个画面文本区域的字数限制配置 */
 export const ContentLimitsSchema = z.object({
@@ -35,6 +36,8 @@ export interface RenderableNewsItem extends PolishedItem {
 
 /** 传递给前端视频模板的整期结构化渲染数据 */
 export interface RenderableIssue {
+  hostId?: HostMascotId;
+  hostMascotPath?: string;
   date: string;
   issueNumber: string;
   headline: string;

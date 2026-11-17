@@ -126,6 +126,8 @@ async function setupCliWorkspace(feedBaseUrl: string) {
   const tempSettingsPath = path.join(rootDir, 'config', 'settings.yaml');
   await editSettingsFile(tempSettingsPath, (doc) => {
     doc.setIn(['ai', 'providers'], {});
+    doc.setIn(['tts', 'provider'], 'silent');
+    doc.deleteIn(['issue', 'minScore']);
   });
   await updateSettingsFile(tempSettingsPath, {
     clis: {

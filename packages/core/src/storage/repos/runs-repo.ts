@@ -1,5 +1,6 @@
 import {
   type ErrorCode,
+  HostMascotIdSchema,
   PIPELINE_STAGES,
   type RunEvent,
   type RunEventLevel,
@@ -33,6 +34,8 @@ interface RunRow {
   status: RunStatus;
   current_stage: Stage | null;
   item_count: number;
+  host_id: string | null;
+  bgm_file: string | null;
   config_snapshot: string;
   cancel_requested: number;
   attempt: number;
@@ -97,6 +100,8 @@ function mapRunSummary(row: RunRow): RunSummary {
     status: row.status,
     currentStage: row.current_stage,
     itemCount: row.item_count,
+    hostId: HostMascotIdSchema.safeParse(row.host_id).data ?? null,
+    bgmFile: row.bgm_file,
     attempt: row.attempt,
     errorCode: row.error_code,
     error: row.error,

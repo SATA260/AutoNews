@@ -1,4 +1,3 @@
-import React from 'react';
 import {
   AlertTriangle,
   BookOpen,
@@ -12,6 +11,7 @@ import {
   Play,
   Sun,
 } from 'lucide-react';
+import type React from 'react';
 import type { DeckTransitionStyle } from '../../bridge/videoSynthBridge';
 
 /** 底部预览控制栏组件入参属性 */
@@ -34,9 +34,9 @@ export interface DeckControlsProps {
 }
 
 const TRANSITION_LABELS: Record<DeckTransitionStyle, string> = {
-  flip: '立体翻页 (T)',
-  glide: '层叠滑移 (T)',
-  shutter: '折页快门 (T)',
+  glide: '纸张滑移 (T)',
+  flip: '轻柔翻页 (T)',
+  fade: '平滑叠化 (T)',
   none: '无动效 (T)',
 };
 
@@ -119,12 +119,7 @@ export const DeckControls: React.FC<DeckControlsProps> = ({
           <span>{TRANSITION_LABELS[transitionStyle]}</span>
         </button>
 
-        <button
-          type="button"
-          className="ctrl-btn"
-          onClick={onToggleTheme}
-          title="切换主题风格"
-        >
+        <button type="button" className="ctrl-btn" onClick={onToggleTheme} title="切换主题风格">
           {theme === 'light' ? <Moon size={16} /> : <Sun size={16} />}
           <span>{theme === 'light' ? '深色风格' : '浅色风格'}</span>
         </button>

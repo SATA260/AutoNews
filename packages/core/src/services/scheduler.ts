@@ -9,6 +9,7 @@ import { TZDate } from '@date-fns/tz';
 import { addDays } from 'date-fns';
 import { execa } from 'execa';
 import type { CoreContext } from '../context.js';
+import { listBgmFiles } from '../media/bgm.js';
 import { writeFileAtomic } from '../storage/files.js';
 
 const SAFE_SCHEDULE_ID_PATTERN = /^[a-zA-Z0-9._-]+$/;
@@ -18,6 +19,7 @@ export interface CreateScheduleInput {
   name?: string;
   time: string;
   itemCount: number;
+  bgmFile?: string | null;
   enabled?: boolean;
 }
 
@@ -26,6 +28,7 @@ export interface UpdateSchedulePatch {
   name?: string;
   time?: string;
   itemCount?: number;
+  bgmFile?: string | null;
   enabled?: boolean;
 }
 
@@ -120,6 +123,7 @@ export function buildLaunchAgentPlist(opts: {
   id: string;
   time: string;
   itemCount: number;
+  bgmFile?: string | null;
   rootDir: string;
   logsDir: string;
   cliScriptPath: string;
@@ -160,6 +164,7 @@ export function buildLaunchAgentPlist(opts: {
     'schedule',
     '--schedule-id',
     opts.id,
+    ...(opts.bgmFile ? ['--bgm', opts.bgmFile] : []),
   ];
 
   const argLines = programArgs.map((arg) => `      <string>${escapeXml(arg)}</string>`).join('\n');
@@ -290,6 +295,7 @@ export function createSchedulerService(
         id: row.id,
         time: row.time,
         itemCount: row.itemCount,
+        bgmFile: row.bgmFile,
         rootDir: ctx.paths.rootDir,
         logsDir: ctx.paths.logsDir,
         cliScriptPath: resolveCliScriptPath(ctx.paths.rootDir, opts?.cliScriptPath),
@@ -323,6 +329,8 @@ export function createSchedulerService(
         );
       }
 
+      if (input.bgmFile && !(await listBgmFiles(ctx)).includes(input.bgmFile))
+        throw new Error('指定的背景音乐不在曲库中');
       const name = input.name?.trim() || `每日定时任务 ${time}`;
       const enabled = input.enabled ?? true;
       const id = `sched-${crypto.randomBytes(4).toString('hex')}`;
@@ -333,6 +341,7 @@ export function createSchedulerService(
         name,
         time,
         itemCount: input.itemCount,
+        bgmFile: input.bgmFile,
         enabled,
         now: nowIso,
       });
@@ -363,6 +372,8 @@ export function createSchedulerService(
       ) {
         throw new RangeError(`每期新闻条数必须为正整数，当前传入: ${String(patch.itemCount)}`);
       }
+      if (patch.bgmFile && !(await listBgmFiles(ctx)).includes(patch.bgmFile))
+        throw new Error('指定的背景音乐不在曲库中');
       const nextName = patch.name !== undefined ? patch.name.trim() : undefined;
       if (nextName !== undefined && !nextName) {
         throw new Error('定时任务名称不能为空');
@@ -372,6 +383,7 @@ export function createSchedulerService(
         name: nextName,
         time: nextTime,
         itemCount: patch.itemCount,
+        bgmFile: patch.bgmFile,
         enabled: patch.enabled,
         now: ctx.now().toISOString(),
       });
@@ -387,6 +399,7 @@ export function createSchedulerService(
           name: existing.name,
           time: existing.time,
           itemCount: existing.itemCount,
+          bgmFile: existing.bgmFile ?? null,
           enabled: existing.enabled,
           now: ctx.now().toISOString(),
         });

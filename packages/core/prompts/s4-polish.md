@@ -16,3 +16,12 @@
 
 ## 事实摘要草稿（JSON）
 {{summaryDraftJson}}
+
+## 当期主播人设
+{{personaJson}}
+
+屏幕文字保持客观，口播以事实为主，仅以一句自然表达体现角色。禁止波浪号、音符和夸张语气词。
+
+新增 highlight：十八字以内客观结论；preferArticleImage：仅当原图是参数表、跑分图、架构图、实机界面或发言截图时为 true，否则为 false；imageCaption 为可选图注。
+
+{{narrationRules}}

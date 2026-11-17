@@ -13,7 +13,15 @@ import {
 import { formatTimestamp } from '@/lib/format';
 
 /** 定时任务管理交互组件（新建时执行时间与新闻条数均必须空白手动填写） */
-export function ScheduleManager({ jobs, timezone }: { jobs: ScheduleJob[]; timezone: string }) {
+export function ScheduleManager({
+  jobs,
+  timezone,
+  bgmFiles,
+}: {
+  jobs: ScheduleJob[];
+  timezone: string;
+  bgmFiles: string[];
+}) {
   const router = useRouter();
   const [modalOpen, setModalOpen] = useState(false);
   const [editingJob, setEditingJob] = useState<ScheduleJob | null>(null);
@@ -264,7 +272,7 @@ export function ScheduleManager({ jobs, timezone }: { jobs: ScheduleJob[]; timez
                   htmlFor="create-sched-items"
                   className="block text-xs font-medium text-slate-700"
                 >
-                  每期新闻条数 *
+                  每期新闻条数上限 *
                 </label>
                 <input
                   id="create-sched-items"
@@ -278,6 +286,26 @@ export function ScheduleManager({ jobs, timezone }: { jobs: ScheduleJob[]; timez
                   placeholder="例如：6"
                   className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm"
                 />
+              </div>
+              <div>
+                <label
+                  htmlFor="create-sched-bgm"
+                  className="block text-xs font-medium text-slate-700"
+                >
+                  背景音乐
+                </label>
+                <select
+                  id="create-sched-bgm"
+                  name="bgmFile"
+                  className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm"
+                >
+                  <option value="">每次自动选择</option>
+                  {bgmFiles.map((file) => (
+                    <option key={file} value={file}>
+                      {file}
+                    </option>
+                  ))}
+                </select>
               </div>
               <input type="hidden" name="enabled" value="true" />
               <div className="flex justify-end gap-2 pt-2">
@@ -344,7 +372,7 @@ export function ScheduleManager({ jobs, timezone }: { jobs: ScheduleJob[]; timez
                   htmlFor="edit-sched-items"
                   className="block text-xs font-medium text-slate-700"
                 >
-                  每期新闻条数
+                  每期新闻条数上限
                 </label>
                 <input
                   id="edit-sched-items"
@@ -356,6 +384,27 @@ export function ScheduleManager({ jobs, timezone }: { jobs: ScheduleJob[]; timez
                   required
                   className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm"
                 />
+              </div>
+              <div>
+                <label
+                  htmlFor="edit-sched-bgm"
+                  className="block text-xs font-medium text-slate-700"
+                >
+                  背景音乐
+                </label>
+                <select
+                  id="edit-sched-bgm"
+                  name="bgmFile"
+                  defaultValue={editingJob.bgmFile ?? ''}
+                  className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm"
+                >
+                  <option value="">每次自动选择</option>
+                  {bgmFiles.map((file) => (
+                    <option key={file} value={file}>
+                      {file}
+                    </option>
+                  ))}
+                </select>
               </div>
               <div className="flex justify-end gap-2 pt-2">
                 <button

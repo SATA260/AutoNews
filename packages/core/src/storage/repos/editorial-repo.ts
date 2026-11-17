@@ -38,6 +38,9 @@ interface RunItemRow {
   revision: number;
   drop_reason: string | null;
   final_json: string | null;
+  image_mode: 'auto' | 'custom' | 'none';
+  custom_image_path: string | null;
+  custom_image_caption: string | null;
   updated_at: string;
 }
 
@@ -98,6 +101,9 @@ function mapRunItem(row: RunItemRow): RunItemRecord {
     revision: row.revision,
     dropReason: row.drop_reason,
     finalJson: row.final_json ? (JSON.parse(row.final_json) as PolishedItem) : null,
+    imageMode: row.image_mode,
+    customImagePath: row.custom_image_path,
+    customImageCaption: row.custom_image_caption,
     updatedAt: row.updated_at,
   };
 }

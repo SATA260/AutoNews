@@ -1,8 +1,11 @@
+import crypto from 'node:crypto';
 import fsSync from 'node:fs';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import {
   type Article,
+  type HostMascotId,
+  HostMascotIdSchema,
   type ItemVersion,
   type LlmCallRecord,
   PIPELINE_STAGES,
@@ -19,9 +22,10 @@ import {
 } from '@aidaily/contracts';
 import type { CoreContext } from '../context.js';
 import type { EditSubStep } from '../editorial/item-pipeline.js';
+import { listBgmFiles } from '../media/bgm.js';
 import { resolveSafeArtifactPath } from '../paths.js';
 import { inTransaction } from '../storage/db.js';
-import { readJsonOrNull } from '../storage/files.js';
+import { readJsonOrNull, writeFileAtomic } from '../storage/files.js';
 import { spawnDetachedWorker } from '../worker/spawn.js';
 import { emitRunEvent } from '../workflow/events.js';
 import {
@@ -48,6 +52,8 @@ export interface RunArticleWithContent extends Article {
 /** 启动单期生成任务的可选参数 */
 export interface TaskStartOptions {
   itemCount: number;
+  hostId?: HostMascotId;
+  bgmFile?: string;
   trigger?: Trigger;
   scheduleId?: string;
   detach?: boolean;
@@ -76,6 +82,16 @@ export interface TaskWatchOptions {
 
 /** 任务管理服务接口（供命令行工具与网页后台共同调用） */
 export interface TaskService {
+  /** 列出可用于新任务的背景音乐。 */
+  listBgm(): Promise<string[]>;
+  /** 修改待审核任务的配图设置。 */
+  setItemImage(
+    runId: string,
+    itemId: string,
+    input: { mode: 'auto' | 'none' | 'custom'; data?: Uint8Array; caption?: string },
+  ): Promise<void>;
+  /** 修改待审核任务的背景音乐。 */
+  setBgm(runId: string, bgmFile: string): Promise<void>;
   /** 创建并启动新一期视频生产任务（新闻条数必须显式指定为正整数） */
   start(opts: TaskStartOptions): Promise<{ runId: string }>;
   /** 恢复中断或失败的任务，或指定从某个历史步骤重新向后运行 */
@@ -246,6 +262,53 @@ async function startDetachedRetry(
 /** 创建任务管理服务，供命令行和网页后台管理任务、监听事件和读取产物 */
 export function createTaskService(ctx: CoreContext): TaskService {
   return {
+    /** 列出背景音乐文件。 */
+    async listBgm() {
+      return listBgmFiles(ctx);
+    },
+    /** 保存图片后更新条目设置。 */
+    async setItemImage(runId, itemId, input) {
+      if (ctx.repos.runs.getById(runId)?.status !== 'awaiting_review')
+        throw new Error('只有待审核任务可以修改配图');
+      const item = ctx.repos.runItems.getById(itemId);
+      if (!item || item.runId !== runId || item.status !== 'passed')
+        throw new Error('未找到本期已通过的新闻条目');
+      if (!['auto', 'none', 'custom'].includes(input.mode)) throw new Error('图片模式无效');
+      const caption = input.caption?.trim() ?? '';
+      if (Array.from(caption).length > 36) throw new Error('图片说明最多 36 字');
+      let relative: string | null = null;
+      if (input.mode === 'custom') {
+        const bytes = input.data;
+        if (!bytes || bytes.length < 12 || bytes.length > 10 * 1024 * 1024)
+          throw new Error('图片大小须在 10 MB 以内');
+        const data = Buffer.from(bytes);
+        const extension = data.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))
+          ? 'png'
+          : data[0] === 255 && data[1] === 216 && data[2] === 255
+            ? 'jpg'
+            : data.subarray(0, 4).toString('ascii') === 'RIFF' &&
+                data.subarray(8, 12).toString('ascii') === 'WEBP'
+              ? 'webp'
+              : null;
+        if (!extension) throw new Error('图片必须是 PNG、JPEG 或 WebP');
+        relative = path.join('custom-assets', `${crypto.randomUUID()}.${extension}`);
+        await writeFileAtomic(path.join(ctx.paths.runDir(runId), relative), data);
+      }
+      const result = ctx.db
+        .prepare(
+          "UPDATE run_items SET image_mode = ?, custom_image_path = ?, custom_image_caption = ?, updated_at = ? WHERE id = ? AND run_id = ? AND EXISTS (SELECT 1 FROM runs WHERE id = ? AND status = 'awaiting_review')",
+        )
+        .run(input.mode, relative, caption || null, ctx.now().toISOString(), itemId, runId, runId);
+      if (Number(result.changes) !== 1) throw new Error('任务状态已改变，请刷新后重试');
+    },
+    /** 锁定新的背景音乐。 */
+    async setBgm(runId, bgmFile) {
+      if (!(await listBgmFiles(ctx)).includes(bgmFile)) throw new Error('指定的背景音乐不在曲库中');
+      const result = ctx.db
+        .prepare("UPDATE runs SET bgm_file = ? WHERE id = ? AND status = 'awaiting_review'")
+        .run(bgmFile, runId);
+      if (Number(result.changes) !== 1) throw new Error('只有待审核任务可以修改背景音乐');
+    },
     /** 启动新一期生产任务：校验条数必填、查锁排重，并支持前台直跑或分离至后台工作进程 */
     async start(opts: TaskStartOptions): Promise<{ runId: string }> {
       if (!Number.isInteger(opts?.itemCount) || opts.itemCount <= 0) {
@@ -254,6 +317,9 @@ export function createTaskService(ctx: CoreContext): TaskService {
         );
       }
 
+      if (opts.hostId !== undefined) HostMascotIdSchema.parse(opts.hostId);
+      if (opts.bgmFile !== undefined && !(await listBgmFiles(ctx)).includes(opts.bgmFile))
+        throw new Error('指定的背景音乐不在曲库中');
       const trigger: Trigger = opts.trigger ?? 'manual-cli';
 
       try {
@@ -287,6 +353,8 @@ export function createTaskService(ctx: CoreContext): TaskService {
       const runId = inTransaction(ctx.db, () => {
         const createdId = createRun(ctx, {
           itemCount: opts.itemCount,
+          hostId: opts.hostId,
+          bgmFile: opts.bgmFile,
           trigger,
           scheduleId: opts.scheduleId ?? null,
         });

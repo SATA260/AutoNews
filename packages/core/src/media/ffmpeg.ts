@@ -269,7 +269,7 @@ export async function buildMasterAudioWav(opts: {
       const duckMagnitude = Math.abs(opts.bgm.duckDb);
       const bgmFilter =
         `[0:a]aresample=${opts.sampleRate},aformat=sample_fmts=s16:channel_layouts=stereo,` +
-        `atrim=0:${totalSec},asetpts=PTS-STARTPTS,volume=${opts.bgm.volumeDb}dB[bgm_lvl];`;
+        `atrim=0:${totalSec},asetpts=PTS-STARTPTS,volume=${opts.bgm.volumeDb}dB,afade=t=out:st=${Math.max(0, opts.timeline.totalMs / 1000 - 1.5).toFixed(3)}:d=1.5[bgm_lvl];`;
 
       const filterComplex =
         duckMagnitude === 0

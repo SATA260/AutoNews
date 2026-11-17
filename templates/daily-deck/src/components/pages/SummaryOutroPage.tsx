@@ -1,4 +1,4 @@
-import React from 'react';
+import type React from 'react';
 import type { SanitizedDailyIssue } from '../../schema/newsSchema';
 import { AutoFitText } from '../guard/AutoFitText';
 
@@ -9,10 +9,7 @@ export interface SummaryOutroPageProps {
 }
 
 /** 全期总结尾页：按编号列表汇总全部新闻的短标题、梗概与来源，底部附互动收尾提示 */
-export const SummaryOutroPage: React.FC<SummaryOutroPageProps> = ({
-  issue,
-  onJumpToNews,
-}) => {
+export const SummaryOutroPage: React.FC<SummaryOutroPageProps> = ({ issue, onJumpToNews }) => {
   const isDense = issue.items.length > 6;
 
   return (
@@ -40,8 +37,8 @@ export const SummaryOutroPage: React.FC<SummaryOutroPageProps> = ({
               <AutoFitText
                 as="p"
                 text={item.summary}
-                maxFontSize={isDense ? 20 : 24}
-                minFontSize={17}
+                maxFontSize={isDense ? 20 : 23}
+                minFontSize={16}
                 maxLines={isDense ? 1 : 2}
                 lineHeight={1.38}
                 className="outro-row-summary"

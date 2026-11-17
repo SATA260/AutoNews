@@ -10,6 +10,7 @@ export interface NormalizeSegmentOptions {
   sampleRate: number;
   trimSilence: boolean;
   isSilentProvider?: boolean;
+  normalizeLoudness?: boolean;
   ffmpegBin?: string;
   ffprobeBin?: string;
   signal?: AbortSignal;
@@ -148,7 +149,7 @@ export async function normalizeSegmentToWav(opts: NormalizeSegmentOptions): Prom
       if (applyTrim) {
         args.push(
           '-af',
-          'silenceremove=start_periods=1:start_threshold=-45dB:stop_periods=-1:stop_duration=0.15:stop_threshold=-45dB',
+          'silenceremove=start_periods=1:start_duration=0.05:start_threshold=-45dB,areverse,silenceremove=start_periods=1:start_duration=0.05:start_threshold=-45dB,areverse',
         );
       }
       args.push('-ar', String(opts.sampleRate), '-ac', '1', '-c:a', 'pcm_s16le', tmpOut);
@@ -175,6 +176,7 @@ export async function normalizeSegmentToWav(opts: NormalizeSegmentOptions): Prom
     try {
       const trimmedMs = await probeAudioDurationMs(opts.outFile, ffprobeBin, opts.signal);
       if (trimmedMs >= 50) {
+        if (opts.normalizeLoudness) await polishLoudness(opts);
         return;
       }
     } catch {
@@ -183,6 +185,59 @@ export async function normalizeSegmentToWav(opts: NormalizeSegmentOptions): Prom
   }
 
   await convert(false);
+  if (opts.normalizeLoudness) await polishLoudness(opts);
+}
+
+/** 单句先测量响度，再按测量结果归一化并平滑处理音频两端。 */
+async function polishLoudness(opts: NormalizeSegmentOptions): Promise<void> {
+  const ffmpeg = opts.ffmpegBin ?? 'ffmpeg';
+  const duration = await probeAudioDurationMs(opts.outFile, opts.ffprobeBin, opts.signal);
+  const analysis = await execa(
+    ffmpeg,
+    [
+      '-hide_banner',
+      '-i',
+      opts.outFile,
+      '-af',
+      'loudnorm=I=-16:TP=-1.5:LRA=7:print_format=json',
+      '-f',
+      'null',
+      '-',
+    ],
+    { cancelSignal: opts.signal, timeout: DEFAULT_MEDIA_TIMEOUT_MS, reject: false },
+  );
+  if (analysis.isCanceled) throw new DOMException('已取消', 'AbortError');
+  if (analysis.exitCode !== 0) throw new Error(`测量语音响度失败: ${analysis.stderr}`);
+  const match = analysis.stderr.match(/\{[^{}]*"input_i"[^{}]*\}/s);
+  if (!match) throw new Error('无法读取语音响度测量结果');
+  const stats = JSON.parse(match[0]) as Record<string, string>;
+  const values = ['input_i', 'input_tp', 'input_lra', 'input_thresh', 'target_offset'].map((key) =>
+    Number(stats[key]),
+  );
+  if (values.some((value) => !Number.isFinite(value))) throw new Error('语音响度测量结果无效');
+  const filter = `loudnorm=I=-16:TP=-1.5:LRA=7:measured_I=${values[0]}:measured_TP=${values[1]}:measured_LRA=${values[2]}:measured_thresh=${values[3]}:offset=${values[4]}:linear=true,afade=t=in:st=0:d=0.015,afade=t=out:st=${Math.max(0, duration / 1000 - 0.02)}:d=0.02`;
+  await withAtomicWavWrite(opts.outFile, async (tmp) => {
+    const result = await execa(
+      ffmpeg,
+      [
+        '-y',
+        '-i',
+        opts.outFile,
+        '-af',
+        filter,
+        '-ar',
+        String(opts.sampleRate),
+        '-ac',
+        '1',
+        '-c:a',
+        'pcm_s16le',
+        tmp,
+      ],
+      { cancelSignal: opts.signal, timeout: DEFAULT_MEDIA_TIMEOUT_MS, reject: false },
+    );
+    if (result.isCanceled) throw new DOMException('已取消', 'AbortError');
+    if (result.exitCode !== 0) throw new Error(`语音响度处理失败: ${result.stderr}`);
+  });
 }
 
 /** 转义 ffmpeg concat 列表文件里的路径单引号 */

@@ -468,6 +468,7 @@ export async function processSingleItem(opts: {
         articlesById: articlesForPrecheck,
         limits,
         metaTextBlacklist: settings.editorial.metaTextBlacklist,
+        compact: settings.issue.minScore !== undefined,
       });
 
       ctx.repos.runItems.appendVersion({
@@ -642,7 +643,10 @@ export async function runEditStage(
   if (!run) {
     throw new Error(`未找到任务记录: ${runId}`);
   }
-  const itemCount = run.itemCount;
+  const itemCount =
+    settings.issue.minScore === undefined
+      ? run.itemCount
+      : ctx.repos.events.listByRun(runId).filter((event) => event.role === 'primary').length;
   const limits = resolveContentLimits(settings, opts?.limitsOverride);
   const parentSignal = opts?.signal;
 
@@ -695,6 +699,7 @@ export async function runEditStage(
     }
 
     if (pendingQueue.length === 0) {
+      if (settings.issue.minScore !== undefined) break;
       if (nextRefillRound > settings.issue.refill.maxRounds) {
         throw new PipelineError(
           'insufficient_items',

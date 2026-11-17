@@ -131,6 +131,7 @@ export function precheckPolishedItem(opts: {
   articlesById: ReadonlyMap<string, { text: string; publishedAt?: string | null }>;
   limits: ContentLimits;
   metaTextBlacklist: readonly string[];
+  compact?: boolean;
 }): PrecheckResult {
   const errors: string[] = [];
   const warnings: string[] = [];
@@ -240,6 +241,26 @@ export function precheckPolishedItem(opts: {
     if (len > limits.keyPoint) {
       errors.push(`第 ${i + 1} 条核心要点超出字数上限（${len} > ${limits.keyPoint} 字）`);
     }
+  }
+
+  if (opts.compact) {
+    if (charLength(item.title) > 22 || charLength(item.shortTitle) > 16)
+      errors.push('标题或短标题超过新版字数上限');
+    if (!item.highlight || charLength(item.highlight) > 18)
+      errors.push('核心高亮必须为不超过十八字的客观结论');
+    if (
+      item.keyPoints.length < 2 ||
+      item.keyPoints.length > 3 ||
+      item.keyPoints.some((point) => charLength(point) > 15)
+    )
+      errors.push('核心要点须为二到三条，每条不超过十五字');
+    const total = item.narration.reduce((sum, sentence) => sum + charLength(sentence), 0);
+    if (item.narration.length < 4 || item.narration.length > 7 || total < 110 || total > 180)
+      errors.push('口播应为四到七句，总长一百一十到一百八十字');
+    if (item.narration.some((sentence) => charLength(sentence) < 14 || charLength(sentence) > 30))
+      errors.push('每句口播须为十四到三十字');
+    if (item.narration.some((sentence) => /[~～♪♫]|……|呐呐|呢喵/.test(sentence)))
+      errors.push('口播包含不适合语音合成的符号或语气词');
   }
 
   // 4. 检查自我描述黑名单

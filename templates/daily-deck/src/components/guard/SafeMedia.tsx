@@ -1,4 +1,5 @@
-import React, { useEffect, useId, useState } from 'react';
+import type React from 'react';
+import { useEffect, useId, useState } from 'react';
 import { mediaReadyTracker } from '../../utils/mediaReadyTracker';
 
 /** 媒体安全加载组件的入参属性 */
@@ -23,10 +24,10 @@ export const SafeMedia: React.FC<SafeMediaProps> = ({
   style,
 }) => {
   const tokenId = useId();
-  const [failed, setFailed] = useState(false);
+  const [failedSrc, setFailedSrc] = useState<string | null>(null);
+  const hasFailed = Boolean(src) && failedSrc === src;
 
   useEffect(() => {
-    setFailed(false);
     if (!src) {
       return;
     }
@@ -38,7 +39,7 @@ export const SafeMedia: React.FC<SafeMediaProps> = ({
     };
   }, [src, tokenId]);
 
-  if (!src || failed) {
+  if (!src || hasFailed) {
     return <>{fallback}</>;
   }
 
@@ -48,7 +49,7 @@ export const SafeMedia: React.FC<SafeMediaProps> = ({
   };
   const handleError = () => {
     mediaReadyTracker.markSettled(token);
-    setFailed(true);
+    setFailedSrc(src);
     onFallback?.();
   };
 
@@ -75,7 +76,8 @@ export const SafeMedia: React.FC<SafeMediaProps> = ({
       alt={alt}
       className={className}
       style={style}
-      decoding="async"
+      loading="eager"
+      decoding="sync"
       onLoad={handleLoaded}
       onError={handleError}
     />

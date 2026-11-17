@@ -3,9 +3,10 @@ timezone: Asia/Shanghai
 
 issue:
   # 每期条数 N 不在全局设默认值，在新建定时任务或手动触发时显式填写
-  reserveFactor: 2          # 候选事件数 = N × reserveFactor（前 N 个为主选，其余为替补）
-  freshnessHours: 48        # 候选新闻的默认时效
-  itemConcurrency: 3        # 同时处理的条目数
+  reserveFactor: 2 # 兼容旧任务配置
+  minScore: 7.5 # 只播报达到重要性门槛的新闻
+  freshnessHours: 48 # 候选新闻的默认时效
+  itemConcurrency: 3 # 同时处理的条目数
   refill:
     maxRounds: 3
     useBackupSources: true
@@ -13,16 +14,17 @@ issue:
     maxLookbackHours: 96
 
 retry:
-  reservationHoldHours: 48  # 失败/中断/取消的 run 在此时长内可随时重试；到期未重试则自动 abandoned 并释放预留文章
+  reservationHoldHours: 48 # 失败/中断/取消的 run 在此时长内可随时重试；到期未重试则自动 abandoned 并释放预留文章
 
 editorial:
-  maxRevisions: 2           # 核查打回润色的最大轮数
-  sourceMaxChars: 20000     # 单个事件送入模型的原文总字数上限
+  maxRevisions: 2 # 核查打回润色的最大轮数
+  sourceMaxChars: 20000 # 单个事件送入模型的原文总字数上限
   historyDedupDays: 14
   titleSimilarityThreshold: 0.6
-  metaTextBlacklist: ["已依据", "以下是", "根据您提供", "作为AI", "总结如下", "```"]
+  metaTextBlacklist: [ "已依据", "以下是", "根据您提供", "作为AI", "总结如下", "```" ]
 
-contentLimits:              # 默认值取自当前模板，模板适配器可以覆盖
+contentLimits:
+  # 默认值取自当前模板，模板适配器可以覆盖
   headline: 42
   leadSummary: 84
   title: 48
@@ -38,13 +40,22 @@ contentLimits:              # 默认值取自当前模板，模板适配器可�
 ai:
   # cli 填 clis 或 ai.providers 中的调用名称，可在网页设置中逐阶段切换。
   maxConcurrentCalls: 3
-  providers: {}
+  providers:
+    {
+      deepseek官key:
+        {
+          adapter: openai-compatible,
+          baseUrl: https://api.deepseek.com,
+          protocol: responses,
+          apiKeyFile: model-api-0d3230b9-e8ac-496f-9e2c-2f0383eb227b
+        }
+    }
   stages:
-    select:    { cli: agy, model: gemini-3.8-flash-medium, timeoutSec: 300, retries: 2 }
-    summarize: { cli: agy, model: gemini-3.8-flash-high,   timeoutSec: 240, retries: 2 }
-    polish:    { cli: agy, model: gemini-3.8-flash-high,   timeoutSec: 180, retries: 2 }
-    factcheck: { cli: agy, model: gemini-4-carbon-high,    timeoutSec: 300, retries: 2 }
-    package:   { cli: agy, model: gemini-3.8-flash-high,   timeoutSec: 240, retries: 2 }
+    select: { cli: deepseek官key, model: deepseek-flash, timeoutSec: 300, retries: 2 }
+    summarize: { cli: deepseek官key, model: deepseek-flash, timeoutSec: 240, retries: 2 }
+    polish: { cli: deepseek官key, model: deepseek-flash, timeoutSec: 180, retries: 2 }
+    factcheck: { cli: deepseek官key, model: deepseek-flash, timeoutSec: 300, retries: 2 }
+    package: { cli: deepseek官key, model: deepseek-flash, timeoutSec: 240, retries: 2 }
 
 clis:
   codex:
@@ -59,47 +70,56 @@ clis:
     bin: biliup
 
 tts:
-  provider: silent          # v1 仅内置 silent 测试桩；后续注册具体本地/云端 provider 后在此切换
+  provider: qwen-local # 使用 BaoCut 安装的本地 Qwen3-TTS 模型
   providers:
     silent: { charsPerSecond: 4.5 }
+    qwen-local:
+      backend: metal
+      bin: ~/Applications/BaoCut.app/Contents/Resources/bin/audiocpp/audiocpp_server
+      model: ~/.baocut/models/audio-cpp/audio.cpp-gguf-qwen3-tts-1.7b-base/Qwen3-TTS-12Hz-1.7B-Base-GGUF/qwen3-tts-12hz-1.7b-base-q8_0_v2.gguf
+      voices:
+        deepseek: { audio: 'assets/voice/deepseek娘（白露）/白露_qwentts_clean.wav', text: 'assets/voice/deepseek娘（白露）/白露_qwentts_clean.txt' }
+        gpt: { audio: 'assets/voice/gpt娘（阮梅）/阮梅_qwentts_clean.wav', text: 'assets/voice/gpt娘（阮梅）/阮梅_qwentts_clean.txt' }
+        gemini: { audio: 'assets/voice/gemini娘（花火）/花火_qwentts_clean.wav', text: 'assets/voice/gemini娘（花火）/花火_qwentts_clean.txt' }
+        claude: { audio: 'assets/voice/claude娘（布洛妮娅）/布洛妮娅_qwentts_clean.wav', text: 'assets/voice/claude娘（布洛妮娅）/布洛妮娅_qwentts_clean.txt' }
   postprocess:
     sampleRate: 48000
     loudnessLUFS: -16
     trimSilence: true
-    sentenceGapMs: 250
+    sentenceGapMs: 240
     sectionGapMs: 600
 
 template:
   active: daily-deck
   registry:
-    daily-deck:  { dir: templates/daily-deck, adapter: daily-deck }
-    solid-color: { dir: "", adapter: solid-color }   # 测试用
+    daily-deck: { dir: templates/daily-deck, adapter: daily-deck }
+    solid-color: { dir: "", adapter: solid-color } # 测试用
 
 render:
   width: 1920
   height: 1080
   fps: 30
-  pagePaddingSec: 0.6       # 每页语音播完后的停留时间
-  bgm: { file: "", volumeDb: -22, duckDb: -10 }
+  pagePaddingSec: 0.6 # 每页语音播完后的停留时间
+  bgm: { file: "", volumeDb: -18, duckDb: -8 }
 
 publish:
-  mode: manual-review       # manual-review | auto（auto 只在 qa 通过时自动发布）
+  mode: manual-review # manual-review | auto（auto 只在 qa 通过时自动发布）
   bilibili:
     cli: biliup
     cookieFile: storage/secrets/bilibili-cookies.json
-    tid: 231                # 科技·计算机技术（M7 已实测 biliup 0.2.4 支持自由设置分区 ID）
+    tid: 231 # 科技·计算机技术（M7 已实测 biliup 0.2.4 支持自由设置分区 ID）
     copyright: 1
     titleMax: 80
     descMax: 2000
     tagsMax: 12
-    defaultTags: [AI, 人工智能, 科技资讯, AI每日报]
-    aiDeclaration: true     # 强制开启 B 站平台 AI 生成内容声明标识
+    defaultTags: [ AI, 人工智能, 科技资讯, AI每日报 ]
+    aiDeclaration: true # 强制开启 B 站平台 AI 生成内容声明标识
     aiDisclaimerText: "本视频由 AI 辅助整理与配音，内容均经原文核查，参考来源见简介。"
 
 # 定时任务（执行时间 + 每期条数）不在配置文件设默认值，统一在 SQLite schedules 表中手动新建管理
 
 notify:
-  provider: none            # v1 仅保留抽象接口（none），后期可扩展 feishu 等渠道
+  provider: none # v1 仅保留抽象接口（none），后期可扩展 feishu 等渠道
   config: {}
 
 web:

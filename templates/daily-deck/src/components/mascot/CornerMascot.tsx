@@ -1,4 +1,4 @@
-import React from 'react';
+import type React from 'react';
 import { getMascotProfile } from '../../mascots/mascotRegistry';
 import type { PresetMascotId } from '../../schema/newsSchema';
 import { DeckErrorBoundary } from '../guard/DeckErrorBoundary';
@@ -29,7 +29,11 @@ export const CornerMascot: React.FC<CornerMascotProps> = ({
 
   return (
     <div className="corner-mascot-dock" aria-hidden="true">
-      <DeckErrorBoundary scopeName="corner-mascot" fallback={null} onErrorCaptured={onErrorCaptured}>
+      <DeckErrorBoundary
+        scopeName="corner-mascot"
+        fallback={null}
+        onErrorCaptured={onErrorCaptured}
+      >
         <div key={src} className="corner-mascot-entry">
           <div className="corner-mascot-float">
             <SafeMedia

@@ -9,6 +9,7 @@ export default async function SchedulesPage() {
   const core = await getCore();
   const settings = core.config.getSettings();
   const jobs = await core.scheduler.list();
+  const bgmFiles = await core.tasks.listBgm();
 
   return (
     <div className="space-y-5">
@@ -20,7 +21,7 @@ export default async function SchedulesPage() {
         </p>
       </div>
 
-      <ScheduleManager jobs={jobs} timezone={settings.timezone} />
+      <ScheduleManager jobs={jobs} timezone={settings.timezone} bgmFiles={bgmFiles} />
     </div>
   );
 }

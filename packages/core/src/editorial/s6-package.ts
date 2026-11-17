@@ -1,3 +1,4 @@
+import path from 'node:path';
 import {
   type ContentLimits,
   type IssuePackage,
@@ -7,8 +8,11 @@ import {
 import { TZDate } from '@date-fns/tz';
 import { format } from 'date-fns';
 import type { CoreContext } from '../context.js';
+import { lockRunBgm } from '../media/bgm.js';
 import { inTransaction } from '../storage/db.js';
+import { writeFileAtomic } from '../storage/files.js';
 import { invokeStageLlm } from './llm.js';
+import { getRunPersona } from './personas.js';
 import { precheckIssuePackage } from './prechecks.js';
 import { renderPromptTemplate } from './prompts.js';
 import { resolveContentLimits } from './s4-polish.js';
@@ -84,7 +88,9 @@ export async function runPackageStage(
     extraTagsMax: extraTagQuota,
   };
 
+  const persona = await getRunPersona(ctx, runId);
   const basePrompt = await renderPromptTemplate('s6-package.md', {
+    personaJson: persona ? JSON.stringify(persona, null, 2) : '无特定角色',
     date: dateStr,
     issueNumber,
     passedItemsJson: JSON.stringify(itemsPayload, null, 2),
@@ -135,6 +141,17 @@ export async function runPackageStage(
         });
       });
 
+      await lockRunBgm(ctx, runId);
+      const itemById = new Map(passedItems.map((item) => [item.id, item]));
+      const lines = [
+        ...res.data.intro.narration,
+        ...res.data.order.flatMap((id) => itemById.get(id)?.finalJson?.narration ?? []),
+        ...res.data.outro.narration,
+      ];
+      await writeFileAtomic(
+        path.join(ctx.paths.runDir(runId), 'narration.txt'),
+        `${lines.join('\n')}\n`,
+      );
       return {
         issueNumber,
         date: dateStr,

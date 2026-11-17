@@ -1,4 +1,4 @@
-import React from 'react';
+import type React from 'react';
 import type { SanitizedDailyIssue } from '../../schema/newsSchema';
 import { AutoFitText } from '../guard/AutoFitText';
 
@@ -21,10 +21,10 @@ export const CoverPage: React.FC<CoverPageProps> = ({ issue, onJumpToNews }) => 
         <AutoFitText
           as="p"
           text={issue.headline}
-          maxFontSize={36}
-          minFontSize={26}
+          maxFontSize={34}
+          minFontSize={24}
           maxLines={4}
-          lineHeight={1.42}
+          lineHeight={1.45}
           className="cover-focus-line"
         />
         <div className="cover-count-note">本期共 {issue.items.length} 条精选资讯</div>

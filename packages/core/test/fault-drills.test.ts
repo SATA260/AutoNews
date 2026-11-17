@@ -115,6 +115,8 @@ async function setupDrillWorkspace() {
 
   await editSettingsFile(path.join(rootDir, 'config', 'settings.yaml'), (doc) => {
     doc.setIn(['ai', 'providers'], {});
+    doc.setIn(['tts', 'provider'], 'silent');
+    doc.deleteIn(['issue', 'minScore']);
   });
   await updateSettingsFile(path.join(rootDir, 'config', 'settings.yaml'), {
     clis: {

@@ -1,16 +1,18 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import type React from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   clampPageIndex,
-  parseTransitionStyle,
   type DeckBridgeState,
   type DeckPageType,
   type DeckTransitionStyle,
+  parseTransitionStyle,
 } from '../../bridge/videoSynthBridge';
 import { SAMPLE_DAILY_ISSUE } from '../../data/sampleIssue';
+import { MASCOT_REGISTRY } from '../../mascots/mascotRegistry';
 import {
-  sanitizeDailyIssue,
   type DailyIssueInput,
   type SanitizedIssueResult,
+  sanitizeDailyIssue,
 } from '../../schema/newsSchema';
 import { mediaReadyTracker, transitionTiming } from '../../utils/mediaReadyTracker';
 import { DeckErrorBoundary } from '../guard/DeckErrorBoundary';
@@ -33,7 +35,15 @@ interface StartupOptions {
   motion: 'animated' | 'static';
 }
 
-const TRANSITION_ORDER: readonly DeckTransitionStyle[] = ['flip', 'glide', 'shutter', 'none'];
+/** 页面翻页原子状态：在同一渲染周期同步更新当前页、离场页与翻页方向 */
+interface PageNavState {
+  currentPage: number;
+  exitingPage: number | null;
+  direction: 'next' | 'prev';
+  turnSeq: number;
+}
+
+const TRANSITION_ORDER: readonly DeckTransitionStyle[] = ['glide', 'flip', 'fade', 'none'];
 
 /** 从浏览器网址查询参数中读取初始播放、主题与动效配置 */
 function parseStartupOptions(): StartupOptions {
@@ -43,7 +53,7 @@ function parseStartupOptions(): StartupOptions {
       autoplay: false,
       initialPage: 0,
       theme: 'light',
-      transition: 'flip',
+      transition: 'glide',
       motion: 'animated',
     };
   }
@@ -83,10 +93,13 @@ export const NewsDeck: React.FC<NewsDeckProps> = ({ initialData }) => {
   );
 
   const totalPages = sanitized.issue.items.length + 2;
-  const [currentPage, setCurrentPage] = useState<number>(() =>
-    clampPageIndex(startup.initialPage, totalPages),
-  );
-  const [direction, setDirection] = useState<'next' | 'prev'>('next');
+  const [navState, setNavState] = useState<PageNavState>(() => ({
+    currentPage: clampPageIndex(startup.initialPage, totalPages),
+    exitingPage: null,
+    direction: 'next',
+    turnSeq: 0,
+  }));
+  const [issueVersion, setIssueVersion] = useState<number>(0);
   const [isAutoPlaying, setIsAutoPlaying] = useState<boolean>(startup.autoplay);
   const [cleanMode, setCleanMode] = useState<boolean>(startup.cleanMode);
   const [theme, setTheme] = useState<'light' | 'dark'>(startup.theme);
@@ -97,10 +110,78 @@ export const NewsDeck: React.FC<NewsDeckProps> = ({ initialData }) => {
   const [progressRatio, setProgressRatio] = useState<number>(0);
 
   const wheelLockUntilRef = useRef<number>(0);
+  const { currentPage, exitingPage, direction } = navState;
+  const effectiveTransition: DeckTransitionStyle =
+    startup.motion === 'static' ? 'none' : transitionStyle;
 
   useEffect(() => {
-    setCurrentPage((prev) => clampPageIndex(prev, totalPages));
+    setNavState((prev) => {
+      const nextCurrent = clampPageIndex(prev.currentPage, totalPages);
+      const nextExiting =
+        prev.exitingPage !== null &&
+        prev.exitingPage < totalPages &&
+        prev.exitingPage !== nextCurrent
+          ? prev.exitingPage
+          : null;
+      if (nextCurrent === prev.currentPage && nextExiting === prev.exitingPage) {
+        return prev;
+      }
+      return {
+        currentPage: nextCurrent,
+        exitingPage: nextExiting,
+        direction: prev.direction,
+        turnSeq: prev.turnSeq + 1,
+      };
+    });
   }, [totalPages]);
+
+  useEffect(() => {
+    if (navState.exitingPage === null) {
+      return;
+    }
+    if (effectiveTransition === 'none') {
+      setNavState((prev) => (prev.exitingPage === null ? prev : { ...prev, exitingPage: null }));
+      return;
+    }
+
+    const activeSeq = navState.turnSeq;
+    const duration = PAGE_TURN_DURATION_MS[effectiveTransition];
+    const timer = window.setTimeout(() => {
+      setNavState((prev) => (prev.turnSeq === activeSeq ? { ...prev, exitingPage: null } : prev));
+    }, duration);
+
+    return () => {
+      window.clearTimeout(timer);
+    };
+  }, [navState.exitingPage, navState.turnSeq, effectiveTransition]);
+
+  useEffect(() => {
+    if (typeof Image === 'undefined') {
+      return;
+    }
+    const urls = new Set<string>();
+    for (const profile of Object.values(MASCOT_REGISTRY)) {
+      if (profile.assetUrl) {
+        urls.add(profile.assetUrl);
+      }
+    }
+    for (const item of sanitized.issue.items) {
+      if (item.imageUrl) {
+        urls.add(item.imageUrl);
+      }
+      if (item.secondaryImageUrl) {
+        urls.add(item.secondaryImageUrl);
+      }
+      if (item.customMascotUrl) {
+        urls.add(item.customMascotUrl);
+      }
+    }
+    for (const url of urls) {
+      const img = new Image();
+      img.decoding = 'sync';
+      img.src = url;
+    }
+  }, [sanitized.issue.items]);
 
   const recordRuntimeError = useCallback((scopeName: string, message: string) => {
     setRuntimeErrors((prev) => {
@@ -163,22 +244,27 @@ export const NewsDeck: React.FC<NewsDeckProps> = ({ initialData }) => {
   const navigateTo = useCallback(
     (targetPage: number) => {
       const clamped = clampPageIndex(targetPage, totalPages);
-      setCurrentPage((prev) => {
-        if (clamped !== prev) {
-          setDirection(clamped > prev ? 'next' : 'prev');
+      setNavState((prev) => {
+        if (clamped === prev.currentPage) {
+          return prev;
         }
-        return clamped;
+        return {
+          currentPage: clamped,
+          exitingPage: effectiveTransition === 'none' ? null : prev.currentPage,
+          direction: clamped > prev.currentPage ? 'next' : 'prev',
+          turnSeq: prev.turnSeq + 1,
+        };
       });
       setProgressRatio(0);
       return clamped;
     },
-    [totalPages],
+    [effectiveTransition, totalPages],
   );
 
   const cycleTransitionStyle = useCallback(() => {
     setTransitionStyle((prev) => {
       const idx = TRANSITION_ORDER.indexOf(prev);
-      return TRANSITION_ORDER[(idx + 1) % TRANSITION_ORDER.length] ?? 'flip';
+      return TRANSITION_ORDER[(idx + 1) % TRANSITION_ORDER.length] ?? 'glide';
     });
   }, []);
 
@@ -275,7 +361,15 @@ export const NewsDeck: React.FC<NewsDeckProps> = ({ initialData }) => {
     } else {
       setRawIssue(check.issue);
     }
+    setIssueVersion((v) => v + 1);
+    setNavState((prev) => (prev.exitingPage === null ? prev : { ...prev, exitingPage: null }));
     return check;
+  }, []);
+
+  const resetSampleIssue = useCallback(() => {
+    setRawIssue(SAMPLE_DAILY_ISSUE);
+    setIssueVersion((v) => v + 1);
+    setNavState((prev) => (prev.exitingPage === null ? prev : { ...prev, exitingPage: null }));
   }, []);
 
   const stateRef = useRef<{
@@ -399,7 +493,9 @@ export const NewsDeck: React.FC<NewsDeckProps> = ({ initialData }) => {
         : sanitized.issue.hostMascotId;
 
   const activeCustomMascotUrl =
-    sanitized.issue.mascotMode === 'per-item' ? activeNewsItem?.customMascotUrl ?? null : null;
+    sanitized.issue.mascotMode === 'per-item'
+      ? (activeNewsItem?.customMascotUrl ?? null)
+      : sanitized.issue.hostMascotUrl;
 
   const renderPageByIndex = useCallback(
     (pageIdx: number, isExiting: boolean) => {
@@ -435,10 +531,38 @@ export const NewsDeck: React.FC<NewsDeckProps> = ({ initialData }) => {
     [navigateTo, recordRuntimeError, sanitized.issue, totalPages],
   );
 
+  const controlsOverlay = (
+    <DeckControls
+      currentPage={currentPage}
+      totalPages={totalPages}
+      isAutoPlaying={isAutoPlaying}
+      theme={theme}
+      cleanMode={cleanMode}
+      transitionStyle={transitionStyle}
+      warningCount={sanitized.warnings.length}
+      runtimeErrorCount={runtimeErrors.length}
+      onPrev={() => navigateTo(currentPage - 1)}
+      onNext={() => navigateTo(currentPage + 1)}
+      onToggleAutoPlay={() => setIsAutoPlaying((prev) => !prev)}
+      onCycleTransition={cycleTransitionStyle}
+      onToggleTheme={() => setTheme((prev) => (prev === 'light' ? 'dark' : 'light'))}
+      onToggleCleanMode={() => setCleanMode((prev) => !prev)}
+      onOpenInspector={(tab = 'summary') => {
+        setInspectorTab(tab);
+        setInspectorOpen(true);
+      }}
+    />
+  );
+
   return (
     <DeckErrorBoundary scopeName="deck-root" onErrorCaptured={recordRuntimeError}>
-      <ViewportScaler theme={theme} motion={startup.motion}>
-        <div className="deck-canvas">
+      <ViewportScaler
+        theme={theme}
+        motion={startup.motion}
+        cleanMode={cleanMode}
+        overlay={controlsOverlay}
+      >
+        <div className="deck-canvas" data-host={activeMascotId}>
           <DeckHeader
             issue={sanitized.issue}
             currentPage={currentPage}
@@ -450,7 +574,9 @@ export const NewsDeck: React.FC<NewsDeckProps> = ({ initialData }) => {
           <main className="deck-slide-body">
             <PageTransitionStage
               currentPage={currentPage}
+              exitingPage={exitingPage}
               direction={direction}
+              issueVersion={issueVersion}
               transitionStyle={transitionStyle}
               motion={startup.motion}
               renderPage={renderPageByIndex}
@@ -472,27 +598,6 @@ export const NewsDeck: React.FC<NewsDeckProps> = ({ initialData }) => {
             </div>
           )}
         </div>
-
-        <DeckControls
-          currentPage={currentPage}
-          totalPages={totalPages}
-          isAutoPlaying={isAutoPlaying}
-          theme={theme}
-          cleanMode={cleanMode}
-          transitionStyle={transitionStyle}
-          warningCount={sanitized.warnings.length}
-          runtimeErrorCount={runtimeErrors.length}
-          onPrev={() => navigateTo(currentPage - 1)}
-          onNext={() => navigateTo(currentPage + 1)}
-          onToggleAutoPlay={() => setIsAutoPlaying((prev) => !prev)}
-          onCycleTransition={cycleTransitionStyle}
-          onToggleTheme={() => setTheme((prev) => (prev === 'light' ? 'dark' : 'light'))}
-          onToggleCleanMode={() => setCleanMode((prev) => !prev)}
-          onOpenInspector={(tab = 'summary') => {
-            setInspectorTab(tab);
-            setInspectorOpen(true);
-          }}
-        />
       </ViewportScaler>
 
       <DataInspectorDrawer
@@ -502,11 +607,11 @@ export const NewsDeck: React.FC<NewsDeckProps> = ({ initialData }) => {
         sanitizedIssue={sanitized.issue}
         warnings={sanitized.warnings}
         runtimeErrors={runtimeErrors}
-        activeNewsItemIndex={pageMeta.newsIndex >= 0 ? pageMeta.newsIndex : 0}
+        activeNewsItemIndex={Math.max(pageMeta.newsIndex, 0)}
         onTabChange={setInspectorTab}
         onClose={() => setInspectorOpen(false)}
         onApplyRawData={applyRawData}
-        onResetSample={() => setRawIssue(SAMPLE_DAILY_ISSUE)}
+        onResetSample={resetSampleIssue}
         onJumpToNewsPage={(idx) => navigateTo(idx + 1)}
       />
     </DeckErrorBoundary>

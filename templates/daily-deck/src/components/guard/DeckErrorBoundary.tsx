@@ -29,10 +29,7 @@ export class DeckErrorBoundary extends React.Component<
 
   /** 将捕获到的错误信息静默上报给外层健康统计 */
   override componentDidCatch(error: Error): void {
-    this.props.onErrorCaptured?.(
-      this.props.scopeName,
-      error?.message || 'Unknown render error',
-    );
+    this.props.onErrorCaptured?.(this.props.scopeName, error?.message || 'Unknown render error');
   }
 
   /** 正常时直接透传子节点，异常时展示降级占位 */

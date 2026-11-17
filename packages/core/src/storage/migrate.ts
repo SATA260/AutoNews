@@ -1,7 +1,8 @@
 import { type DatabaseSync, inTransaction } from './db.js';
 import { MIGRATION_001, type Migration } from './migrations/001_init.js';
+import { MIGRATION_002 } from './migrations/002_workflow.js';
 
-const MIGRATIONS: readonly Migration[] = [MIGRATION_001];
+const MIGRATIONS: readonly Migration[] = [MIGRATION_001, MIGRATION_002];
 
 /** 按版本号顺序幂等地执行尚未应用的数据库表结构迁移脚本 */
 export function runMigrations(db: DatabaseSync): void {

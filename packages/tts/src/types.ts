@@ -19,8 +19,10 @@ export interface TtsProvider {
   synthesize(req: SynthesizeRequest): Promise<void>;
   /** 检查当前语音合成引擎是否可用 */
   healthcheck(): Promise<{ ok: boolean; detail: string }>;
+  /** 计算会影响音色的参考素材标识，避免复用过期音频 */
+  cacheIdentity?(config: Record<string, unknown>): Promise<string>;
   /** 可选生命周期方法：开始整期配音前启动本地模型服务或预热资源 */
-  start?(): Promise<void>;
+  start?(providerConfig?: Record<string, unknown>): Promise<void>;
   /** 可选生命周期方法：整期配音完成后关闭服务或释放本地内存 */
   stop?(): Promise<void>;
 }
@@ -29,6 +31,7 @@ export interface TtsProvider {
 export interface TtsServiceOptions {
   settings: TtsSettings;
   cacheDir: string;
+  rootDir?: string;
   bridge?: CliBridge;
   ffmpegBin?: string;
   ffprobeBin?: string;

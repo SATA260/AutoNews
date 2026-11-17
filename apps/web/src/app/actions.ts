@@ -3,6 +3,7 @@
 import {
   AiStageNameSchema,
   type DoctorReport,
+  HostMascotIdSchema,
   PIPELINE_STAGES,
   ScheduleTimeSchema,
   type SourceTestResult,
@@ -103,9 +104,14 @@ function safeRevalidate(pathTarget: string): void {
 export async function startRunAction(formData: FormData): Promise<ActionResult<{ runId: string }>> {
   try {
     const itemCount = parseRequiredPositiveInt(formData.get('itemCount'), '本期新闻条数');
+    const hostValue = String(formData.get('hostId') ?? '').trim();
+    const bgmFile = String(formData.get('bgmFile') ?? '').trim();
+    const hostId = hostValue ? HostMascotIdSchema.parse(hostValue) : undefined;
     const core = await getCore();
     const { runId } = await core.tasks.start({
       itemCount,
+      hostId,
+      bgmFile: bgmFile || undefined,
       trigger: 'manual-web',
       detach: true,
     });
@@ -327,7 +333,14 @@ export async function createScheduleAction(formData: FormData): Promise<ActionRe
     const enabled = formData.has('enabled') ? parseBooleanField(formData.get('enabled')) : true;
 
     const core = await getCore();
-    const job = await core.scheduler.create({ name, time, itemCount, enabled });
+    const bgmFile = String(formData.get('bgmFile') ?? '').trim();
+    const job = await core.scheduler.create({
+      name,
+      time,
+      itemCount,
+      enabled,
+      bgmFile: bgmFile || undefined,
+    });
     safeRevalidate('/');
     safeRevalidate('/schedules');
     return { ok: true, message: `已创建并同步定时任务「${job.name}」（每日 ${job.time}）` };
@@ -340,7 +353,13 @@ export async function createScheduleAction(formData: FormData): Promise<ActionRe
 export async function updateScheduleAction(formData: FormData): Promise<ActionResult> {
   try {
     const id = parseRequiredString(formData.get('id'), '定时任务 ID');
-    const patch: { name?: string; time?: string; itemCount?: number; enabled?: boolean } = {};
+    const patch: {
+      name?: string;
+      time?: string;
+      itemCount?: number;
+      bgmFile?: string | null;
+      enabled?: boolean;
+    } = {};
 
     const nameRaw = formData.get('name');
     if (typeof nameRaw === 'string' && nameRaw.trim()) {
@@ -350,6 +369,9 @@ export async function updateScheduleAction(formData: FormData): Promise<ActionRe
     if (typeof timeRaw === 'string' && timeRaw.trim()) {
       patch.time = ScheduleTimeSchema.parse(timeRaw.trim());
     }
+    const bgmRaw = formData.get('bgmFile');
+    if (typeof bgmRaw === 'string') patch.bgmFile = bgmRaw.trim() || null;
+
     const itemsRaw = formData.get('itemCount');
     if (typeof itemsRaw === 'string' && itemsRaw.trim()) {
       patch.itemCount = parseRequiredPositiveInt(itemsRaw, '每期新闻条数');
@@ -703,5 +725,41 @@ export async function runDoctorCheckAction(input?: {
     return { ok: true, data: report, message: '环境自检已完成' };
   } catch (err) {
     return { ok: false, error: err instanceof Error ? err.message : '环境自检失败' };
+  }
+}
+
+/** 保存待审核新闻的图片或切换无图模式。 */
+export async function setItemImageAction(formData: FormData): Promise<ActionResult> {
+  try {
+    const runId = RunIdSchema.parse(formData.get('runId'));
+    const itemId = ItemIdSchema.parse(formData.get('itemId'));
+    const mode = z.enum(['auto', 'none', 'custom']).parse(formData.get('mode'));
+    const file = formData.get('image');
+    const data =
+      file instanceof File && file.size > 0 ? new Uint8Array(await file.arrayBuffer()) : undefined;
+    const core = await getCore();
+    await core.tasks.setItemImage(runId, itemId, {
+      mode,
+      data,
+      caption: String(formData.get('caption') ?? ''),
+    });
+    safeRevalidate(`/runs/${runId}`);
+    return { ok: true, message: '图片设置已保存，请重新合成视频' };
+  } catch (error) {
+    return { ok: false, error: error instanceof Error ? error.message : String(error) };
+  }
+}
+
+/** 保存待审核任务选择的背景音乐。 */
+export async function setRunBgmAction(formData: FormData): Promise<ActionResult> {
+  try {
+    const runId = RunIdSchema.parse(formData.get('runId'));
+    const bgmFile = z.string().min(1).parse(formData.get('bgmFile'));
+    const core = await getCore();
+    await core.tasks.setBgm(runId, bgmFile);
+    safeRevalidate(`/runs/${runId}`);
+    return { ok: true, message: '背景音乐已保存，请重新合成视频' };
+  } catch (error) {
+    return { ok: false, error: error instanceof Error ? error.message : String(error) };
   }
 }

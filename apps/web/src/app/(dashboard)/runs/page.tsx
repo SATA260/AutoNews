@@ -84,6 +84,7 @@ export default async function RunsPage({
 
   const core = await getCore();
   const settings = core.config.getSettings();
+  const bgmFiles = await core.tasks.listBgm();
   const runs = await core.tasks.list({
     ...(statuses ? { status: statuses } : {}),
     limit: 100,
@@ -98,7 +99,7 @@ export default async function RunsPage({
             查看全部生成任务，按状态筛选或点击进入任务详情审查文稿、成片与中断重跑选项。
           </p>
         </div>
-        <StartRunModalButton label="新建一期任务" />
+        <StartRunModalButton bgmFiles={bgmFiles} label="新建一期任务" />
       </div>
 
       <div className="flex flex-wrap gap-2">

@@ -70,6 +70,9 @@ export function createPolishedItemSchema(keyPointsMax = 3) {
     category: z.string().min(1),
     entity: z.string().min(1),
     summary: z.string().min(1),
+    highlight: z.string().max(18).optional(),
+    preferArticleImage: z.boolean().optional(),
+    imageCaption: z.string().max(36).optional(),
     keyPoints: z.array(z.string().min(1)).max(Math.max(1, keyPointsMax)),
     detail: z.string().min(1),
     hostComment: z.string().min(1),
@@ -186,6 +189,9 @@ export const RunItemRecordSchema = z.object({
   revision: z.number().int().nonnegative(),
   dropReason: z.string().nullable(),
   finalJson: PolishedItemSchema.nullable(),
+  imageMode: z.enum(['auto', 'custom', 'none']).optional(),
+  customImagePath: z.string().nullable().optional(),
+  customImageCaption: z.string().nullable().optional(),
   updatedAt: z.string(),
 });
 /** 单条新闻处理记录类型 */

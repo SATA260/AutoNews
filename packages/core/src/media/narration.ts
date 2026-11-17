@@ -100,6 +100,25 @@ export async function runNarrateStage(opts: {
   const items = ctx.repos.runItems.listByRun(runId);
   const itemsById = new Map(items.map((i) => [i.id, i]));
   const sections = buildNarrationSections(packageData, itemsById);
+  const row = ctx.db.prepare('SELECT host_id FROM runs WHERE id = ?').get(runId) as
+    | { host_id: string | null }
+    | undefined;
+  const providerId = settings.tts.provider;
+  const providerConfig = {
+    ...(settings.tts.providers[providerId] ?? {}),
+    ...(row?.host_id ? { hostId: row.host_id } : {}),
+  };
+  const identity = await ctx.tts.getActiveProvider(providerId).cacheIdentity?.(providerConfig);
+  const effectiveSettings: Settings = {
+    ...settings,
+    tts: {
+      ...settings.tts,
+      providers: {
+        ...settings.tts.providers,
+        [providerId]: { ...providerConfig, ...(identity ? { referenceHash: identity } : {}) },
+      },
+    },
+  };
 
   const savedProgress =
     (await readJsonOrNull<Record<string, SectionProgressRecord>>(progressFile)) ?? {};
@@ -110,7 +129,7 @@ export async function runNarrateStage(opts: {
   const resolvedAudioDir = path.resolve(audioDir);
 
   for (const section of sections) {
-    const digest = computeSectionDigest(section, settings);
+    const digest = computeSectionDigest(section, effectiveSettings);
     digestByKey.set(section.key, digest);
 
     const prev = savedProgress[section.key];
@@ -162,7 +181,7 @@ export async function runNarrateStage(opts: {
       const newlySynthesized = await ctx.tts.synthesizeSections(pendingSections, audioDir, {
         signal,
         onSectionDone: persistSectionProgress,
-        settingsOverride: settings.tts,
+        settingsOverride: effectiveSettings.tts,
       });
       for (const audio of newlySynthesized) {
         audioByKey.set(audio.key, audio);

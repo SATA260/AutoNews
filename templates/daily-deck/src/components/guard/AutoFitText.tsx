@@ -1,4 +1,5 @@
-import React, { useLayoutEffect, useRef, useState } from 'react';
+import type React from 'react';
+import { useLayoutEffect, useRef, useState } from 'react';
 
 /** 自适应字号文本框组件的入参属性 */
 interface AutoFitTextProps {
@@ -28,13 +29,15 @@ export const AutoFitText: React.FC<AutoFitTextProps> = ({
 
   useLayoutEffect(() => {
     const el = ref.current;
-    if (!el) {
+    if (!el || !text) {
       setFontSize(maxFontSize);
       return;
     }
 
     let current = maxFontSize;
     el.style.fontSize = `${current}px`;
+    el.style.lineHeight = String(lineHeight);
+    el.style.webkitLineClamp = String(maxLines);
 
     if (el.clientHeight > 0 && el.scrollHeight > 0) {
       while (current > minFontSize && el.scrollHeight > el.clientHeight + 2) {

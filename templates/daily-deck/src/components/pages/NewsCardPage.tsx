@@ -1,4 +1,5 @@
-import React, { useEffect, useState } from 'react';
+import type React from 'react';
+import { useState } from 'react';
 import type { SanitizedNewsItem } from '../../schema/newsSchema';
 import { AutoFitText } from '../guard/AutoFitText';
 import { DeckErrorBoundary } from '../guard/DeckErrorBoundary';
@@ -11,34 +12,21 @@ export interface NewsCardPageProps {
   onErrorCaptured?: (scopeName: string, message: string) => void;
 }
 
-/** 单条新闻页面：左侧呈现标题、简短梗概、事实要点与来源，右侧展示官方配图或披露摘录 */
+/** 单条新闻页面：展示标题、核心结论与要点，有图时显示配图，无图时使用全幅布局 */
 export const NewsCardPage: React.FC<NewsCardPageProps> = ({
   item,
   totalItems,
   onErrorCaptured,
 }) => {
-  const [mediaFailed, setMediaFailed] = useState(false);
-  const [secondaryFailed, setSecondaryFailed] = useState(false);
+  const [failedPrimaryUrl, setFailedPrimaryUrl] = useState<string | null>(null);
+  const [failedSecondaryUrl, setFailedSecondaryUrl] = useState<string | null>(null);
 
-  useEffect(() => {
-    setMediaFailed(false);
-    setSecondaryFailed(false);
-  }, [item.id, item.imageUrl, item.secondaryImageUrl]);
-
-  const hasPrimaryImage = Boolean(item.imageUrl) && !mediaFailed;
-  const hasSecondaryImage = Boolean(item.secondaryImageUrl) && !secondaryFailed;
-
-  const fallbackSpecs =
-    item.metrics.length > 0
-      ? item.metrics
-      : [
-          { label: '所属领域', value: item.category },
-          { label: '发布主体', value: item.source },
-          { label: '发布日期', value: item.publishedAt },
-        ];
+  const hasPrimaryImage = Boolean(item.imageUrl) && failedPrimaryUrl !== item.imageUrl;
+  const hasSecondaryImage =
+    Boolean(item.secondaryImageUrl) && failedSecondaryUrl !== item.secondaryImageUrl;
 
   return (
-    <div className="news-editorial-layout">
+    <div className={`news-editorial-layout ${hasPrimaryImage ? 'is-split-image' : 'is-full-panel'}`}>
       <section className="news-synopsis-col">
         <div className="news-kicker">
           <span className="news-kicker-num">{item.indexLabel}</span>
@@ -54,10 +42,10 @@ export const NewsCardPage: React.FC<NewsCardPageProps> = ({
         <AutoFitText
           as="h1"
           text={item.title}
-          maxFontSize={54}
-          minFontSize={36}
+          maxFontSize={hasPrimaryImage ? 56 : 72}
+          minFontSize={hasPrimaryImage ? 38 : 52}
           maxLines={3}
-          lineHeight={1.22}
+          lineHeight={1.24}
           className="news-editorial-title"
         />
 
@@ -66,11 +54,11 @@ export const NewsCardPage: React.FC<NewsCardPageProps> = ({
         <AutoFitText
           as="p"
           text={item.summary}
-          maxFontSize={32}
-          minFontSize={24}
+          maxFontSize={30}
+          minFontSize={23}
           maxLines={4}
-          lineHeight={1.46}
-          className="news-synopsis-text"
+          lineHeight={1.48}
+          className="news-synopsis-text news-highlight"
         />
 
         {item.keyPoints.length > 0 && (
@@ -104,9 +92,8 @@ export const NewsCardPage: React.FC<NewsCardPageProps> = ({
         </footer>
       </section>
 
-      <section className="news-reference-col">
+      {hasPrimaryImage && <section className="news-reference-col">
         <DeckErrorBoundary scopeName={`news-ref-${item.id}`} onErrorCaptured={onErrorCaptured}>
-          {hasPrimaryImage ? (
             <figure className="official-plate-figure">
               <div className={`official-plate-frame ${hasSecondaryImage ? 'is-two-up' : ''}`}>
                 <div className="official-media-slot">
@@ -114,7 +101,7 @@ export const NewsCardPage: React.FC<NewsCardPageProps> = ({
                     src={item.imageUrl}
                     alt={item.imageCaption || item.title}
                     className="official-media-img"
-                    onFallback={() => setMediaFailed(true)}
+                    onFallback={() => setFailedPrimaryUrl(item.imageUrl)}
                     fallback={null}
                   />
                 </div>
@@ -124,7 +111,7 @@ export const NewsCardPage: React.FC<NewsCardPageProps> = ({
                       src={item.secondaryImageUrl}
                       alt={`${item.title} 补充引用`}
                       className="official-media-img"
-                      onFallback={() => setSecondaryFailed(true)}
+                      onFallback={() => setFailedSecondaryUrl(item.secondaryImageUrl)}
                       fallback={null}
                     />
                   </div>
@@ -134,45 +121,8 @@ export const NewsCardPage: React.FC<NewsCardPageProps> = ({
                 {item.imageCaption || `图｜${item.source} 官方发布资料`}
               </figcaption>
             </figure>
-          ) : (
-            <div className="official-excerpt-sheet">
-              <div className="excerpt-sheet-kicker">官方披露摘录 / PRIMARY SOURCE NOTES</div>
-
-              {item.officialQuote && (
-                <blockquote className="excerpt-quote">
-                  <AutoFitText
-                    as="p"
-                    text={item.officialQuote}
-                    maxFontSize={30}
-                    minFontSize={22}
-                    maxLines={4}
-                    lineHeight={1.5}
-                    className="excerpt-quote-text"
-                  />
-                </blockquote>
-              )}
-
-              <div className="excerpt-specs-table">
-                {fallbackSpecs.map((spec, sIdx) => (
-                  <div
-                    key={sIdx}
-                    className="excerpt-spec-row"
-                    style={{ '--row-idx': sIdx } as React.CSSProperties}
-                  >
-                    <span className="spec-label">{spec.label}</span>
-                    <strong className="spec-value">{spec.value}</strong>
-                  </div>
-                ))}
-              </div>
-
-              <div className="excerpt-source-foot">
-                来源归属：{item.source}
-                {item.sourceUrl ? ` (${item.sourceUrl})` : ''}
-              </div>
-            </div>
-          )}
         </DeckErrorBoundary>
-      </section>
+      </section>}
     </div>
   );
 };

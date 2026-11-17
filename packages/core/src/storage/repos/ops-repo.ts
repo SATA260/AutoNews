@@ -7,6 +7,7 @@ interface ScheduleRow {
   name: string;
   time_expr: string;
   item_count: number;
+  bgm_file: string | null;
   enabled: number;
   last_run_id: string | null;
   last_triggered_at: string | null;
@@ -35,6 +36,7 @@ function mapSchedule(row: ScheduleRow): Omit<ScheduleJob, 'installed' | 'nextRun
     name: row.name,
     time: row.time_expr,
     itemCount: row.item_count,
+    bgmFile: row.bgm_file,
     enabled: row.enabled === 1,
     lastRunId: row.last_run_id,
     lastTriggeredAt: row.last_triggered_at,
@@ -84,17 +86,19 @@ export function createSchedulesRepo(db: DatabaseSync) {
       name: string;
       time: string;
       itemCount: number;
+      bgmFile?: string | null;
       enabled: boolean;
       now: string;
     }): Omit<ScheduleJob, 'installed' | 'nextRunAt'> {
       db.prepare(`
-        INSERT INTO schedules (id, name, time_expr, item_count, enabled, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO schedules (id, name, time_expr, item_count, bgm_file, enabled, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
       `).run(
         input.id,
         input.name,
         input.time,
         input.itemCount,
+        input.bgmFile ?? null,
         input.enabled ? 1 : 0,
         input.now,
         input.now,
@@ -113,6 +117,7 @@ export function createSchedulesRepo(db: DatabaseSync) {
         name?: string;
         time?: string;
         itemCount?: number;
+        bgmFile?: string | null;
         enabled?: boolean;
         lastRunId?: string;
         lastTriggeredAt?: string;
@@ -120,7 +125,7 @@ export function createSchedulesRepo(db: DatabaseSync) {
       },
     ): Omit<ScheduleJob, 'installed' | 'nextRunAt'> | null {
       const sets = ['updated_at = ?'];
-      const params: Array<string | number> = [patch.now];
+      const params: Array<string | number | null> = [patch.now];
 
       if (patch.name !== undefined) {
         sets.push('name = ?');
@@ -133,6 +138,10 @@ export function createSchedulesRepo(db: DatabaseSync) {
       if (patch.itemCount !== undefined) {
         sets.push('item_count = ?');
         params.push(patch.itemCount);
+      }
+      if (patch.bgmFile !== undefined) {
+        sets.push('bgm_file = ?');
+        params.push(patch.bgmFile);
       }
       if (patch.enabled !== undefined) {
         sets.push('enabled = ?');

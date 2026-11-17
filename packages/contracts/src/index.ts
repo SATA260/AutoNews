@@ -2,6 +2,7 @@ export * from './article.js';
 export * from './config.js';
 export * from './editorial.js';
 export * from './media.js';
+export * from './persona.js';
 export * from './publish.js';
 export * from './run.js';
 export * from './schema-utils.js';

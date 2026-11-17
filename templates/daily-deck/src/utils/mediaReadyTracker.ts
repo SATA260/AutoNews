@@ -19,7 +19,9 @@ class MediaReadyTracker {
   private notifyAll(): void {
     const callbacks = Array.from(this.listeners);
     this.listeners.clear();
-    callbacks.forEach((cb) => cb());
+    for (const cb of callbacks) {
+      cb();
+    }
   }
 
   /** 等待当前页所有未完成媒体加载结束，或达到超时上限后放行 */

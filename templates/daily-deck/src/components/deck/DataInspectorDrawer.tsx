@@ -1,4 +1,3 @@
-import React, { useEffect, useState } from 'react';
 import {
   AlertTriangle,
   Check,
@@ -11,10 +10,12 @@ import {
   SlidersHorizontal,
   X,
 } from 'lucide-react';
+import type React from 'react';
+import { useEffect, useState } from 'react';
 import { MASCOT_REGISTRY } from '../../mascots/mascotRegistry';
 import {
-  HARD_LIMITS,
   type DailyIssueInput,
+  HARD_LIMITS,
   type MascotMode,
   type NewsItemInput,
   type PresetMascotId,
@@ -160,7 +161,12 @@ export const DataInspectorDrawer: React.FC<DataInspectorDrawerProps> = ({
   const captionLen = Array.from(currentItem.imageCaption ?? '').length;
 
   return (
-    <div className="inspector-backdrop" role="dialog" aria-modal="true" aria-label="日报编辑与防错检查台">
+    <div
+      className="inspector-backdrop"
+      role="dialog"
+      aria-modal="true"
+      aria-label="日报编辑与防错检查台"
+    >
       <div className="inspector-drawer">
         <div className="inspector-header">
           <div className="inspector-title-wrap">
@@ -314,7 +320,9 @@ export const DataInspectorDrawer: React.FC<DataInspectorDrawerProps> = ({
                 <label className="editor-field full-span">
                   <div className="field-label-row">
                     <span>新闻简短梗概（左侧正文展示，非口播台词）</span>
-                    <span className={`char-count ${summaryLen > HARD_LIMITS.summary ? 'is-over' : ''}`}>
+                    <span
+                      className={`char-count ${summaryLen > HARD_LIMITS.summary ? 'is-over' : ''}`}
+                    >
                       {summaryLen} / {HARD_LIMITS.summary}
                     </span>
                   </div>
@@ -333,9 +341,7 @@ export const DataInspectorDrawer: React.FC<DataInspectorDrawerProps> = ({
                   <input
                     type="text"
                     value={currentItem.imageUrl ?? ''}
-                    onChange={(e) =>
-                      updateCurrentItem({ imageUrl: e.target.value.trim() || null })
-                    }
+                    onChange={(e) => updateCurrentItem({ imageUrl: e.target.value.trim() || null })}
                     placeholder="/media/official-deepseek-report.svg"
                   />
                 </label>
@@ -395,7 +401,8 @@ export const DataInspectorDrawer: React.FC<DataInspectorDrawerProps> = ({
           {activeTab === 'json' && (
             <div className="json-editor-wrap">
               <p className="json-editor-hint">
-                可在此直接粘贴自动化工作流产出的日报 JSON。即使存在缺字段、超长文本或无效图片链接，防错引擎也会自动清洗并保证画面零报错。
+                可在此直接粘贴自动化工作流产出的日报
+                JSON。即使存在缺字段、超长文本或无效图片链接，防错引擎也会自动清洗并保证画面零报错。
               </p>
               {jsonError && (
                 <div className="json-syntax-alert" role="alert">
@@ -431,8 +438,8 @@ export const DataInspectorDrawer: React.FC<DataInspectorDrawerProps> = ({
                     <div>
                       <strong>所有页面与文案均通过硬限制检查</strong>
                       <p>
-                        当前共 {sanitizedIssue.items.length + 2} 页，字数、媒体链接、角色配置与运行边界均保持
-                        100% 洁净状态。
+                        当前共 {sanitizedIssue.items.length + 2}{' '}
+                        页，字数、媒体链接、角色配置与运行边界均保持 100% 洁净状态。
                       </p>
                     </div>
                   </>
@@ -441,9 +448,12 @@ export const DataInspectorDrawer: React.FC<DataInspectorDrawerProps> = ({
                     <AlertTriangle size={22} />
                     <div>
                       <strong>
-                        已自动兜底修正 {warnings.length} 项数据问题 · 运行异常 {runtimeErrors.length} 项
+                        已自动兜底修正 {warnings.length} 项数据问题 · 运行异常{' '}
+                        {runtimeErrors.length} 项
                       </strong>
-                      <p>模板已在渲染前自动执行截断或默认值替换，成片画面绝不会出现错误提示或布局崩坏。</p>
+                      <p>
+                        模板已在渲染前自动执行截断或默认值替换，成片画面绝不会出现错误提示或布局崩坏。
+                      </p>
                     </div>
                   </>
                 )}

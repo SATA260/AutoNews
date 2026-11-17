@@ -174,6 +174,7 @@ export async function createCoreContext(opts?: {
     new TtsService({
       settings: settings.tts,
       cacheDir: paths.ttsCacheDir,
+      rootDir: paths.rootDir,
       bridge,
     });
 
