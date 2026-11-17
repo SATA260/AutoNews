@@ -11,6 +11,7 @@ import {
   buildTimeline,
   createCore,
   createRun,
+  editSettingsFile,
   executeRun,
   mapEntityToMascotId,
   type PipelineError,
@@ -56,6 +57,9 @@ async function setupRenderWorkspace(templateName: 'solid-color' | 'daily-deck') 
   );
 
   const settingsFile = path.join(rootDir, 'config', 'settings.yaml');
+  await editSettingsFile(settingsFile, (doc) => {
+    doc.setIn(['ai', 'providers'], {});
+  });
   await updateSettingsFile(settingsFile, {
     clis: {
       agy: { adapter: 'agy', bin: FAKE_AGY_BIN, extraArgs: [] },
@@ -75,11 +79,11 @@ async function setupRenderWorkspace(templateName: 'solid-color' | 'daily-deck') 
     },
     ai: {
       stages: {
-        select: { retries: 0 },
-        summarize: { retries: 0 },
-        polish: { retries: 0 },
-        factcheck: { retries: 0 },
-        package: { retries: 0 },
+        select: { cli: 'agy', model: 'gemini-3.8-flash-high', retries: 0 },
+        summarize: { cli: 'agy', model: 'gemini-3.8-flash-high', retries: 0 },
+        polish: { cli: 'agy', model: 'gemini-3.8-flash-high', retries: 0 },
+        factcheck: { cli: 'agy', model: 'gemini-4-carbon-high', retries: 0 },
+        package: { cli: 'agy', model: 'gemini-3.8-flash-high', retries: 0 },
       },
     },
   });

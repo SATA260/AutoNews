@@ -9,6 +9,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import {
   type Core,
   createCore,
+  editSettingsFile,
   type PipelineError,
   readJsonOrNull,
   recoverStaleRuns,
@@ -112,6 +113,9 @@ async function setupDrillWorkspace() {
     path.join(rootDir, 'config', 'settings.yaml'),
   );
 
+  await editSettingsFile(path.join(rootDir, 'config', 'settings.yaml'), (doc) => {
+    doc.setIn(['ai', 'providers'], {});
+  });
   await updateSettingsFile(path.join(rootDir, 'config', 'settings.yaml'), {
     clis: {
       agy: { adapter: 'agy', bin: FAKE_AGY_BIN, extraArgs: [] },
@@ -122,11 +126,11 @@ async function setupDrillWorkspace() {
     },
     ai: {
       stages: {
-        select: { retries: 0 },
-        summarize: { retries: 0 },
-        polish: { retries: 0 },
-        factcheck: { retries: 0 },
-        package: { retries: 0 },
+        select: { cli: 'agy', model: 'gemini-3.8-flash-high', retries: 0 },
+        summarize: { cli: 'agy', model: 'gemini-3.8-flash-high', retries: 0 },
+        polish: { cli: 'agy', model: 'gemini-3.8-flash-high', retries: 0 },
+        factcheck: { cli: 'agy', model: 'gemini-4-carbon-high', retries: 0 },
+        package: { cli: 'agy', model: 'gemini-3.8-flash-high', retries: 0 },
       },
     },
     publish: {

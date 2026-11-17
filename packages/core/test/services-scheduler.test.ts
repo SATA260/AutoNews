@@ -9,6 +9,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   computeNextScheduleRunAt,
   createCore,
+  editSettingsFile,
   type LaunchctlExecutor,
   LockBusyError,
   type Notifier,
@@ -95,6 +96,9 @@ async function setupServiceWorkspace(feedBaseUrl: string) {
     path.join(rootDir, 'config', 'settings.yaml'),
   );
 
+  await editSettingsFile(path.join(rootDir, 'config', 'settings.yaml'), (doc) => {
+    doc.setIn(['ai', 'providers'], {});
+  });
   await updateSettingsFile(path.join(rootDir, 'config', 'settings.yaml'), {
     clis: {
       agy: { adapter: 'agy', bin: FAKE_AGY_BIN, extraArgs: [] },
@@ -104,11 +108,11 @@ async function setupServiceWorkspace(feedBaseUrl: string) {
     },
     ai: {
       stages: {
-        select: { retries: 0 },
-        summarize: { retries: 0 },
-        polish: { retries: 0 },
-        factcheck: { retries: 0 },
-        package: { retries: 0 },
+        select: { cli: 'agy', model: 'gemini-3.8-flash-high', retries: 0 },
+        summarize: { cli: 'agy', model: 'gemini-3.8-flash-high', retries: 0 },
+        polish: { cli: 'agy', model: 'gemini-3.8-flash-high', retries: 0 },
+        factcheck: { cli: 'agy', model: 'gemini-4-carbon-high', retries: 0 },
+        package: { cli: 'agy', model: 'gemini-3.8-flash-high', retries: 0 },
       },
     },
   });
@@ -505,13 +509,17 @@ describe('M8 services, detached worker, launchd scheduler, and doctor', () => {
     await core.scheduler.remove(job.id);
     expect(await core.scheduler.list()).toHaveLength(0);
 
-    // 3. SystemService doctor 与 listModels
+    // 3. SystemService doctor、副本保护、配置指纹失效、失败不污染缓存及并发交错收敛
+    expect(core.system.getCachedDoctor()).toBeNull();
+    expect(core.system.getCachedModelsByRoute()).toEqual({});
+
     const models = await core.system.listModels('agy');
     expect(models).toEqual([
       'gemini-4-carbon-high',
       'gemini-3.8-flash-high',
       'gemini-3.8-flash-medium',
     ]);
+    expect(core.system.getCachedModelsByRoute().agy).toEqual(models);
 
     const doctor = await core.system.doctor();
     expect(doctor.ok).toBe(true);
@@ -522,6 +530,85 @@ describe('M8 services, detached worker, launchd scheduler, and doctor', () => {
     expect(doctor.checks.find((c) => c.name === 'playwright_chromium')?.ok).toBe(true);
     expect(doctor.checks.find((c) => c.name === 'tts:silent')?.ok).toBe(true);
     expect(doctor.checks.find((c) => c.name === 'disk_space')?.ok).toBe(true);
+
+    // 验证 getCachedDoctor 返回深拷贝副本，外部篡改不会污染缓存；修改无关工作流参数不使缓存失效
+    const cachedCopy = core.system.getCachedDoctor();
+    expect(cachedCopy).toEqual(doctor);
+    if (cachedCopy?.checks[0]) {
+      cachedCopy.checks[0].detail = 'mutated-by-caller';
+    }
+    expect(core.system.getCachedDoctor()?.checks[0]?.detail).not.toBe('mutated-by-caller');
+    expect(await core.system.doctor({ useCache: true })).toEqual(doctor);
+    await core.config.updateSettings({ issue: { freshnessHours: 36 } });
+    expect(core.system.getCachedDoctor()).toEqual(doctor);
+
+    // 真实修改 CLI extraArgs 与语音参数：路由指纹与自检指纹同步变化，两个缓存立即失效
+    const prevAgyKey = core.system.getRouteCacheKeys().agy;
+    await core.config.updateSettings({
+      clis: { agy: { adapter: 'agy', bin: FAKE_AGY_BIN, extraArgs: ['--verbose'] } },
+      tts: { providers: { silent: { charsPerSecond: 5 } } },
+    });
+    expect(core.system.getCachedDoctor()).toBeNull();
+    expect(core.system.getRouteCacheKeys().agy).not.toBe(prevAgyKey);
+    expect(core.system.getCachedModelsByRoute().agy).toBeUndefined();
+
+    // 验证交错并发请求（普通预热未完成时触发强制刷新）均等待最新一代结果，且失败不会写入空列表缓存
+    let gwCalls = 0;
+    let shouldFailGw = true;
+    const gwServer = http.createServer((req, res) => {
+      if (req.url === '/v1/models') {
+        const callNo = ++gwCalls;
+        if (shouldFailGw) {
+          res.writeHead(500, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: { code: 'upstream_down' } }));
+          return;
+        }
+        const delayMs = callNo === 2 ? 15 : 50;
+        setTimeout(() => {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ data: [{ id: `gw-model-${callNo}` }] }));
+        }, delayMs);
+        return;
+      }
+      res.writeHead(404);
+      res.end();
+    });
+    await new Promise<void>((resolve) => gwServer.listen(0, '127.0.0.1', () => resolve()));
+    activeServers.push(gwServer);
+    const gwAddr = gwServer.address();
+    if (!gwAddr || typeof gwAddr === 'string') {
+      throw new Error('Failed to start mock model gateway');
+    }
+
+    await core.config.saveModelApiConnection({
+      name: 'interleave-gw',
+      baseUrl: `http://127.0.0.1:${gwAddr.port}/v1`,
+      protocol: 'chat-completions',
+    });
+
+    // 首次失败不写入空数组缓存
+    const failedWarm = await core.system.warmModelRoutes({ routes: ['interleave-gw'] });
+    expect(failedWarm.errorsByCli['interleave-gw']).toBeTruthy();
+    expect(failedWarm.modelsByCli['interleave-gw']).toBeUndefined();
+    expect(core.system.getCachedModelsByRoute()['interleave-gw']).toBeUndefined();
+
+    // 恢复服务后，先发起较慢的常规预热（第 2 次请求，延迟 60ms），紧接着发起较快的强制刷新（第 3 次请求，延迟 10ms）
+    shouldFailGw = false;
+    const pWarm = core.system.warmModelRoutes({ routes: ['interleave-gw'], forceRefresh: false });
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    const pForce = core.system.warmModelRoutes({ routes: ['interleave-gw'], forceRefresh: true });
+    const [resWarm, resForce] = await Promise.all([pWarm, pForce]);
+    expect(resForce.modelsByCli['interleave-gw']).toEqual(['gw-model-3']);
+    expect(resWarm.modelsByCli['interleave-gw']).toEqual(['gw-model-3']);
+
+    // 已有成功缓存时，强制刷新失败不会用空列表覆盖原有有效缓存
+    shouldFailGw = true;
+    const failedForce = await core.system.warmModelRoutes({
+      routes: ['interleave-gw'],
+      forceRefresh: true,
+    });
+    expect(failedForce.errorsByCli['interleave-gw']).toBeTruthy();
+    expect(failedForce.modelsByCli['interleave-gw']).toEqual(['gw-model-3']);
 
     await core.close();
   });

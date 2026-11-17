@@ -5,7 +5,13 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
-import { createCore, createRun, updateSettingsFile, updateSourcesFile } from '@aidaily/core';
+import {
+  createCore,
+  createRun,
+  editSettingsFile,
+  updateSettingsFile,
+  updateSourcesFile,
+} from '@aidaily/core';
 import { afterEach, describe, expect, it } from 'vitest';
 import { type CliIo, runCli } from '../src/index.js';
 
@@ -117,7 +123,11 @@ async function setupCliWorkspace(feedBaseUrl: string) {
   process.env.FAKE_BILIUP_STATE_FILE = biliStateFile;
   process.env.HOME = rootDir;
 
-  await updateSettingsFile(path.join(rootDir, 'config', 'settings.yaml'), {
+  const tempSettingsPath = path.join(rootDir, 'config', 'settings.yaml');
+  await editSettingsFile(tempSettingsPath, (doc) => {
+    doc.setIn(['ai', 'providers'], {});
+  });
+  await updateSettingsFile(tempSettingsPath, {
     clis: {
       agy: { adapter: 'agy', bin: FAKE_AGY_BIN, extraArgs: [] },
       biliup: { adapter: 'generic', bin: FAKE_BILIUP_BIN, extraArgs: [] },
@@ -127,11 +137,11 @@ async function setupCliWorkspace(feedBaseUrl: string) {
     },
     ai: {
       stages: {
-        select: { retries: 0 },
-        summarize: { retries: 0 },
-        polish: { retries: 0 },
-        factcheck: { retries: 0 },
-        package: { retries: 0 },
+        select: { cli: 'agy', model: 'gemini-3.8-flash-high', retries: 0 },
+        summarize: { cli: 'agy', model: 'gemini-3.8-flash-high', retries: 0 },
+        polish: { cli: 'agy', model: 'gemini-3.8-flash-high', retries: 0 },
+        factcheck: { cli: 'agy', model: 'gemini-4-carbon-high', retries: 0 },
+        package: { cli: 'agy', model: 'gemini-3.8-flash-high', retries: 0 },
       },
     },
   });

@@ -2,6 +2,7 @@
 
 import {
   AiStageNameSchema,
+  type DoctorReport,
   PIPELINE_STAGES,
   ScheduleTimeSchema,
   type SourceTestResult,
@@ -633,5 +634,74 @@ export async function testSourceAction(
     };
   } catch (err) {
     return { ok: false, error: err instanceof Error ? err.message : String(err) };
+  }
+}
+
+const LoadModelRoutesInputSchema = z
+  .object({
+    routes: z.array(z.string().trim().min(1)).max(50).optional(),
+    forceRefresh: z.boolean().optional(),
+  })
+  .optional();
+
+/** 模型列表后台加载或强制刷新的响应负载 */
+export interface LoadModelRoutesPayload {
+  revision: number;
+  modelsByCli: Record<string, string[]>;
+  errorsByCli: Record<string, string>;
+}
+
+/** 按需后台预热或强制刷新调用方式的模型列表，区分成功列表与单路失败错误 */
+export async function loadModelRoutesAction(input?: {
+  routes?: string[];
+  forceRefresh?: boolean;
+}): Promise<ActionResult<LoadModelRoutesPayload>> {
+  try {
+    const parsed = LoadModelRoutesInputSchema.parse(input);
+    const core = await getCore();
+    const result = await core.system.warmModelRoutes(parsed);
+    if (parsed?.forceRefresh) {
+      safeRevalidate('/settings');
+    }
+    const failedEntries = Object.entries(result.errorsByCli);
+    if (failedEntries.length > 0) {
+      const summary = failedEntries.map(([name, reason]) => `${name}（${reason}）`).join('；');
+      return {
+        ok: false,
+        data: result,
+        error: `部分或全部调用方式未能获取模型列表：${summary}`,
+      };
+    }
+    return {
+      ok: true,
+      data: result,
+      message: parsed?.forceRefresh ? '可用模型列表已刷新' : undefined,
+    };
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : '加载模型列表失败' };
+  }
+}
+
+const RunDoctorInputSchema = z
+  .object({
+    forceRefresh: z.boolean().optional(),
+  })
+  .optional();
+
+/** 在设置页执行或强制重新执行环境健康自检并返回诊断报告 */
+export async function runDoctorCheckAction(input?: {
+  forceRefresh?: boolean;
+}): Promise<ActionResult<DoctorReport>> {
+  try {
+    const parsed = RunDoctorInputSchema.parse(input);
+    const core = await getCore();
+    const report = await core.system.doctor({
+      useCache: !parsed?.forceRefresh,
+      forceRefresh: Boolean(parsed?.forceRefresh),
+    });
+    safeRevalidate('/settings');
+    return { ok: true, data: report, message: '环境自检已完成' };
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : '环境自检失败' };
   }
 }

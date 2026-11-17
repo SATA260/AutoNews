@@ -1,13 +1,16 @@
 import fs from 'node:fs/promises';
+import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { IssuePackage, Timeline } from '@aidaily/contracts';
-import { createRun, emitRunEvent, writeJsonAtomic } from '@aidaily/core';
+import { createRun, editSettingsFile, emitRunEvent, writeJsonAtomic } from '@aidaily/core';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
   createScheduleAction,
+  loadModelRoutesAction,
   removeModelApiConnectionAction,
+  runDoctorCheckAction,
   saveModelApiConnectionAction,
   startRunAction,
   updateDraftAction,
@@ -18,6 +21,15 @@ import { GET as getEventsRoute } from '@/app/api/runs/[id]/events/route';
 import { closeCoreSingleton, getCore } from '@/lib/core';
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..', '..');
+const FAKE_AGY_BIN = path.join(REPO_ROOT, 'packages', 'core', 'test', 'fixtures', 'fake-agy.mjs');
+const FAKE_CODEX_BIN = path.join(
+  REPO_ROOT,
+  'packages',
+  'cli-bridge',
+  'test',
+  'fixtures',
+  'fake-codex.mjs',
+);
 const tempDirs: string[] = [];
 const envSnapshot = { ...process.env };
 
@@ -27,19 +39,27 @@ afterEach(async () => {
   await Promise.all(tempDirs.splice(0).map((dir) => fs.rm(dir, { recursive: true, force: true })));
 });
 
-/** 创建隔离的临时测试工作区并将全局核心引擎指向该目录 */
+/** 创建隔离的临时测试工作区并将全局核心引擎与命令行工具指向假依赖 */
 async function setupWebTestWorkspace(): Promise<string> {
+  await Promise.all([fs.chmod(FAKE_AGY_BIN, 0o755), fs.chmod(FAKE_CODEX_BIN, 0o755)]);
   const rootDir = await fs.mkdtemp(path.join(os.tmpdir(), 'aidaily-web-test-'));
   tempDirs.push(rootDir);
+  const tempSettingsPath = path.join(rootDir, 'config', 'settings.yaml');
   await fs.mkdir(path.join(rootDir, 'config'), { recursive: true });
-  await fs.copyFile(
-    path.join(REPO_ROOT, 'config', 'settings.yaml'),
-    path.join(rootDir, 'config', 'settings.yaml'),
-  );
+  await fs.copyFile(path.join(REPO_ROOT, 'config', 'settings.yaml'), tempSettingsPath);
   await fs.copyFile(
     path.join(REPO_ROOT, 'config', 'sources.yaml'),
     path.join(rootDir, 'config', 'sources.yaml'),
   );
+  await editSettingsFile(tempSettingsPath, (doc) => {
+    doc.setIn(['ai', 'providers'], {});
+    doc.setIn(['clis', 'agy', 'bin'], FAKE_AGY_BIN);
+    doc.setIn(['clis', 'codex', 'bin'], FAKE_CODEX_BIN);
+    for (const stage of ['select', 'summarize', 'polish', 'factcheck', 'package']) {
+      doc.setIn(['ai', 'stages', stage, 'cli'], 'agy');
+      doc.setIn(['ai', 'stages', stage, 'model'], 'gemini-3.8-flash-high');
+    }
+  });
   process.env.AIDAILY_ROOT = rootDir;
   return rootDir;
 }
@@ -593,5 +613,102 @@ describe('apps/web routes and Server Actions', () => {
     overlongDraftFd.set('tags', 'AI');
     const draftTooLong = await updateDraftAction(overlongDraftFd);
     expect(draftTooLong.ok).toBe(false);
+  });
+
+  it('caches model route lists, avoids caching failed fetches as empty, invalidates on credential change, and supports full force refresh', async () => {
+    await setupWebTestWorkspace();
+    let modelHits = 0;
+    let failGateway = true;
+    const srv = http.createServer((req, res) => {
+      if (req.url === '/v1/models') {
+        modelHits += 1;
+        if (failGateway) {
+          res.writeHead(502, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: { code: 'bad_gateway' } }));
+          return;
+        }
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ data: [{ id: `mock-model-${modelHits}` }] }));
+        return;
+      }
+      res.writeHead(404);
+      res.end();
+    });
+    await new Promise<void>((resolve) => srv.listen(0, '127.0.0.1', () => resolve()));
+    try {
+      const addr = srv.address();
+      if (!addr || typeof addr === 'string') {
+        throw new Error('无法启动本地测试模型网关');
+      }
+      const gatewayUrl = `http://127.0.0.1:${addr.port}/v1`;
+      expect(
+        await saveModelApiConnectionAction(
+          apiConnectionForm('本地网关', { baseUrl: gatewayUrl, apiKey: 'key-v1' }),
+        ),
+      ).toMatchObject({ ok: true });
+
+      const routeName = '本地网关';
+      // 1. 首次拉取失败：返回 ok: false 与错误明细，且不把失败写成空数组缓存，60 秒内重新进入仍可重试成功
+      const coldFail = await loadModelRoutesAction({ routes: [routeName], forceRefresh: false });
+      expect(coldFail.ok).toBe(false);
+      expect(coldFail.data?.errorsByCli[routeName]).toBeTruthy();
+      expect(coldFail.data?.modelsByCli[routeName]).toBeUndefined();
+      expect(modelHits).toBe(1);
+
+      failGateway = false;
+      const recoveredLoad = await loadModelRoutesAction({
+        routes: [routeName],
+        forceRefresh: false,
+      });
+      expect(recoveredLoad.ok).toBe(true);
+      expect(recoveredLoad.data?.modelsByCli[routeName]).toEqual(['mock-model-2']);
+      expect(modelHits).toBe(2);
+      const revAfterFirstSuccess = recoveredLoad.data?.revision ?? 0;
+
+      // 2. 命中缓存：再次打开设置页不重新请求远程接口
+      const cachedLoad = await loadModelRoutesAction({ routes: [routeName], forceRefresh: false });
+      expect(cachedLoad.ok).toBe(true);
+      expect(cachedLoad.data?.modelsByCli[routeName]).toEqual(['mock-model-2']);
+      expect(modelHits).toBe(2);
+
+      // 3. 模拟页面点击全量「刷新模型列表」（不传 routes）：假 CLI 与本地网关同时刷新，且单路失败时保留已有成功缓存
+      failGateway = true;
+      const failedFullRefresh = await loadModelRoutesAction({ forceRefresh: true });
+      expect(failedFullRefresh.ok).toBe(false);
+      expect(failedFullRefresh.data?.errorsByCli[routeName]).toBeTruthy();
+      expect(failedFullRefresh.data?.modelsByCli[routeName]).toEqual(['mock-model-2']);
+      expect(failedFullRefresh.data?.modelsByCli.agy).toContain('gemini-3.8-flash-high');
+      expect(failedFullRefresh.data?.modelsByCli.codex).toEqual(['fixture-codex']);
+      expect(modelHits).toBe(3);
+
+      // 4. 更新 API 密钥改变配置指纹：旧缓存自动失效，重新拉取新列表并推进 revision
+      failGateway = false;
+      expect(
+        await saveModelApiConnectionAction(
+          apiConnectionForm(routeName, {
+            previousName: routeName,
+            baseUrl: gatewayUrl,
+            apiKey: 'key-v2',
+          }),
+        ),
+      ).toMatchObject({ ok: true });
+      const core = await getCore();
+      expect(core.system.getCachedModelsByRoute()[routeName]).toBeUndefined();
+
+      const reloadedAfterKeyChange = await loadModelRoutesAction({
+        routes: [routeName],
+        forceRefresh: false,
+      });
+      expect(reloadedAfterKeyChange.ok).toBe(true);
+      expect(reloadedAfterKeyChange.data?.modelsByCli[routeName]).toEqual(['mock-model-4']);
+      expect(reloadedAfterKeyChange.data?.revision).toBeGreaterThan(revAfterFirstSuccess);
+
+      const badInput = await runDoctorCheckAction({
+        forceRefresh: 'invalid' as unknown as boolean,
+      });
+      expect(badInput.ok).toBe(false);
+    } finally {
+      await new Promise<void>((resolve) => srv.close(() => resolve()));
+    }
   });
 });
