@@ -7,7 +7,11 @@ import type { TtsSettings } from '@aidaily/contracts';
 export function computeTtsCacheKey(
   providerId: string,
   providerConfig: Record<string, unknown>,
-  postprocess: Pick<TtsSettings['postprocess'], 'sampleRate' | 'trimSilence'>,
+  postprocess: Pick<TtsSettings['postprocess'], 'sampleRate' | 'trimSilence'> & {
+    loudnessLUFS?: number;
+    fadeInMs?: number;
+    fadeOutMs?: number;
+  },
   text: string,
 ): string {
   const payload = JSON.stringify({
@@ -15,6 +19,9 @@ export function computeTtsCacheKey(
     providerConfig,
     sampleRate: postprocess.sampleRate,
     trimSilence: postprocess.trimSilence,
+    loudnessLUFS: postprocess.loudnessLUFS,
+    fadeInMs: postprocess.fadeInMs,
+    fadeOutMs: postprocess.fadeOutMs,
     text,
   });
   return crypto.createHash('sha1').update(payload, 'utf8').digest('hex');

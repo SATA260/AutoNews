@@ -11,6 +11,7 @@ import { execa } from 'execa';
 import type { CoreContext } from '../context.js';
 import { listBgmFiles } from '../media/bgm.js';
 import { writeFileAtomic } from '../storage/files.js';
+import { validateTemplateItemCount } from '../templates/registry.js';
 
 const SAFE_SCHEDULE_ID_PATTERN = /^[a-zA-Z0-9._-]+$/;
 
@@ -331,6 +332,7 @@ export function createSchedulerService(
 
       if (input.bgmFile && !(await listBgmFiles(ctx)).includes(input.bgmFile))
         throw new Error('指定的背景音乐不在曲库中');
+      validateTemplateItemCount(ctx.settings, input.itemCount);
       const name = input.name?.trim() || `每日定时任务 ${time}`;
       const enabled = input.enabled ?? true;
       const id = `sched-${crypto.randomBytes(4).toString('hex')}`;
@@ -374,6 +376,7 @@ export function createSchedulerService(
       }
       if (patch.bgmFile && !(await listBgmFiles(ctx)).includes(patch.bgmFile))
         throw new Error('指定的背景音乐不在曲库中');
+      if (patch.itemCount !== undefined) validateTemplateItemCount(ctx.settings, patch.itemCount);
       const nextName = patch.name !== undefined ? patch.name.trim() : undefined;
       if (nextName !== undefined && !nextName) {
         throw new Error('定时任务名称不能为空');

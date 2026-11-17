@@ -10,6 +10,8 @@ import { sanitizeNarrationSentence } from './sanitize.js';
 import type { TtsProvider, TtsServiceOptions } from './types.js';
 
 export const TTS_VERSION = '0.1.0';
+/** 本地语音处理方式变化时递增，用于使旧音频缓存失效。 */
+export const QWEN_AUDIO_PROCESSING_VERSION = 2;
 
 export * from './audio.js';
 export * from './cache.js';
@@ -91,12 +93,15 @@ export class TtsService {
       | {
           signal?: AbortSignal;
           onSectionDone?: (audio: SectionAudio) => Promise<void> | void;
+          onWarning?: (message: string) => Promise<void> | void;
           settingsOverride?: TtsSettings;
         },
   ): Promise<SectionAudio[]> {
     const signal = signalOrOpts && 'aborted' in signalOrOpts ? signalOrOpts : signalOrOpts?.signal;
     const onSectionDone =
       signalOrOpts && 'onSectionDone' in signalOrOpts ? signalOrOpts.onSectionDone : undefined;
+    const onWarning =
+      signalOrOpts && 'onWarning' in signalOrOpts ? signalOrOpts.onWarning : undefined;
     const effectiveSettings =
       signalOrOpts && 'settingsOverride' in signalOrOpts && signalOrOpts.settingsOverride
         ? signalOrOpts.settingsOverride
@@ -119,7 +124,7 @@ export class TtsService {
     const resolvedOutDir = path.resolve(outDir);
 
     await fs.mkdir(resolvedOutDir, { recursive: true });
-    await provider.start?.(providerConfig);
+    await provider.start?.(providerConfig, signal);
 
     let primaryError: unknown;
     let stopError: unknown;
@@ -152,9 +157,19 @@ export class TtsService {
             {
               ...providerConfig,
               cacheIdentity,
-              processingVersion: provider.id === 'qwen-local' ? 1 : 0,
+              processingVersion: provider.id === 'qwen-local' ? QWEN_AUDIO_PROCESSING_VERSION : 0,
             },
-            { sampleRate, trimSilence },
+            {
+              sampleRate,
+              trimSilence,
+              ...(provider.id === 'qwen-local'
+                ? {
+                    loudnessLUFS: effectiveSettings.postprocess.loudnessLUFS,
+                    fadeInMs: 15,
+                    fadeOutMs: 20,
+                  }
+                : {}),
+            },
             text,
           );
 
@@ -190,6 +205,7 @@ export class TtsService {
                 trimSilence,
                 isSilentProvider: provider.id === 'silent',
                 normalizeLoudness: provider.id === 'qwen-local',
+                loudnessLUFS: effectiveSettings.postprocess.loudnessLUFS,
                 ffmpegBin: this.ffmpegBin,
                 ffprobeBin: this.ffprobeBin,
                 signal,
@@ -205,9 +221,14 @@ export class TtsService {
                 break;
               }
             }
-            if (durationMs === null)
-              throw new Error(`语音片段时长异常，已重试 ${maxAttempts} 次: ${text}`);
-            await saveToCache(this.cacheDir, cacheKey, normFile);
+            if (durationMs === null) {
+              durationMs = await probeAudioDurationMs(normFile, this.ffprobeBin, signal);
+              await onWarning?.(
+                `语音片段时长异常，重试 ${maxAttempts} 次后保留最后一次可播放结果：${section.key} 第 ${i + 1} 句`,
+              );
+            } else {
+              await saveToCache(this.cacheDir, cacheKey, normFile);
+            }
           }
 
           segmentFiles.push(normFile);

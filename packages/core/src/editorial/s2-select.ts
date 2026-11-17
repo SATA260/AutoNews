@@ -126,6 +126,26 @@ export async function runSelectStage(
     });
   });
 
+  const personas = await loadPersonas(ctx);
+  const previous = ctx.db
+    .prepare(
+      'SELECT host_id FROM runs WHERE id != ? AND host_id IS NOT NULL ORDER BY created_at DESC LIMIT 1',
+    )
+    .get(runId) as { host_id: string } | undefined;
+  const current = ctx.db
+    .prepare('SELECT host_id, host_manual FROM runs WHERE id = ?')
+    .get(runId) as {
+    host_id: string | null;
+    host_manual: number;
+  };
+  const host =
+    (current.host_manual ? current.host_id : null) ??
+    chooseHost(
+      allEvents.filter((event) => event.role === 'primary'),
+      personas,
+      previous?.host_id ?? null,
+    );
+
   inTransaction(ctx.db, () => {
     if (initialReserveIds.length > 0) {
       ctx.repos.articles.markReserved(initialReserveIds, runId);
@@ -134,6 +154,7 @@ export async function runSelectStage(
       ctx.repos.events.insertMany(allEvents);
       ctx.repos.runItems.createMany(allItems);
     }
+    ctx.db.prepare('UPDATE runs SET host_id = ? WHERE id = ?').run(host, runId);
   });
 
   let refillRoundsUsed = 0;
@@ -169,24 +190,6 @@ export async function runSelectStage(
       `候选新闻事件不足：目标 ${itemCount} 条，经 ${refillRoundsUsed} 轮补充后仍仅有 ${allEvents.length} 条`,
     );
   }
-
-  const personas = await loadPersonas(ctx);
-  const previous = ctx.db
-    .prepare(
-      'SELECT host_id FROM runs WHERE id != ? AND host_id IS NOT NULL ORDER BY created_at DESC LIMIT 1',
-    )
-    .get(runId) as { host_id: string } | undefined;
-  const current = ctx.db.prepare('SELECT host_id FROM runs WHERE id = ?').get(runId) as {
-    host_id: string | null;
-  };
-  const host =
-    current.host_id ??
-    chooseHost(
-      allEvents.filter((event) => event.role === 'primary'),
-      personas,
-      previous?.host_id ?? null,
-    );
-  if (host) ctx.db.prepare('UPDATE runs SET host_id = ? WHERE id = ?').run(host, runId);
 
   const primaryCount = allEvents.filter((e) => e.role === 'primary').length;
   const reserveCount = allEvents.length - primaryCount;

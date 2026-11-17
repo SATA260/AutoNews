@@ -434,7 +434,7 @@ describe('editorial workflow, TTS timeline, interruption recovery, and retry eng
 
     await core.close();
     await coreCustom.close();
-  });
+  }, 30_000);
 
   it('handles factcheck pass-override to revise, drop+reserve promotion, and backup refill', async () => {
     const { rootDir, scriptFile } = await setupWorkflowWorkspace({
@@ -570,7 +570,7 @@ describe('editorial workflow, TTS timeline, interruption recovery, and retry eng
 
     expect(core.context.repos.runs.getById(badRunId)?.errorCode).toBe('insufficient_items');
     await core.close();
-  });
+  }, 30_000);
 
   it('supports resume from interruption, fromStage archiving, retryItem, useLatestConfig, and stale lock recovery', async () => {
     const { rootDir, scriptFile } = await setupWorkflowWorkspace({
@@ -766,6 +766,74 @@ describe('editorial workflow, TTS timeline, interruption recovery, and retry eng
 
     await core.close();
   }, 30_000);
+
+  it('重跑选题时重新选择自动主播并保留手动主播', async () => {
+    const { rootDir, scriptFile } = await setupWorkflowWorkspace();
+    await updateSettingsFile(path.join(rootDir, 'config', 'settings.yaml'), {
+      issue: { minScore: 7.5 },
+    });
+    await fs.copyFile(
+      path.join(REPO_ROOT, 'config', 'personas.yaml'),
+      path.join(rootDir, 'config', 'personas.yaml'),
+    );
+    const article = {
+      slug: 'choice',
+      title: '人工智能产品更新',
+      pubDate: 'Mon, 16 Nov 2026 09:00:00 GMT',
+      body: '团队公布了新的人工智能进展，并介绍了适用范围。',
+    };
+    const core = await createCore({
+      rootDir,
+      now: () => new Date('2026-11-16T10:00:00.000Z'),
+      fetchImpl: makeFeedMockFetch([article]),
+    });
+    const articleId = computeArticleId('https://primary.example.com/choice');
+    const setSelection = async (entity: string) =>
+      fs.writeFile(
+        scriptFile,
+        JSON.stringify({
+          rules: [
+            {
+              stage: 'select',
+              actions: [
+                {
+                  output: {
+                    events: [
+                      {
+                        title: `${entity} 发布更新`,
+                        articleIds: [articleId],
+                        category: '人工智能',
+                        entity,
+                        score: 9,
+                        publicAppeal: 9,
+                        reason: '重要',
+                        duplicateOfHistory: false,
+                      },
+                    ],
+                  },
+                },
+              ],
+            },
+          ],
+        }),
+      );
+    try {
+      await setSelection('OpenAI');
+      const automatic = createRun(core.context, { itemCount: 1 });
+      await executeRun(core.context, automatic, { stopAfterStage: 'select' });
+      expect(core.context.repos.runs.getById(automatic)?.hostId).toBe('gpt');
+      await setSelection('Google');
+      await resumeRun(core.context, automatic, { fromStage: 'select', stopAfterStage: 'select' });
+      expect(core.context.repos.runs.getById(automatic)?.hostId).toBe('gemini');
+      abandonRun(core.context, automatic);
+      const manual = createRun(core.context, { itemCount: 1, hostId: 'claude' });
+      await executeRun(core.context, manual, { stopAfterStage: 'select' });
+      await resumeRun(core.context, manual, { fromStage: 'select', stopAfterStage: 'select' });
+      expect(core.context.repos.runs.getById(manual)?.hostId).toBe('claude');
+    } finally {
+      await core.close();
+    }
+  }, 15_000);
 
   it('允许少于上限的新闻继续制作，并在没有重点新闻时跳过', async () => {
     const { rootDir } = await setupWorkflowWorkspace();

@@ -11,6 +11,7 @@ export interface NormalizeSegmentOptions {
   trimSilence: boolean;
   isSilentProvider?: boolean;
   normalizeLoudness?: boolean;
+  loudnessLUFS?: number;
   ffmpegBin?: string;
   ffprobeBin?: string;
   signal?: AbortSignal;
@@ -142,6 +143,8 @@ export async function generateSilenceWav(
 export async function normalizeSegmentToWav(opts: NormalizeSegmentOptions): Promise<void> {
   const ffmpegBin = opts.ffmpegBin ?? 'ffmpeg';
   const ffprobeBin = opts.ffprobeBin ?? 'ffprobe';
+  const inputDuration = await probeAudioDurationMs(opts.inFile, ffprobeBin, opts.signal);
+  const processingTimeout = Math.max(DEFAULT_MEDIA_TIMEOUT_MS, inputDuration * 4 + 60_000);
 
   const convert = async (applyTrim: boolean) => {
     await withAtomicWavWrite(opts.outFile, async (tmpOut) => {
@@ -156,7 +159,7 @@ export async function normalizeSegmentToWav(opts: NormalizeSegmentOptions): Prom
 
       const res = await execa(ffmpegBin, args, {
         cancelSignal: opts.signal,
-        timeout: DEFAULT_MEDIA_TIMEOUT_MS,
+        timeout: processingTimeout,
         reject: false,
       });
       if (res.isCanceled) {
@@ -192,6 +195,8 @@ export async function normalizeSegmentToWav(opts: NormalizeSegmentOptions): Prom
 async function polishLoudness(opts: NormalizeSegmentOptions): Promise<void> {
   const ffmpeg = opts.ffmpegBin ?? 'ffmpeg';
   const duration = await probeAudioDurationMs(opts.outFile, opts.ffprobeBin, opts.signal);
+  const target = opts.loudnessLUFS ?? -16;
+  const processingTimeout = Math.max(DEFAULT_MEDIA_TIMEOUT_MS, duration * 4 + 60_000);
   const analysis = await execa(
     ffmpeg,
     [
@@ -199,12 +204,12 @@ async function polishLoudness(opts: NormalizeSegmentOptions): Promise<void> {
       '-i',
       opts.outFile,
       '-af',
-      'loudnorm=I=-16:TP=-1.5:LRA=7:print_format=json',
+      `loudnorm=I=${target}:TP=-1.5:LRA=7:print_format=json`,
       '-f',
       'null',
       '-',
     ],
-    { cancelSignal: opts.signal, timeout: DEFAULT_MEDIA_TIMEOUT_MS, reject: false },
+    { cancelSignal: opts.signal, timeout: processingTimeout, reject: false },
   );
   if (analysis.isCanceled) throw new DOMException('已取消', 'AbortError');
   if (analysis.exitCode !== 0) throw new Error(`测量语音响度失败: ${analysis.stderr}`);
@@ -215,7 +220,7 @@ async function polishLoudness(opts: NormalizeSegmentOptions): Promise<void> {
     Number(stats[key]),
   );
   if (values.some((value) => !Number.isFinite(value))) throw new Error('语音响度测量结果无效');
-  const filter = `loudnorm=I=-16:TP=-1.5:LRA=7:measured_I=${values[0]}:measured_TP=${values[1]}:measured_LRA=${values[2]}:measured_thresh=${values[3]}:offset=${values[4]}:linear=true,afade=t=in:st=0:d=0.015,afade=t=out:st=${Math.max(0, duration / 1000 - 0.02)}:d=0.02`;
+  const filter = `loudnorm=I=${target}:TP=-1.5:LRA=7:measured_I=${values[0]}:measured_TP=${values[1]}:measured_LRA=${values[2]}:measured_thresh=${values[3]}:offset=${values[4]}:linear=true,afade=t=in:st=0:d=0.015,afade=t=out:st=${Math.max(0, duration / 1000 - 0.02)}:d=0.02`;
   await withAtomicWavWrite(opts.outFile, async (tmp) => {
     const result = await execa(
       ffmpeg,
@@ -233,7 +238,7 @@ async function polishLoudness(opts: NormalizeSegmentOptions): Promise<void> {
         'pcm_s16le',
         tmp,
       ],
-      { cancelSignal: opts.signal, timeout: DEFAULT_MEDIA_TIMEOUT_MS, reject: false },
+      { cancelSignal: opts.signal, timeout: processingTimeout, reject: false },
     );
     if (result.isCanceled) throw new DOMException('已取消', 'AbortError');
     if (result.exitCode !== 0) throw new Error(`语音响度处理失败: ${result.stderr}`);
@@ -323,7 +328,7 @@ export async function concatSentenceWavs(
         ['-y', '-f', 'concat', '-safe', '0', '-i', listFile, '-c:a', 'pcm_s16le', tmpOut],
         {
           cancelSignal: opts.signal,
-          timeout: DEFAULT_MEDIA_TIMEOUT_MS,
+          timeout: Math.max(DEFAULT_MEDIA_TIMEOUT_MS, cursorMs * 4 + 60_000),
           reject: false,
         },
       );

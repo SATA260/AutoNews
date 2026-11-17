@@ -6,6 +6,14 @@ import { execa } from 'execa';
 
 const DEFAULT_FFMPEG_TIMEOUT_MS = 180_000;
 
+/** 按视频时长为处理命令预留时间，避免长视频过早超时。 */
+export function mediaTimeoutMs(durationMs: number, encoding = false): number {
+  return Math.max(
+    encoding ? 300_000 : 180_000,
+    Math.ceil(durationMs * (encoding ? 8 : 4)) + 60_000,
+  );
+}
+
 /** 生成带正确媒体扩展名的同目录临时文件路径，保证转码格式识别与原子重命名替换 */
 function makeSiblingTempPath(targetFile: string, fallbackExt: string): string {
   const dir = path.dirname(targetFile);
@@ -71,45 +79,6 @@ export async function renderCoverJpg(opts: {
       { signal: opts.signal, actionLabel: 'ffmpeg 生成封面图' },
     );
   });
-}
-
-interface LoudnormStats {
-  input_i?: string;
-  input_tp?: string;
-  input_lra?: string;
-  input_thresh?: string;
-  target_offset?: string;
-}
-
-/** 从 ffmpeg 双遍响度测量日志中提取标准 JSON 测量数据 */
-function parseLoudnormStats(stderr: string): LoudnormStats | null {
-  let end = stderr.lastIndexOf('}');
-  while (end !== -1) {
-    let start = stderr.lastIndexOf('{', end);
-    while (start !== -1) {
-      const candidate = stderr.slice(start, end + 1);
-      if (candidate.includes('"input_i"')) {
-        try {
-          const parsed = JSON.parse(candidate) as LoudnormStats;
-          const vals = [
-            parsed.input_i,
-            parsed.input_tp,
-            parsed.input_lra,
-            parsed.input_thresh,
-            parsed.target_offset ?? '0',
-          ];
-          if (vals.every((v) => v && v !== '-inf' && Number.isFinite(Number(v)))) {
-            return parsed;
-          }
-        } catch {
-          // 继续向上寻找合法 JSON 片段
-        }
-      }
-      start = stderr.lastIndexOf('{', start - 1);
-    }
-    end = stderr.lastIndexOf('}', end - 1);
-  }
-  return null;
 }
 
 /** 将路径安全限定在允许的基准目录之内，防止读取目录外的文件 */
@@ -185,10 +154,12 @@ export async function buildMasterAudioWav(opts: {
 
     if (mixTags.length > 1) {
       filterParts.push(
-        `${mixTags.join('')}amix=inputs=${mixTags.length}:duration=longest:dropout_transition=0:normalize=0,apad,atrim=0:${totalSec}[voice]`,
+        `${mixTags.join('')}amix=inputs=${mixTags.length}:duration=longest:dropout_transition=0:normalize=0,apad,atrim=0:${totalSec},alimiter=limit=0.8414:level=false:latency=true[voice]`,
       );
     } else {
-      filterParts.push(`${mixTags[0]}apad,atrim=0:${totalSec}[voice]`);
+      filterParts.push(
+        `${mixTags[0]}apad,atrim=0:${totalSec},alimiter=limit=0.8414:level=false:latency=true[voice]`,
+      );
     }
 
     const rawVoiceWav = path.join(workDir, 'voice-raw.wav');
@@ -209,53 +180,15 @@ export async function buildMasterAudioWav(opts: {
         'pcm_s16le',
         rawVoiceWav,
       ],
-      { signal: opts.signal, actionLabel: 'ffmpeg 拼接时间轴人声轨道' },
+      {
+        signal: opts.signal,
+        timeoutMs: mediaTimeoutMs(opts.timeline.totalMs),
+        actionLabel: 'ffmpeg 拼接时间轴人声轨道',
+      },
     );
 
-    // 2. 若启用真实语音合成（非静音测试器），采用双遍 loudnorm 统一响度至目标 LUFS
-    let voiceWav = rawVoiceWav;
-    if (!opts.isSilentProvider) {
-      const measureRes = await runMediaCommand(
-        ffmpegBin,
-        [
-          '-y',
-          '-i',
-          rawVoiceWav,
-          '-af',
-          `loudnorm=I=${opts.loudnessLUFS}:TP=-1.5:LRA=11:print_format=json`,
-          '-f',
-          'null',
-          '-',
-        ],
-        { signal: opts.signal, actionLabel: 'ffmpeg 测量人声响度' },
-      );
-
-      const stats = parseLoudnormStats(measureRes.stderr);
-      const normVoiceWav = path.join(workDir, 'voice-norm.wav');
-      const loudnormFilter = stats
-        ? `loudnorm=I=${opts.loudnessLUFS}:TP=-1.5:LRA=11:measured_I=${stats.input_i}:measured_TP=${stats.input_tp}:measured_LRA=${stats.input_lra}:measured_thresh=${stats.input_thresh}:offset=${stats.target_offset ?? '0'}:linear=true:print_format=summary`
-        : `loudnorm=I=${opts.loudnessLUFS}:TP=-1.5:LRA=11`;
-
-      await runMediaCommand(
-        ffmpegBin,
-        [
-          '-y',
-          '-i',
-          rawVoiceWav,
-          '-af',
-          loudnormFilter,
-          '-ar',
-          String(opts.sampleRate),
-          '-ac',
-          '2',
-          '-c:a',
-          'pcm_s16le',
-          normVoiceWav,
-        ],
-        { signal: opts.signal, actionLabel: 'ffmpeg 执行人声响度归一化' },
-      );
-      voiceWav = normVoiceWav;
-    }
+    // 保持单句的响度，整轨仅限制峰值。
+    const voiceWav = rawVoiceWav;
 
     // 3. 若配置了背景音乐，循环铺满全片并挂载人声侧链压低混音
     const bgmRel = opts.bgm.file.trim();
@@ -273,14 +206,14 @@ export async function buildMasterAudioWav(opts: {
 
       const filterComplex =
         duckMagnitude === 0
-          ? `${bgmFilter}[1:a][bgm_lvl]amix=inputs=2:duration=first:normalize=0,atrim=0:${totalSec},alimiter=limit=0.95[out]`
+          ? `${bgmFilter}[1:a][bgm_lvl]amix=inputs=2:duration=first:normalize=0,atrim=0:${totalSec},alimiter=limit=0.95:level=false:latency=true[out]`
           : (() => {
               const duckRatio = Math.max(2, Math.min(20, Math.round(duckMagnitude / 2) || 2));
               return (
                 `[1:a]asplit=2[voice_main][voice_sc];` +
                 bgmFilter +
                 `[bgm_lvl][voice_sc]sidechaincompress=threshold=0.02:ratio=${duckRatio}:attack=40:release=350[bgm_ducked];` +
-                `[voice_main][bgm_ducked]amix=inputs=2:duration=first:normalize=0,atrim=0:${totalSec},alimiter=limit=0.95[out]`
+                `[voice_main][bgm_ducked]amix=inputs=2:duration=first:normalize=0,atrim=0:${totalSec},alimiter=limit=0.95:level=false:latency=true[out]`
               );
             })();
 
@@ -307,7 +240,11 @@ export async function buildMasterAudioWav(opts: {
             'pcm_s16le',
             tmpOut,
           ],
-          { signal: opts.signal, actionLabel: 'ffmpeg 混音背景音乐并侧链避让人声' },
+          {
+            signal: opts.signal,
+            timeoutMs: mediaTimeoutMs(opts.timeline.totalMs),
+            actionLabel: 'ffmpeg 混音背景音乐并侧链避让人声',
+          },
         );
       });
       return;
@@ -423,7 +360,11 @@ export async function composeSlidesVideoMp4(opts: {
           totalSec,
           tmpOut,
         ],
-        { signal: opts.signal, timeoutMs: 300_000, actionLabel: 'ffmpeg 合成成片 MP4' },
+        {
+          signal: opts.signal,
+          timeoutMs: mediaTimeoutMs(opts.totalMs, true),
+          actionLabel: 'ffmpeg 合成成片 MP4',
+        },
       );
     });
   } finally {

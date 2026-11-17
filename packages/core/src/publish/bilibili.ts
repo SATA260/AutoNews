@@ -134,6 +134,14 @@ async function sleepAbortable(ms: number, signal?: AbortSignal): Promise<void> {
   });
 }
 
+/** 检查成片是否包含最近保存的画面与音乐设置。 */
+function assertMediaReady(ctx: CoreContext, runId: string): void {
+  const row = ctx.db.prepare('SELECT media_dirty FROM runs WHERE id = ?').get(runId) as
+    | { media_dirty: number }
+    | undefined;
+  if (row?.media_dirty) throw new Error('画面或音乐已修改，请重新合成并通过质检后再投稿');
+}
+
 /** 校验执行发布动作所需的目标状态与本地成片及封面文件存在性 */
 export async function assertReadyToUpload(opts: {
   ctx: CoreContext;
@@ -163,6 +171,7 @@ export async function assertReadyToUpload(opts: {
     throw new Error(`任务 ${runId} 当前状态为 ${run.status}，不允许发起本次投稿上传`);
   }
 
+  assertMediaReady(ctx, runId);
   const draft = await ensurePublishDraftForRun(ctx, runId, settings);
   if (!draft) {
     throw new PipelineError('publish_failed', `任务 ${runId} 缺少可发布的草稿或时间轴信息`);
@@ -352,6 +361,7 @@ export async function executeBilibiliUpload(opts: {
         throw new Error(`任务 ${runId} 当前状态已变为 ${current.status}，中止本次上传`);
       }
 
+      assertMediaReady(ctx, runId);
       ctx.repos.runs.updateStatus(runId, 'publishing', {
         currentStage: 'publish',
         pid: process.pid,

@@ -1,5 +1,6 @@
 import { type ChildProcess, spawn } from 'node:child_process';
 import crypto from 'node:crypto';
+import { createWriteStream, type WriteStream } from 'node:fs';
 import fs from 'node:fs/promises';
 import net from 'node:net';
 import os from 'node:os';
@@ -37,9 +38,23 @@ export function createQwenLocalTtsProvider(
       throw new Error(`主播音色路径无效: ${host}`);
     return { audio: path.resolve(rootDir, fields.audio), text: path.resolve(rootDir, fields.text) };
   };
+  /** 获取已明确指定的主播，避免声音与画面不一致。 */
+  const requireHost = (providerConfig: Record<string, unknown>) => {
+    if (
+      typeof providerConfig.hostId !== 'string' ||
+      !['deepseek', 'gpt', 'gemini', 'claude'].includes(providerConfig.hostId)
+    ) {
+      throw new Error('尚未确定本期主播，无法合成对应音色');
+    }
+    return providerConfig.hostId;
+  };
   let server: ChildProcess | undefined;
   let serverDir: string | undefined;
   let serverUrl: string | undefined;
+  let serverModelId: string | undefined;
+  let watcher: ChildProcess | undefined;
+  let onProcessExit: (() => void) | undefined;
+  let logStream: WriteStream | undefined;
   return {
     id: 'qwen-local',
     async healthcheck() {
@@ -49,18 +64,25 @@ export function createQwenLocalTtsProvider(
           return [voice.audio, voice.text];
         });
         await Promise.all([bin, model, ...files].map((file) => fs.access(file)));
-        return { ok: true, detail: '本地语音运行时与模型文件可用' };
+        const probe = createQwenLocalTtsProvider(rootDir, config);
+        try {
+          await probe.start?.(config, AbortSignal.timeout(10_000));
+        } finally {
+          await probe.stop?.();
+        }
+        return { ok: true, detail: '本地语音运行时、模型配置和参考文件可用' };
       } catch (error) {
         return { ok: false, detail: `本地语音运行时或模型文件不可用: ${String(error)}` };
       }
     },
     async cacheIdentity(providerConfig) {
-      const host = typeof providerConfig.hostId === 'string' ? providerConfig.hostId : 'deepseek';
+      const host = requireHost(providerConfig);
       const files = voicePaths(host, providerConfig);
       const [audio, text] = await Promise.all([fs.readFile(files.audio), fs.readFile(files.text)]);
       return crypto.createHash('sha256').update(host).update(audio).update(text).digest('hex');
     },
-    async start(providerConfig = config) {
+    async start(providerConfig = config, signal) {
+      if (signal?.aborted) throw new DOMException('已取消', 'AbortError');
       const selectedBin = resolveConfig('bin', bin, providerConfig);
       const selectedModel = resolveConfig('model', model, providerConfig);
       const backend = typeof providerConfig.backend === 'string' ? providerConfig.backend : 'metal';
@@ -77,6 +99,7 @@ export function createQwenLocalTtsProvider(
       });
       serverDir = await fs.mkdtemp(path.join(os.tmpdir(), 'aidaily-qwen-'));
       const configFile = path.join(serverDir, 'server.json');
+      serverModelId = `aidaily-${crypto.randomBytes(12).toString('hex')}`;
       await fs.writeFile(
         configFile,
         JSON.stringify({
@@ -85,11 +108,54 @@ export function createQwenLocalTtsProvider(
           backend,
           lazy_load: true,
           models: [
-            { id: 'qwen', family: 'qwen3_tts', path: selectedModel, task: 'clon', mode: 'offline' },
+            {
+              id: serverModelId,
+              family: 'qwen3_tts',
+              path: selectedModel,
+              task: 'clon',
+              mode: 'offline',
+            },
           ],
         }),
       );
-      server = spawn(selectedBin, ['--config', configFile, '--no-ui'], { stdio: 'ignore' });
+      const logDir = path.join(rootDir, 'storage', 'logs');
+      try {
+        await fs.mkdir(logDir, { recursive: true });
+      } catch (error) {
+        await this.stop?.();
+        throw error;
+      }
+      logStream = createWriteStream(path.join(logDir, 'qwen-local.log'), {
+        flags: 'a',
+        mode: 0o600,
+      });
+      logStream.on('error', () => undefined);
+      logStream.write(`\n[${new Date().toISOString()}] 本地语音服务启动\n`);
+      server = spawn(selectedBin, ['--config', configFile, '--no-ui'], {
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+      let stderr = '';
+      const recordOutput = (chunk: Buffer) => {
+        stderr = (stderr + chunk.toString()).slice(-4000);
+        logStream?.write(chunk);
+      };
+      server.stdout?.on('data', recordOutput);
+      server.stderr?.on('data', recordOutput);
+      if (server.pid) {
+        const watcherCode = `const parent=Number(process.argv[1]), child=Number(process.argv[2]); setInterval(()=>{ try { process.kill(child,0); } catch { process.exit(0); } try { process.kill(parent,0); } catch { try { process.kill(child,'SIGTERM'); } catch {} process.exit(0); } },1000);`;
+        watcher = spawn(
+          process.execPath,
+          ['-e', watcherCode, String(process.pid), String(server.pid)],
+          { stdio: 'ignore' },
+        );
+        watcher.on('error', () => undefined);
+        watcher.unref();
+        const child = server;
+        onProcessExit = () => {
+          child.kill('SIGTERM');
+        };
+        process.once('exit', onProcessExit);
+      }
       let spawnError: Error | undefined;
       server.on('error', (error) => {
         spawnError = error;
@@ -97,36 +163,75 @@ export function createQwenLocalTtsProvider(
       serverUrl = `http://127.0.0.1:${port}`;
       const deadline = Date.now() + 15_000;
       while (Date.now() < deadline) {
+        if (signal?.aborted) {
+          await this.stop?.();
+          throw new DOMException('已取消', 'AbortError');
+        }
         if (spawnError || server.exitCode !== null || server.signalCode !== null) break;
         try {
-          const response = await fetch(`${serverUrl}/health`, { signal: AbortSignal.timeout(500) });
-          if (response.ok) return;
+          const response = await fetch(`${serverUrl}/health`, {
+            signal: signal
+              ? AbortSignal.any([signal, AbortSignal.timeout(500)])
+              : AbortSignal.timeout(500),
+          });
+          if (response.ok) {
+            const models = await fetch(`${serverUrl}/v1/models`, {
+              signal: signal
+                ? AbortSignal.any([signal, AbortSignal.timeout(500)])
+                : AbortSignal.timeout(500),
+            });
+            const body = (await models.json()) as { data?: Array<{ id?: string }> };
+            if (
+              models.ok &&
+              body.data?.some((entry) => entry.id === serverModelId) &&
+              server.exitCode === null &&
+              server.signalCode === null
+            )
+              return;
+          }
         } catch {
           /* 等待本机服务开始监听。 */
         }
         await new Promise((resolve) => setTimeout(resolve, 100));
       }
       await this.stop?.();
-      throw new Error(`本地语音服务启动失败或超时${spawnError ? `: ${spawnError.message}` : ''}`);
+      throw new Error(
+        `本地语音服务启动失败或超时${spawnError ? `: ${spawnError.message}` : ''}${stderr ? `: ${stderr}` : ''}`,
+      );
     },
     async stop() {
       const child = server;
+      if (onProcessExit) process.removeListener('exit', onProcessExit);
+      onProcessExit = undefined;
       server = undefined;
       serverUrl = undefined;
+      serverModelId = undefined;
       if (child?.pid && child.exitCode === null && child.signalCode === null) {
-        const ended = new Promise<void>((resolve) => child.once('exit', () => resolve()));
+        const ended = new Promise<void>((resolve) => child.once('close', () => resolve()));
         child.kill('SIGTERM');
         const timeout = setTimeout(() => child.kill('SIGKILL'), 3000);
         await ended;
         clearTimeout(timeout);
       }
+      watcher?.kill('SIGTERM');
+      watcher = undefined;
+      if (logStream) {
+        const stream = logStream;
+        logStream = undefined;
+        await new Promise<void>((resolve) => {
+          if (stream.destroyed) resolve();
+          else {
+            stream.once('error', () => resolve());
+            stream.end(resolve);
+          }
+        });
+      }
       if (serverDir) await fs.rm(serverDir, { recursive: true, force: true });
       serverDir = undefined;
     },
     async synthesize(req) {
-      if (!serverUrl || !server) throw new Error('本地语音服务尚未启动');
-      const host =
-        typeof req.providerConfig?.hostId === 'string' ? req.providerConfig.hostId : 'deepseek';
+      if (!serverUrl || !server || !serverModelId) throw new Error('本地语音服务尚未启动');
+      const host = requireHost(req.providerConfig ?? {});
       const files = voicePaths(host, req.providerConfig ?? {});
       const transcript = (await fs.readFile(files.text, 'utf8')).trim();
       if (!transcript) throw new Error(`参考音频对应的文字为空: ${host}`);
@@ -138,7 +243,7 @@ export function createQwenLocalTtsProvider(
         headers: { 'content-type': 'application/json' },
         signal,
         body: JSON.stringify({
-          model: 'qwen',
+          model: serverModelId,
           input: req.text,
           language: 'Chinese',
           voice_ref: files.audio,

@@ -31,6 +31,7 @@ import {
   restoreArchivedArtifacts,
   writeJsonAtomic,
 } from '../storage/files.js';
+import { validateTemplateItemCount } from '../templates/registry.js';
 import { createRunCancelMonitor } from './cancel.js';
 import { emitRunEvent } from './events.js';
 import { startRunHeartbeat } from './heartbeat.js';
@@ -136,6 +137,7 @@ export function createRun(
     );
   }
 
+  validateTemplateItemCount(ctx.settings, opts.itemCount);
   const now = ctx.now();
   const nowIso = now.toISOString();
   const runId = generateRunId(now, ctx.settings.timezone);
@@ -153,8 +155,8 @@ export function createRun(
     });
     if (opts.hostId || opts.bgmFile)
       ctx.db
-        .prepare('UPDATE runs SET host_id = ?, bgm_file = ? WHERE id = ?')
-        .run(opts.hostId ?? null, opts.bgmFile ?? null, runId);
+        .prepare('UPDATE runs SET host_id = ?, bgm_file = ?, host_manual = ? WHERE id = ?')
+        .run(opts.hostId ?? null, opts.bgmFile ?? null, opts.hostId ? 1 : 0, runId);
     ctx.repos.runStages.initStages(runId);
     emitRunEvent(ctx, {
       runId,
@@ -465,6 +467,7 @@ async function executePipelineStagesLocked(opts: {
     if (lastStage === 'qa') {
       await ensurePublishDraftForRun(ctx, runId, settings, { regenerate: true });
       inTransaction(ctx.db, () => {
+        ctx.db.prepare('UPDATE runs SET media_dirty = 0 WHERE id = ?').run(runId);
         ctx.repos.runs.updateStatus(runId, 'awaiting_review', {
           currentStage: 'review',
           pid: null,

@@ -36,8 +36,7 @@ export function chooseHost(
     let topic = 0;
     events.forEach((event, index) => {
       const text = `${event.entity ?? ''} ${event.title}`.toLowerCase();
-      const subject = (event.entity ?? '').toLowerCase();
-      if (persona.campKeywords.some((keyword) => subject.includes(keyword.toLowerCase())))
+      if (persona.campKeywords.some((keyword) => text.includes(keyword.toLowerCase())))
         camp += index === 0 ? 2 : 1;
       if (
         persona.topicKeywords.some((keyword) =>
@@ -51,11 +50,14 @@ export function chooseHost(
   const highestCamp = Math.max(...candidates.map((candidate) => candidate.camp));
   const leaders = candidates.filter((candidate) => candidate.camp === highestCamp);
   if (highestCamp > 0 && leaders.length === 1) return leaders[0]?.persona.id ?? null;
-  candidates.sort(
-    (a, b) =>
-      b.topic - a.topic || Number(a.persona.id === previous) - Number(b.persona.id === previous),
+  const pool = highestCamp > 0 ? leaders : candidates;
+  const bestTopic = Math.max(...pool.map((candidate) => candidate.topic));
+  const alternative = pool.filter(
+    (candidate) => candidate.persona.id !== previous && candidate.topic >= bestTopic - 1,
   );
-  return candidates[0]?.persona.id ?? null;
+  const eligible = alternative.length ? alternative : pool;
+  eligible.sort((a, b) => b.topic - a.topic);
+  return eligible[0]?.persona.id ?? null;
 }
 
 /** 读取本期主播的人设资料，供写稿与编排使用。 */
@@ -68,4 +70,28 @@ export async function getRunPersona(
     | undefined;
   if (!row?.host_id) return null;
   return (await loadPersonas(ctx)).find((persona) => persona.id === row.host_id) ?? null;
+}
+
+/** 判断新闻主体与本期主播属于同一家、其他主播阵营或第三方。 */
+export async function describePersonaRelation(
+  ctx: CoreContext,
+  runId: string,
+  itemId: string,
+): Promise<string> {
+  const persona = await getRunPersona(ctx, runId);
+  const item = ctx.repos.runItems.getById(itemId);
+  const event = item
+    ? ctx.repos.events.listByRun(runId).find((entry) => entry.id === item.eventId)
+    : undefined;
+  if (!persona || !event) return '未指定主播或新闻主体';
+  const subject = `${event.entity ?? ''} ${event.title}`.toLowerCase();
+  const matched = (await loadPersonas(ctx)).filter((profile) =>
+    profile.campKeywords.some((keyword) => subject.includes(keyword.toLowerCase())),
+  );
+  const relation = matched.some((profile) => profile.id === persona.id)
+    ? '自家'
+    : matched.length
+      ? '友商'
+      : '第三方';
+  return `主播：${persona.displayName}；新闻主体：${event.entity ?? event.title}；关系：${relation}。`;
 }

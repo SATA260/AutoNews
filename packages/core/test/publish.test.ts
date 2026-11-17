@@ -391,6 +391,26 @@ describe('Bilibili publishing, AI declaration, consumption, and uncertain recove
     expect(tags).toEqual(['AI', 'AI每日报', 'OpenAI', '大模型']);
   });
 
+  it('阻止发布修改媒体后尚未重新合成的旧成片', async () => {
+    const { rootDir, stateFile } = await setupPublishWorkspace();
+    const core = await createCore({ rootDir });
+    try {
+      const runId = createRun(core.context, { itemCount: 1, trigger: 'manual-cli' });
+      await seedCompletedRunReadyForReview(core, runId);
+      await core.tasks.setItemImage(runId, 'item-1', { mode: 'none' });
+      expect(
+        core.context.repos.runStages.listByRun(runId).find((stage) => stage.stage === 'render')
+          ?.status,
+      ).toBe('stale');
+      await expect(core.publish.approve(runId, { retryDelaysMs: [0] })).rejects.toThrow(/重新合成/);
+      const state = JSON.parse(await fs.readFile(stateFile, 'utf8')) as { calls: unknown[] };
+      expect(state.calls).toHaveLength(0);
+      expect(core.context.repos.runs.getById(runId)?.status).toBe('awaiting_review');
+    } finally {
+      await core.close();
+    }
+  });
+
   it('publishes approved run with forced AI declaration, commits consumption transactionally, and supports scheduled dtime', async () => {
     const { rootDir, stateFile } = await setupPublishWorkspace();
     const notifications: NotifyEvent[] = [];

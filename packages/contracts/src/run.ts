@@ -136,6 +136,7 @@ export const RunSummarySchema = z.object({
   itemCount: z.number().int().positive(),
   hostId: HostMascotIdSchema.nullable().optional(),
   bgmFile: z.string().nullable().optional(),
+  mediaDirty: z.boolean().optional(),
   attempt: z.number().int().positive(),
   errorCode: ErrorCodeSchema.nullable(),
   error: z.string().nullable(),

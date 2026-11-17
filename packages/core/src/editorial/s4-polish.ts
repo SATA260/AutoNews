@@ -9,7 +9,7 @@ import {
 } from '@aidaily/contracts';
 import type { CoreContext } from '../context.js';
 import { invokeStageLlm } from './llm.js';
-import { getRunPersona } from './personas.js';
+import { describePersonaRelation, getRunPersona } from './personas.js';
 import { renderPromptTemplate } from './prompts.js';
 import { type LoadedEventArticle, serializeLoadedArticlesXml } from './s3-summarize.js';
 
@@ -41,6 +41,7 @@ export async function polishItemDraft(opts: {
   const persona = await getRunPersona(ctx, runId);
   const prompt = await renderPromptTemplate('s4-polish.md', {
     personaJson: persona ? JSON.stringify(persona, null, 2) : '无特定角色',
+    personaRelation: await describePersonaRelation(ctx, runId, itemId),
     narrationRules:
       settings.issue.minScore !== undefined
         ? '严格要求：4～7句，总字数110～180字，每句14～30字；标题不超过22字，短标题不超过16字，highlight不超过18字，keyPoints为2～3条且每条不超过15字。百分比和货币应写成中文读法，不要使用括号、波浪号或多余空格。'
@@ -111,6 +112,7 @@ export async function revisePolishedItem(opts: {
   const persona = await getRunPersona(ctx, runId);
   const prompt = await renderPromptTemplate('s4-revise.md', {
     personaJson: persona ? JSON.stringify(persona, null, 2) : '无特定角色',
+    personaRelation: await describePersonaRelation(ctx, runId, itemId),
     narrationRules:
       settings.issue.minScore !== undefined
         ? '严格要求：4～7句，总字数110～180字，每句14～30字；标题不超过22字，短标题不超过16字，highlight不超过18字，keyPoints为2～3条且每条不超过15字。百分比和货币应写成中文读法，不要使用括号、波浪号或多余空格。'

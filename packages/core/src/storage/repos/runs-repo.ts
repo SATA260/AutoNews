@@ -36,6 +36,7 @@ interface RunRow {
   item_count: number;
   host_id: string | null;
   bgm_file: string | null;
+  media_dirty: number;
   config_snapshot: string;
   cancel_requested: number;
   attempt: number;
@@ -102,6 +103,7 @@ function mapRunSummary(row: RunRow): RunSummary {
     itemCount: row.item_count,
     hostId: HostMascotIdSchema.safeParse(row.host_id).data ?? null,
     bgmFile: row.bgm_file,
+    mediaDirty: row.media_dirty === 1,
     attempt: row.attempt,
     errorCode: row.error_code,
     error: row.error,

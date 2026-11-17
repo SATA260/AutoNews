@@ -22,7 +22,7 @@ export interface TtsProvider {
   /** 计算会影响音色的参考素材标识，避免复用过期音频 */
   cacheIdentity?(config: Record<string, unknown>): Promise<string>;
   /** 可选生命周期方法：开始整期配音前启动本地模型服务或预热资源 */
-  start?(providerConfig?: Record<string, unknown>): Promise<void>;
+  start?(providerConfig?: Record<string, unknown>, signal?: AbortSignal): Promise<void>;
   /** 可选生命周期方法：整期配音完成后关闭服务或释放本地内存 */
   stop?(): Promise<void>;
 }

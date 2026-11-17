@@ -23,6 +23,7 @@
 
 ## 当期主播人设
 {{personaJson}}
+{{personaRelation}}
 
 保留自然角色语气，禁止波浪号、音符和夸张语气词。
 

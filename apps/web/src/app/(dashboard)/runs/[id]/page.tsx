@@ -356,6 +356,7 @@ export default async function RunDetailPage({
               <PublishControls
                 runId={detail.id}
                 runStatus={detail.status}
+                mediaDirty={detail.mediaDirty}
                 draft={draft}
                 publishRecord={detail.publishRecord}
                 limits={{

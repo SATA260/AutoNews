@@ -17,12 +17,14 @@ import { countCodepoints, PUBLISH_STATUS_TEXT } from '@/lib/format';
 export function PublishControls({
   runId,
   runStatus,
+  mediaDirty,
   draft,
   publishRecord,
   limits,
 }: {
   runId: string;
   runStatus: RunStatus;
+  mediaDirty?: boolean;
   draft: PublishDraft | null;
   publishRecord: PublishRecord | null;
   limits: { titleMax: number; descMax: number; tagsMax: number };
@@ -131,6 +133,11 @@ export function PublishControls({
         )}
       </div>
 
+      {mediaDirty && (
+        <div className="rounded-xl border border-amber-300 bg-amber-50 p-4 text-sm text-amber-900">
+          画面或音乐已修改，请先在音画预览页重新合成并完成质检。
+        </div>
+      )}
       {runStatus === 'publish_uncertain' && (
         <div className="rounded-xl border border-rose-300 bg-rose-50 p-5 shadow-sm">
           <h3 className="text-sm font-semibold text-rose-900">
@@ -267,7 +274,7 @@ export function PublishControls({
               {runStatus === 'awaiting_review' && (
                 <button
                   type="button"
-                  disabled={isPending}
+                  disabled={isPending || mediaDirty}
                   onClick={() => {
                     const fd = new FormData();
                     fd.set('runId', runId);
@@ -282,7 +289,7 @@ export function PublishControls({
               {runStatus === 'publish_failed' && (
                 <button
                   type="button"
-                  disabled={isPending}
+                  disabled={isPending || mediaDirty}
                   onClick={() => {
                     const fd = new FormData();
                     fd.set('runId', runId);

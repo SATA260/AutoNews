@@ -10,7 +10,7 @@ import {
 import type { CoreContext } from '../context.js';
 import { PipelineError } from '../errors.js';
 import { writeJsonAtomic } from '../storage/files.js';
-import { runMediaCommand } from './ffmpeg.js';
+import { mediaTimeoutMs, runMediaCommand } from './ffmpeg.js';
 
 interface FfprobeStream {
   codec_type?: string;
@@ -216,7 +216,7 @@ export async function runQaStage(opts: {
     const volRes = await runMediaCommand(
       ffmpegBin,
       ['-v', 'info', '-i', videoFile, '-af', 'volumedetect', '-f', 'null', '-'],
-      { signal, actionLabel: 'ffmpeg 检测成片音量' },
+      { signal, timeoutMs: mediaTimeoutMs(timeline.totalMs), actionLabel: 'ffmpeg 检测成片音量' },
     );
     meanVolumeDb = parseMeanVolumeDb(volRes.stderr);
     checks.push({
@@ -251,7 +251,11 @@ export async function runQaStage(opts: {
         'null',
         '-',
       ],
-      { signal, actionLabel: 'ffmpeg 检测成片黑场画面' },
+      {
+        signal,
+        timeoutMs: mediaTimeoutMs(timeline.totalMs),
+        actionLabel: 'ffmpeg 检测成片黑场画面',
+      },
     );
     const blackSec = sumBlackDurations(blackRes.stderr);
     blackRatio = Math.min(1, blackSec / videoDurationSec);

@@ -7,6 +7,7 @@ import { type TtsProvider, TtsService } from '@aidaily/tts';
 import { execa } from 'execa';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
+  buildMasterAudioWav,
   buildNarrationSections,
   buildTimeline,
   createCore,
@@ -14,6 +15,7 @@ import {
   editSettingsFile,
   executeRun,
   mapEntityToMascotId,
+  mediaTimeoutMs,
   type PipelineError,
   type RenderCheckpoint,
   readJsonOrNull,
@@ -244,7 +246,67 @@ describe('template rendering, Playwright capture, ffmpeg composition, and QA', (
     await core.close();
   }, 60_000);
 
-  it('normalizes speech loudness to -16 LUFS and mixes sidechain-ducked BGM cleanly', async () => {
+  it('保留句子音量并根据视频时长增加处理等待时间', async () => {
+    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'aidaily-master-volume-'));
+    tempDirs.push(tmpDir);
+    const source = path.join(tmpDir, 'source.wav');
+    const output = path.join(tmpDir, 'master.wav');
+    await execa('ffmpeg', [
+      '-y',
+      '-f',
+      'lavfi',
+      '-i',
+      'sine=frequency=440:duration=4',
+      '-ac',
+      '2',
+      source,
+    ]);
+    await buildMasterAudioWav({
+      runDir: tmpDir,
+      rootDir: tmpDir,
+      outWav: output,
+      sampleRate: 48000,
+      loudnessLUFS: -16,
+      isSilentProvider: false,
+      bgm: { file: '', volumeDb: -18, duckDb: -8 },
+      timeline: {
+        totalMs: 20000,
+        sections: [
+          {
+            key: 'intro',
+            kind: 'intro',
+            audioFile: 'source.wav',
+            startMs: 0,
+            speechMs: 4000,
+            pageMs: 20000,
+            sentences: [],
+          },
+        ],
+      },
+    });
+    const readVolume = async (file: string) => {
+      const result = await execa('ffmpeg', [
+        '-hide_banner',
+        '-i',
+        file,
+        '-t',
+        '3',
+        '-af',
+        'volumedetect',
+        '-f',
+        'null',
+        '-',
+      ]);
+      const match = /mean_volume: ([\d.-]+) dB/.exec(result.stderr);
+      if (!match) throw new Error('未能测量音量');
+      return Number(match[1]);
+    };
+    expect(Math.abs((await readVolume(source)) - (await readVolume(output)))).toBeLessThan(0.5);
+    expect(mediaTimeoutMs(600_000)).toBeGreaterThan(600_000);
+    expect(mediaTimeoutMs(600_000, true)).toBeGreaterThan(mediaTimeoutMs(600_000));
+  });
+
+  it('limits speech peaks and mixes sidechain-ducked BGM cleanly', async () => {
     const { rootDir, settingsFile } = await setupRenderWorkspace('solid-color');
     const bgmFile = path.join(rootDir, 'bgm.wav');
     await execa('ffmpeg', [

@@ -1,15 +1,20 @@
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
   archiveRunArtifacts,
   createCore,
+  createRun,
   inTransaction,
   resolveSafeArtifactPath,
   writeJsonAtomic,
 } from '../src/index.js';
+import { runMigrations } from '../src/storage/migrate.js';
+import { MIGRATION_001 } from '../src/storage/migrations/001_init.js';
+import { MIGRATION_002 } from '../src/storage/migrations/002_workflow.js';
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..', '..');
 const tempDirs: string[] = [];
@@ -42,6 +47,7 @@ describe('M1 sqlite storage, paths, and transactions', () => {
       journal_mode: string;
     };
     expect(modeRow.journal_mode.toLowerCase()).toBe('wal');
+    expect(() => createRun(core.context, { itemCount: 13 })).toThrow(/最多支持 12 条/);
 
     const tables = core.context.db
       .prepare("SELECT name FROM sqlite_master WHERE type = 'table'")
@@ -68,6 +74,32 @@ describe('M1 sqlite storage, paths, and transactions', () => {
     }
 
     await core.close();
+  });
+
+  it('升级已有数据库时保留主播和任务记录', () => {
+    const db = new DatabaseSync(':memory:');
+    try {
+      db.exec(MIGRATION_001.sql);
+      db.exec(MIGRATION_002.sql);
+      db.exec(
+        "CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL); INSERT INTO schema_migrations VALUES (1, '2026-01-01'), (2, '2026-01-01');",
+      );
+      db.prepare(
+        "INSERT INTO runs (id, trigger, status, item_count, config_snapshot, created_at, host_id) VALUES (?, 'manual-cli', 'awaiting_review', 1, '{}', ?, 'gpt')",
+      ).run('old-run', '2026-01-01T00:00:00.000Z');
+      runMigrations(db);
+      runMigrations(db);
+      expect(
+        db
+          .prepare('SELECT host_id, host_manual, media_dirty FROM runs WHERE id = ?')
+          .get('old-run'),
+      ).toMatchObject({ host_id: 'gpt', host_manual: 0, media_dirty: 0 });
+      expect(
+        db.prepare('SELECT version FROM schema_migrations ORDER BY version').all(),
+      ).toHaveLength(3);
+    } finally {
+      db.close();
+    }
   });
 
   it('supports article reservation, consumption, schedule CRUD, and rollback', async () => {

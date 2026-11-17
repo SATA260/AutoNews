@@ -294,20 +294,45 @@ export function createTaskService(ctx: CoreContext): TaskService {
         relative = path.join('custom-assets', `${crypto.randomUUID()}.${extension}`);
         await writeFileAtomic(path.join(ctx.paths.runDir(runId), relative), data);
       }
-      const result = ctx.db
-        .prepare(
-          "UPDATE run_items SET image_mode = ?, custom_image_path = ?, custom_image_caption = ?, updated_at = ? WHERE id = ? AND run_id = ? AND EXISTS (SELECT 1 FROM runs WHERE id = ? AND status = 'awaiting_review')",
-        )
-        .run(input.mode, relative, caption || null, ctx.now().toISOString(), itemId, runId, runId);
-      if (Number(result.changes) !== 1) throw new Error('任务状态已改变，请刷新后重试');
+      try {
+        inTransaction(ctx.db, () => {
+          const result = ctx.db
+            .prepare(
+              "UPDATE run_items SET image_mode = ?, custom_image_path = ?, custom_image_caption = ?, updated_at = ? WHERE id = ? AND run_id = ? AND EXISTS (SELECT 1 FROM runs WHERE id = ? AND status = 'awaiting_review')",
+            )
+            .run(
+              input.mode,
+              relative,
+              caption || null,
+              ctx.now().toISOString(),
+              itemId,
+              runId,
+              runId,
+            );
+          if (Number(result.changes) !== 1) throw new Error('任务状态已改变，请刷新后重试');
+          ctx.db.prepare('UPDATE runs SET media_dirty = 1 WHERE id = ?').run(runId);
+          ctx.repos.runStages.markStaleFrom(runId, ['render', 'qa']);
+        });
+      } catch (error) {
+        if (relative)
+          await fs
+            .rm(path.join(ctx.paths.runDir(runId), relative), { force: true })
+            .catch(() => undefined);
+        throw error;
+      }
     },
     /** 锁定新的背景音乐。 */
     async setBgm(runId, bgmFile) {
       if (!(await listBgmFiles(ctx)).includes(bgmFile)) throw new Error('指定的背景音乐不在曲库中');
-      const result = ctx.db
-        .prepare("UPDATE runs SET bgm_file = ? WHERE id = ? AND status = 'awaiting_review'")
-        .run(bgmFile, runId);
-      if (Number(result.changes) !== 1) throw new Error('只有待审核任务可以修改背景音乐');
+      inTransaction(ctx.db, () => {
+        const result = ctx.db
+          .prepare(
+            "UPDATE runs SET bgm_file = ?, media_dirty = 1 WHERE id = ? AND status = 'awaiting_review'",
+          )
+          .run(bgmFile, runId);
+        if (Number(result.changes) !== 1) throw new Error('只有待审核任务可以修改背景音乐');
+        ctx.repos.runStages.markStaleFrom(runId, ['render', 'qa']);
+      });
     },
     /** 启动新一期生产任务：校验条数必填、查锁排重，并支持前台直跑或分离至后台工作进程 */
     async start(opts: TaskStartOptions): Promise<{ runId: string }> {

@@ -66,6 +66,14 @@ export function resolveActiveTemplate(
   return { name: activeName, dir, adapter };
 }
 
+/** 检查当前模板支持的新闻数量上限。 */
+export function validateTemplateItemCount(settings: Settings, itemCount: number): void {
+  const active = settings.template.active;
+  const adapter = settings.template.registry[active]?.adapter ?? active;
+  if (adapter === 'daily-deck' && itemCount > 12)
+    throw new RangeError('当前视频模板最多支持 12 条新闻');
+}
+
 /**
  * 按当前启用模板声明的视觉限制与调用方显式覆写值，汇总生效的文案字数约束。
  */

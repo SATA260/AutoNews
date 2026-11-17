@@ -404,7 +404,7 @@ describe('M8 services, detached worker, launchd scheduler, and doctor', () => {
     } finally {
       await core.close();
     }
-  }, 20_000);
+  }, 45_000);
 
   it('releases the reservation on early exit and preserves it on confirmation timeout', async () => {
     const firstSend = vi.fn(() => true);

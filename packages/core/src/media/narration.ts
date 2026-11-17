@@ -9,7 +9,7 @@ import type {
   Settings,
   Timeline,
 } from '@aidaily/contracts';
-import { probeAudioDurationMs } from '@aidaily/tts';
+import { probeAudioDurationMs, QWEN_AUDIO_PROCESSING_VERSION } from '@aidaily/tts';
 import type { CoreContext } from '../context.js';
 import { PipelineError } from '../errors.js';
 import { readJsonOrNull, writeJsonAtomic } from '../storage/files.js';
@@ -40,6 +40,7 @@ function computeSectionDigest(section: NarrationSection, settings: Settings): st
     providerId,
     providerConfig,
     postprocess: settings.tts.postprocess,
+    processingVersion: providerId === 'qwen-local' ? QWEN_AUDIO_PROCESSING_VERSION : 0,
   });
   return crypto.createHash('sha1').update(payload, 'utf8').digest('hex');
 }
@@ -104,6 +105,8 @@ export async function runNarrateStage(opts: {
     | { host_id: string | null }
     | undefined;
   const providerId = settings.tts.provider;
+  if (providerId === 'qwen-local' && !row?.host_id)
+    throw new PipelineError('tts_failed', '尚未确定本期主播，请从选题阶段重新运行或指定主播');
   const providerConfig = {
     ...(settings.tts.providers[providerId] ?? {}),
     ...(row?.host_id ? { hostId: row.host_id } : {}),
@@ -181,6 +184,16 @@ export async function runNarrateStage(opts: {
       const newlySynthesized = await ctx.tts.synthesizeSections(pendingSections, audioDir, {
         signal,
         onSectionDone: persistSectionProgress,
+        onWarning: (message) => {
+          ctx.repos.runEvents.append({
+            runId,
+            ts: ctx.now().toISOString(),
+            level: 'warn',
+            stage: 'narrate',
+            type: 'tts_duration_warning',
+            message,
+          });
+        },
         settingsOverride: effectiveSettings.tts,
       });
       for (const audio of newlySynthesized) {

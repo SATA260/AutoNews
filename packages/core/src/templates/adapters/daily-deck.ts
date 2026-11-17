@@ -114,6 +114,8 @@ export function createDailyDeckAdapter(): TemplateAdapter {
 
     /** 把核心引擎组装好的整期新闻对象转换为前端模板可识别的输入数据结构 */
     buildData(issue: RenderableIssue, timeline: Timeline): Record<string, unknown> {
+      if (issue.items.length > 12)
+        throw new Error('视频模板最多支持 12 条新闻，无法安全渲染更多页面');
       const introSec = timeline.sections.find((s) => s.kind === 'intro');
       const outroSec = timeline.sections.find((s) => s.kind === 'outro');
       const itemSecById = new Map(
@@ -216,7 +218,11 @@ export function createDailyDeckAdapter(): TemplateAdapter {
       const injectRes = await page.evaluate(async (payload) => {
         const win = window as unknown as {
           __NEWS_DECK__?: {
-            setNewsData: (raw: unknown) => { ok: boolean; warningCount: number };
+            setNewsData: (raw: unknown) => {
+              ok: boolean;
+              warningCount: number;
+              warnings?: Array<{ path: string; code: string }>;
+            };
           };
         };
         if (!win.__NEWS_DECK__) {
@@ -231,6 +237,13 @@ export function createDailyDeckAdapter(): TemplateAdapter {
 
       if (!injectRes.ok) {
         throw new Error('向前端模板注入整期新闻数据失败');
+      }
+      if (
+        injectRes.warnings?.some(
+          (warning) => warning.path === 'items' && warning.code === 'clamped',
+        )
+      ) {
+        throw new Error('模板截断了新闻列表，已停止渲染以防音画错位');
       }
 
       const capturedFiles: string[] = [];

@@ -35,6 +35,20 @@ describe('主播配置与选择', () => {
       'gpt',
     );
     expect(chooseHost([event('第三方', '多模态硬件')], personas, null)).toBe('gemini');
+    expect(
+      chooseHost([{ ...event('第三方', '新闻'), title: 'OpenAI 发布新模型' }], personas, null),
+    ).toBe('gpt');
+    expect(
+      chooseHost(
+        [
+          { ...event('OpenAI', '新闻'), title: 'OpenAI 更新' },
+          { ...event('Anthropic', '多模态'), title: 'Anthropic 更新' },
+          { ...event('Anthropic', '多模态'), title: 'Anthropic 发布视频模型' },
+        ],
+        personas,
+        null,
+      ),
+    ).not.toBe('gemini');
     expect(chooseHost([event('第三方', '新闻')], personas, 'gpt')).not.toBe('gpt');
     expect(() =>
       PersonasFileSchema.parse({ personas: [personas[0], personas[0], personas[1], personas[2]] }),

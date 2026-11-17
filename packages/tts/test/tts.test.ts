@@ -1,10 +1,18 @@
+import { spawn } from 'node:child_process';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import type { TtsSettings } from '@aidaily/contracts';
 import { execa } from 'execa';
 import { afterEach, describe, expect, it } from 'vitest';
-import { probeAudioDurationMs, type TtsProvider, TtsService } from '../src/index.js';
+import {
+  computeTtsCacheKey,
+  createQwenLocalTtsProvider,
+  probeAudioDurationMs,
+  type TtsProvider,
+  TtsService,
+} from '../src/index.js';
 
 const tempDirs: string[] = [];
 
@@ -218,4 +226,119 @@ describe('口播文字清洗', () => {
     );
     expect(sanitizeNarrationSentence('这是测试！')).toBe('这是测试!');
   });
+});
+
+describe('本地语音重试与取消', () => {
+  it('区分响度配置的缓存，并在异常时长重试后保留有效音频', async () => {
+    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'aidaily-tts-duration-'));
+    tempDirs.push(tmpDir);
+    const settings = baseSettings('qwen-local');
+    settings.providers['qwen-local'] = {};
+    let calls = 0;
+    const service = new TtsService({ settings, cacheDir: path.join(tmpDir, 'cache') });
+    service.register({
+      id: 'qwen-local',
+      async healthcheck() {
+        return { ok: true, detail: 'ok' };
+      },
+      async synthesize(req) {
+        calls++;
+        await execa('ffmpeg', [
+          '-y',
+          '-f',
+          'lavfi',
+          '-i',
+          'sine=frequency=440:duration=1',
+          req.outFile,
+        ]);
+      },
+    });
+    const warnings: string[] = [];
+    const result = await service.synthesizeSections(
+      [{ key: 'item', kind: 'item', itemId: 'i', sentences: ['测试'.repeat(50)] }],
+      path.join(tmpDir, 'out'),
+      {
+        onWarning: (message) => {
+          warnings.push(message);
+        },
+      },
+    );
+    expect(calls).toBe(3);
+    expect(result[0]?.speechMs).toBeGreaterThan(0);
+    expect(warnings).toHaveLength(1);
+    const common = { sampleRate: 48000, trimSilence: true, fadeInMs: 15, fadeOutMs: 20 };
+    expect(computeTtsCacheKey('qwen-local', {}, { ...common, loudnessLUFS: -16 }, '句子')).not.toBe(
+      computeTtsCacheKey('qwen-local', {}, { ...common, loudnessLUFS: -18 }, '句子'),
+    );
+  });
+
+  it('启动等待期间收到取消后清理本地服务', async () => {
+    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'aidaily-tts-cancel-'));
+    tempDirs.push(tmpDir);
+    const script = path.join(tmpDir, 'server.mjs');
+    await fs.writeFile(script, '#!/usr/bin/env node\nsetInterval(() => {}, 1000);\n', {
+      mode: 0o755,
+    });
+    const provider = createQwenLocalTtsProvider(tmpDir, {
+      bin: script,
+      model: path.join(tmpDir, 'model'),
+    });
+    const controller = new AbortController();
+    const starting = provider.start?.(undefined, controller.signal);
+    setTimeout(() => controller.abort(), 200);
+    await expect(starting).rejects.toMatchObject({ name: 'AbortError' });
+    await provider.stop?.();
+  });
+
+  it('工作进程被强制结束后回收本地语音服务', async () => {
+    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'aidaily-tts-orphan-'));
+    tempDirs.push(tmpDir);
+    const pidFile = path.join(tmpDir, 'server.pid');
+    const script = path.join(tmpDir, 'server.mjs');
+    await fs.writeFile(
+      script,
+      `#!/usr/bin/env node\nimport fs from 'node:fs';\nfs.writeFileSync(${JSON.stringify(pidFile)}, String(process.pid));\nsetInterval(() => {}, 1000);\n`,
+      { mode: 0o755 },
+    );
+    const providerPath = pathToFileURL(
+      path.join(path.dirname(fileURLToPath(import.meta.url)), '../src/providers/qwen-local.ts'),
+    ).href;
+    const code = `import { createQwenLocalTtsProvider } from ${JSON.stringify(providerPath)}; const provider = createQwenLocalTtsProvider(${JSON.stringify(tmpDir)}, { bin: ${JSON.stringify(script)}, model: 'unused' }); await provider.start();`;
+    const parent = spawn(process.execPath, ['--input-type=module', '-e', code], {
+      stdio: 'ignore',
+    });
+    let serverPid = 0;
+    try {
+      for (let attempt = 0; attempt < 100; attempt++) {
+        try {
+          serverPid = Number(await fs.readFile(pidFile, 'utf8'));
+          break;
+        } catch {
+          await new Promise((resolve) => setTimeout(resolve, 50));
+        }
+      }
+      expect(serverPid).toBeGreaterThan(0);
+      const ended = new Promise<void>((resolve) => parent.once('exit', () => resolve()));
+      parent.kill('SIGKILL');
+      await ended;
+      let alive = true;
+      for (let attempt = 0; attempt < 100; attempt++) {
+        try {
+          process.kill(serverPid, 0);
+        } catch {
+          alive = false;
+          break;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+      expect(alive).toBe(false);
+    } finally {
+      parent.kill('SIGKILL');
+      if (serverPid) {
+        try {
+          process.kill(serverPid, 'SIGKILL');
+        } catch {}
+      }
+    }
+  }, 15_000);
 });
