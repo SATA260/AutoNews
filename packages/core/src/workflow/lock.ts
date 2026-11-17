@@ -213,6 +213,7 @@ export function reservePipelineLockForChild(
   runId: string,
   childPid: number | undefined,
   shouldReserve: (current: ReturnType<CoreContext['repos']['runs']['getById']>) => boolean,
+  opts?: { required?: boolean },
 ): void {
   if (!childPid) {
     return;
@@ -221,9 +222,12 @@ export function reservePipelineLockForChild(
   inTransaction(ctx.db, () => {
     const current = ctx.repos.runs.getById(runId);
     if (!shouldReserve(current)) {
+      if (opts?.required) {
+        throw new Error(`任务 ${runId} 的状态或执行轮次已变化，请刷新后重试`);
+      }
       return;
     }
-    ctx.repos.locks.tryAcquire({
+    const result = ctx.repos.locks.tryAcquire({
       name: PIPELINE_LOCK_NAME,
       ownerRun: runId,
       pid: childPid,
@@ -231,5 +235,8 @@ export function reservePipelineLockForChild(
       staleMs: DEFAULT_LOCK_STALE_MS,
       isProcessAlive,
     });
+    if (opts?.required && !result.acquired) {
+      throw new LockBusyError(result.holder);
+    }
   });
 }

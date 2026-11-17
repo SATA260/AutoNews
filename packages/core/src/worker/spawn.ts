@@ -2,6 +2,7 @@ import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { confirmRetryStartup, type RetryReservation } from './retry-startup.js';
 
 /** 查找后台工作进程入口脚本（`worker.mjs`）的绝对路径，兼容打包运行与源码测试环境 */
 export function resolveWorkerScriptPath(rootDir: string): string {
@@ -25,21 +26,21 @@ export function resolveWorkerScriptPath(rootDir: string): string {
 
 /**
  * 启动脱离当前终端与请求生命周期的独立后台工作进程，并将标准输出与错误分别追加到指定日志文件。
- * 会等待系统确认子进程已成功拉起并拿到进程号后再返回，防止异步启动报错变为未捕获异常。
+ * 等待系统确认子进程已启动，重试操作还会等待子进程写入运行状态。
  */
 export async function spawnDetachedWorker(
   args: string[],
-  opts: { rootDir: string; logFile: string },
+  opts: { rootDir: string; logFile: string; retryReservation?: RetryReservation },
 ): Promise<{ pid: number | undefined }> {
   const scriptPath = resolveWorkerScriptPath(opts.rootDir);
   fs.mkdirSync(path.dirname(opts.logFile), { recursive: true });
   const outFd = fs.openSync(opts.logFile, 'a');
-  const errFd = fs.openSync(opts.logFile, 'a');
   try {
-    const child = spawn(process.execPath, [scriptPath, ...args], {
+    const workerArgs = opts.retryReservation ? [...args, '--wait-for-retry-grant'] : args;
+    const child = spawn(process.execPath, [scriptPath, ...workerArgs], {
       cwd: opts.rootDir,
       detached: true,
-      stdio: ['ignore', outFd, errFd],
+      stdio: opts.retryReservation ? ['ignore', outFd, outFd, 'ipc'] : ['ignore', outFd, outFd],
       env: process.env,
     });
 
@@ -56,10 +57,18 @@ export async function spawnDetachedWorker(
       child.once('spawn', onSpawn);
     });
 
-    child.unref();
-    return { pid: child.pid };
+    try {
+      if (opts.retryReservation) {
+        await confirmRetryStartup(child, opts.retryReservation);
+      }
+      return { pid: child.pid };
+    } finally {
+      if (child.connected) {
+        child.disconnect();
+      }
+      child.unref();
+    }
   } finally {
     fs.closeSync(outFd);
-    fs.closeSync(errFd);
   }
 }

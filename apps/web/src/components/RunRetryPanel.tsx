@@ -22,10 +22,23 @@ export function RunRetryPanel({
   const [feedback, setFeedback] = useState<{ ok: boolean; text: string } | null>(null);
   const [isPending, startTransition] = useTransition();
 
+  const feedbackMessage = feedback && (
+    <div
+      role={feedback.ok ? 'status' : 'alert'}
+      className={`mt-3 rounded-lg border px-3 py-2 text-xs ${
+        feedback.ok
+          ? 'border-emerald-200 bg-emerald-50 text-emerald-800'
+          : 'border-rose-200 bg-rose-50 text-rose-700'
+      }`}
+    >
+      {feedback.text}
+    </div>
+  );
   if (!retryOptions.resumable) {
-    return null;
+    return feedbackMessage;
   }
 
+  /** 提交重跑并等后台确认启动，随后更新任务详情 */
   const handleResume = (fromStage?: Stage) => {
     setFeedback(null);
     const fd = new FormData();
@@ -37,13 +50,18 @@ export function RunRetryPanel({
       fd.set('useLatestConfig', 'true');
     }
     startTransition(async () => {
-      const res = await resumeRunAction(fd);
-      setConfirmStage(null);
-      setFeedback({
-        ok: res.ok,
-        text: res.ok ? (res.message ?? '已提交重跑') : (res.error ?? '提交重跑失败'),
-      });
-      router.refresh();
+      try {
+        const res = await resumeRunAction(fd);
+        setFeedback({
+          ok: res.ok,
+          text: res.ok ? (res.message ?? '重跑已启动') : (res.error ?? '重跑启动失败'),
+        });
+      } catch {
+        setFeedback({ ok: false, text: '未能取得重跑结果，请刷新页面查看任务状态后再试' });
+      } finally {
+        setConfirmStage(null);
+        router.refresh();
+      }
     });
   };
 
@@ -98,7 +116,9 @@ export function RunRetryPanel({
             onClick={() => handleResume(undefined)}
             className="rounded-lg bg-slate-900 px-3.5 py-2 text-xs font-medium text-white hover:bg-slate-800 disabled:opacity-50"
           >
-            从中断处继续（{STAGE_LABELS[retryOptions.resumeFrom] ?? retryOptions.resumeFrom}）
+            {isPending && !confirmStage
+              ? '正在处理…'
+              : `从中断处继续（${STAGE_LABELS[retryOptions.resumeFrom]}）`}
           </button>
         )}
 
@@ -124,17 +144,7 @@ export function RunRetryPanel({
         </button>
       </div>
 
-      {feedback && (
-        <div
-          className={`mt-3 rounded-lg border px-3 py-2 text-xs ${
-            feedback.ok
-              ? 'border-emerald-200 bg-emerald-50 text-emerald-800'
-              : 'border-rose-200 bg-rose-50 text-rose-700'
-          }`}
-        >
-          {feedback.text}
-        </div>
-      )}
+      {feedbackMessage}
 
       {confirmStage && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/40 p-4">
@@ -160,6 +170,7 @@ export function RunRetryPanel({
             <div className="mt-5 flex justify-end gap-2">
               <button
                 type="button"
+                disabled={isPending}
                 onClick={() => setConfirmStage(null)}
                 className="rounded-lg border border-slate-300 px-3.5 py-2 text-xs font-medium text-slate-700 hover:bg-slate-50"
               >
@@ -171,7 +182,7 @@ export function RunRetryPanel({
                 onClick={() => handleResume(confirmStage)}
                 className="rounded-lg bg-slate-900 px-3.5 py-2 text-xs font-medium text-white hover:bg-slate-800 disabled:opacity-50"
               >
-                {isPending ? '提交中…' : '确认归档并重跑'}
+                {isPending ? '正在启动…' : '确认归档并重跑'}
               </button>
             </div>
           </div>

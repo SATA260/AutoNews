@@ -293,6 +293,7 @@ async function executePipelineStagesLocked(opts: {
   stopAfterStage?: PipelineStage;
   stageOverrides?: Partial<Record<PipelineStage, StageExecutor>>;
   limitsOverride?: Partial<ContentLimits>;
+  onStarted?: () => void;
   onAwaitingReview?: (opts: {
     ctx: CoreContext;
     runId: string;
@@ -337,6 +338,7 @@ async function executePipelineStagesLocked(opts: {
 
   let activeStage: PipelineStage = startStage;
   let inPublishPhase = false;
+  let onStarted = opts.onStarted;
 
   try {
     for (const stage of stagesToRun) {
@@ -373,6 +375,10 @@ async function executePipelineStagesLocked(opts: {
         type: 'stage_started',
         message: `开始执行阶段：${stage}`,
       });
+      if (onStarted) {
+        onStarted();
+        onStarted = undefined;
+      }
 
       let stageOut: unknown;
       try {
@@ -602,6 +608,7 @@ export async function resumeRun(
     stopAfterStage?: PipelineStage;
     stageOverrides?: Partial<Record<PipelineStage, StageExecutor>>;
     limitsOverride?: Partial<ContentLimits>;
+    onStarted?: () => void;
     onAwaitingReview?: (opts: {
       ctx: CoreContext;
       runId: string;
@@ -689,6 +696,7 @@ export async function resumeRun(
       stageOverrides: opts?.stageOverrides,
       limitsOverride: opts?.limitsOverride,
       onAwaitingReview: opts?.onAwaitingReview,
+      onStarted: opts?.onStarted,
     });
   } finally {
     releasePipelineLock(ctx, runId);
@@ -709,6 +717,7 @@ export async function retryRunItem(
     stopAfterStage?: PipelineStage;
     stageOverrides?: Partial<Record<PipelineStage, StageExecutor>>;
     limitsOverride?: Partial<ContentLimits>;
+    onStarted?: () => void;
     onAwaitingReview?: (opts: {
       ctx: CoreContext;
       runId: string;
@@ -801,6 +810,7 @@ export async function retryRunItem(
       message: `开始单独重试新闻条目 ${itemId}（起始步骤：${fromStep}）`,
       data: { granularity: 'item', itemId, fromStep, attempt },
     });
+    opts?.onStarted?.();
 
     let editOut: unknown;
     try {

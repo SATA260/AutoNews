@@ -27,6 +27,7 @@ import { emitRunEvent } from '../workflow/events.js';
 import {
   assertPipelineLockAvailable,
   LockBusyError,
+  PIPELINE_LOCK_NAME,
   reservePipelineLockForChild,
 } from '../workflow/lock.js';
 import {
@@ -212,9 +213,37 @@ function resolveRealPathInsideDir(
   }
 }
 
-/**
- * 创建任务管理服务实例，统一向命令行和网页后台提供任务生命周期操作、实时事件监听与产物安全访问。
- */
+/** 启动后台重试，在任务状态和轮次仍匹配时把锁交给子进程 */
+async function startDetachedRetry(
+  ctx: CoreContext,
+  runId: string,
+  args: string[],
+  expectedRun: { status: RunStatus; attempt: number },
+): Promise<void> {
+  await spawnDetachedWorker(args, {
+    rootDir: ctx.paths.rootDir,
+    logFile: path.join(ctx.paths.runDir(runId), 'worker.log'),
+    retryReservation: {
+      /** 核对提交时的任务状态与轮次后锁定本次启动 */
+      reserve(pid) {
+        reservePipelineLockForChild(
+          ctx,
+          runId,
+          pid,
+          (current) =>
+            current?.status === expectedRun.status && current.attempt === expectedRun.attempt,
+          { required: true },
+        );
+      },
+      /** 启动失败时仅释放对应子进程的锁 */
+      release(pid) {
+        ctx.repos.locks.releaseLock(PIPELINE_LOCK_NAME, runId, pid);
+      },
+    },
+  });
+}
+
+/** 创建任务管理服务，供命令行和网页后台管理任务、监听事件和读取产物 */
 export function createTaskService(ctx: CoreContext): TaskService {
   return {
     /** 启动新一期生产任务：校验条数必填、查锁排重，并支持前台直跑或分离至后台工作进程 */
@@ -325,10 +354,13 @@ export function createTaskService(ctx: CoreContext): TaskService {
 
     /** 恢复或从指定历史阶段重跑既有任务，支持分离至后台工作进程异步执行 */
     async resume(runId: string, opts?: TaskResumeOptions): Promise<void> {
+      const run = ctx.repos.runs.getById(runId);
+      if (!run) {
+        throw new Error(`未找到任务记录: ${runId}`);
+      }
       const retryOpts = getRunRetryOptions(ctx, runId);
       if (!retryOpts.resumable) {
-        const current = ctx.repos.runs.getById(runId);
-        throw new Error(`任务 ${runId} 当前状态为 ${current?.status ?? '未知'}，不允许继续或重跑`);
+        throw new Error(`任务 ${runId} 当前状态为 ${run.status}，不允许继续或重跑`);
       }
 
       if (opts?.fromStage) {
@@ -347,7 +379,6 @@ export function createTaskService(ctx: CoreContext): TaskService {
       assertPipelineLockAvailable(ctx);
 
       if (opts?.detach) {
-        const beforeAttempt = ctx.repos.runs.getById(runId)?.attempt;
         const args = ['--root', ctx.paths.rootDir, '--action', 'resume', '--run-id', runId];
         if (opts.fromStage) {
           args.push('--from', opts.fromStage);
@@ -355,19 +386,7 @@ export function createTaskService(ctx: CoreContext): TaskService {
         if (opts.useLatestConfig) {
           args.push('--latest-config');
         }
-        const { pid } = await spawnDetachedWorker(args, {
-          rootDir: ctx.paths.rootDir,
-          logFile: path.join(ctx.paths.runDir(runId), 'worker.log'),
-        });
-        reservePipelineLockForChild(
-          ctx,
-          runId,
-          pid,
-          (current) =>
-            current !== null &&
-            RETRYABLE_RUN_STATUSES.includes(current.status) &&
-            current.attempt === beforeAttempt,
-        );
+        await startDetachedRetry(ctx, runId, args, run);
         return;
       }
 
@@ -401,7 +420,6 @@ export function createTaskService(ctx: CoreContext): TaskService {
       assertPipelineLockAvailable(ctx);
 
       if (opts?.detach) {
-        const beforeAttempt = run.attempt;
         const args = [
           '--root',
           ctx.paths.rootDir,
@@ -418,19 +436,7 @@ export function createTaskService(ctx: CoreContext): TaskService {
         if (opts.useLatestConfig) {
           args.push('--latest-config');
         }
-        const { pid } = await spawnDetachedWorker(args, {
-          rootDir: ctx.paths.rootDir,
-          logFile: path.join(ctx.paths.runDir(runId), 'worker.log'),
-        });
-        reservePipelineLockForChild(
-          ctx,
-          runId,
-          pid,
-          (current) =>
-            current !== null &&
-            RETRYABLE_RUN_STATUSES.includes(current.status) &&
-            current.attempt === beforeAttempt,
-        );
+        await startDetachedRetry(ctx, runId, args, run);
         return;
       }
 

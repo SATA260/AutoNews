@@ -1,10 +1,11 @@
+import { ChildProcess } from 'node:child_process';
 import fs from 'node:fs/promises';
 import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { RunEvent } from '@aidaily/contracts';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   computeNextScheduleRunAt,
   createCore,
@@ -16,6 +17,7 @@ import {
   updateSourcesFile,
 } from '../src/index.js';
 import { runWorkerMain } from '../src/worker/main.js';
+import { confirmRetryStartup } from '../src/worker/retry-startup.js';
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..', '..');
 const FAKE_AGY_BIN = path.resolve(
@@ -41,7 +43,8 @@ afterEach(async () => {
   await Promise.all(tempDirs.splice(0).map((dir) => fs.rm(dir, { recursive: true, force: true })));
 });
 
-async function startFixtureHttpServer(): Promise<string> {
+/** 提供本地信源，并允许测试统计订阅请求次数 */
+async function startFixtureHttpServer(onFeedRequest?: () => void): Promise<string> {
   const pubDate = new Date().toUTCString();
   const body =
     'Anthropic announced enterprise deployment benchmarks for 200000 context tokens today in production clusters. '.repeat(
@@ -49,6 +52,7 @@ async function startFixtureHttpServer(): Promise<string> {
     );
   const server = http.createServer((req, res) => {
     if (req.url === '/rss.xml') {
+      onFeedRequest?.();
       res.writeHead(200, { 'Content-Type': 'application/rss+xml; charset=utf-8' });
       res.end(
         `<?xml version="1.0"?><rss version="2.0"><channel><title>Fixture Feed</title><item><title>Anthropic 扩展企业上下文支持</title><link>${baseUrl}/story-1</link><pubDate>${pubDate}</pubDate><description>Anthropic announced enterprise deployment.</description></item></channel></rss>`,
@@ -259,6 +263,175 @@ describe('M8 services, detached worker, launchd scheduler, and doctor', () => {
     core.context.repos.locks.releaseLock('pipeline', runId, process.pid);
     await core.close();
   }, 45_000);
+
+  it('hands off reserved locks to detached retries and waits for confirmed startup', async () => {
+    let feedRequests = 0;
+    const baseUrl = await startFixtureHttpServer(() => {
+      feedRequests += 1;
+    });
+    const { rootDir } = await setupServiceWorkspace(baseUrl);
+    const core = await createCore({ rootDir });
+    const settingsFile = path.join(rootDir, 'config', 'settings.yaml');
+    const originalModel = core.context.settings.ai.stages.select.model;
+    const nextModel = `${originalModel}-fixture`;
+    const scriptFile = path.join(rootDir, 'fake-script.json');
+    const selectError = '模拟选题服务不可用';
+    const editError = '模拟总结服务不可用';
+
+    try {
+      await fs.writeFile(
+        scriptFile,
+        JSON.stringify({
+          rules: [
+            {
+              stage: 'select',
+              modelEquals: originalModel,
+              actions: [{ mode: 'exit_error', error: selectError }],
+            },
+            { stage: 'summarize', actions: [{ mode: 'exit_error', error: editError }] },
+          ],
+        }),
+      );
+
+      const { runId } = await core.tasks.start({
+        itemCount: 1,
+        trigger: 'manual-web',
+        detach: true,
+      });
+      /** 等候模拟模型错误落库和工作进程交还运行锁 */
+      const waitForFailure = async (attempt: number, message: string) => {
+        await vi.waitFor(
+          () => {
+            expect(core.context.repos.runs.getById(runId)).toMatchObject({
+              attempt,
+              status: 'failed',
+              error: expect.stringContaining(message),
+            });
+            expect(core.context.repos.locks.get('pipeline')).toBeNull();
+          },
+          { timeout: 5_000 },
+        );
+      };
+      await waitForFailure(1, selectError);
+      const collectFile = path.join(core.context.paths.runDir(runId), 'stages', 'collect.json');
+      const selectFile = path.join(core.context.paths.runDir(runId), 'stages', 'select.json');
+      const collected = await fs.readFile(collectFile, 'utf8');
+
+      // 工作进程配置加载失败时，父进程能拿到错误，并可继续尝试本期。
+      const originalSettings = await fs.readFile(settingsFile, 'utf8');
+      await fs.writeFile(settingsFile, 'invalid: true\n');
+      try {
+        await expect(
+          core.tasks.resume(runId, { fromStage: 'select', detach: true }),
+        ).rejects.toThrow('后台重试启动失败');
+        await waitForFailure(1, selectError);
+      } finally {
+        await fs.writeFile(settingsFile, originalSettings);
+      }
+
+      await updateSettingsFile(settingsFile, { ai: { stages: { select: { model: nextModel } } } });
+      const submissions = await Promise.allSettled([
+        core.tasks.resume(runId, { detach: true }),
+        core.tasks.resume(runId, { detach: true }),
+      ]);
+      expect(submissions.filter((result) => result.status === 'fulfilled')).toHaveLength(1);
+      expect(submissions).toContainEqual({
+        status: 'rejected',
+        reason: expect.objectContaining({
+          message: expect.stringMatching(/已有任务正在执行|状态或执行轮次已变化/),
+        }),
+      });
+      expect(await core.tasks.events(runId)).toContainEqual(
+        expect.objectContaining({
+          type: 'retry_started',
+          stage: 'select',
+          data: expect.objectContaining({ granularity: 'resume', attempt: 2 }),
+        }),
+      );
+      await waitForFailure(2, selectError);
+
+      // 指定阶段重跑归档旧产物，使用新配置完成选题，再由受控错误停在编辑阶段。
+      await fs.writeFile(selectFile, '{}\n');
+      await core.tasks.resume(runId, { fromStage: 'select', useLatestConfig: true, detach: true });
+      expect(await core.tasks.events(runId)).toContainEqual(
+        expect.objectContaining({
+          type: 'retry_started',
+          stage: 'select',
+          data: expect.objectContaining({ granularity: 'stage', attempt: 3 }),
+        }),
+      );
+      await waitForFailure(3, editError);
+      expect(
+        await fs.readFile(
+          path.join(
+            core.context.paths.runDir(runId),
+            'archive',
+            'attempt-3-select',
+            'stages',
+            'select.json',
+          ),
+          'utf8',
+        ),
+      ).toBe('{}\n');
+      expect(
+        (await core.tasks.getLlmCalls(runId))
+          .filter((call) => call.stage === 'select')
+          .map((call) => call.model),
+      ).toEqual([originalModel, originalModel, nextModel]);
+
+      const item = core.context.repos.runItems.listByRun(runId)[0];
+      if (!item) {
+        throw new Error('选题结束后缺少用于验证重试的新闻条目');
+      }
+      await core.tasks.retryItem(runId, item.id, { detach: true });
+      expect(await core.tasks.events(runId)).toContainEqual(
+        expect.objectContaining({
+          type: 'retry_started',
+          stage: 'edit',
+          itemId: item.id,
+          data: expect.objectContaining({ granularity: 'item', attempt: 4 }),
+        }),
+      );
+      await waitForFailure(4, editError);
+      expect(feedRequests).toBe(1);
+      expect(await fs.readFile(collectFile, 'utf8')).toBe(collected);
+    } finally {
+      await core.close();
+    }
+  }, 20_000);
+
+  it('releases the reservation on early exit and preserves it on confirmation timeout', async () => {
+    const firstSend = vi.fn(() => true);
+    const secondSend = vi.fn(() => true);
+    const firstChild = Object.assign(new ChildProcess(), { pid: 123, send: firstSend });
+    const secondChild = Object.assign(new ChildProcess(), { pid: 456, send: secondSend });
+    const reserve = vi.fn();
+    const release = vi.fn();
+
+    vi.useFakeTimers();
+    try {
+      const exited = expect(confirmRetryStartup(firstChild, { reserve, release })).rejects.toThrow(
+        '退出码 7',
+      );
+      firstChild.emit('message', { type: 'retry_waiting' });
+      expect(firstSend).toHaveBeenCalledWith('retry_granted', expect.any(Function));
+      firstChild.emit('exit', 7, null);
+      await exited;
+      expect(release).toHaveBeenCalledWith(123);
+
+      const timedOut = expect(
+        confirmRetryStartup(secondChild, { reserve, release }),
+      ).rejects.toThrow('15 秒内未确认后台重试已启动');
+      secondChild.emit('message', { type: 'retry_waiting' });
+      expect(secondSend).toHaveBeenCalledWith('retry_granted', expect.any(Function));
+      await vi.advanceTimersByTimeAsync(15_000);
+      await timedOut;
+      expect(reserve.mock.calls).toEqual([[123], [456]]);
+      expect(release.mock.calls).toEqual([[123]]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 
   it('supports ConfigService YAML comment-preserving updates, SchedulerService CRUD/sync, and SystemService doctor', async () => {
     const baseUrl = await startFixtureHttpServer();

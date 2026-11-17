@@ -5,8 +5,9 @@ import type { EditSubStep } from '../editorial/item-pipeline.js';
 import { createCore } from '../index.js';
 import { inTransaction } from '../storage/db.js';
 import { emitRunEvent } from '../workflow/events.js';
-import { LockBusyError } from '../workflow/lock.js';
-import { executeRun } from '../workflow/runner.js';
+import { LockBusyError, PIPELINE_LOCK_NAME, releasePipelineLock } from '../workflow/lock.js';
+import { executeRun, resumeRun, retryRunItem } from '../workflow/runner.js';
+import { reportRetryStartup, waitForRetryGrant } from './retry-startup.js';
 
 const VALID_WORKER_ACTIONS = new Set([
   'execute-run',
@@ -34,6 +35,7 @@ interface ParsedWorkerArgs {
   itemId?: string;
   from?: string;
   latestConfig: boolean;
+  requiresRetryGrant: boolean;
   trigger?: Trigger;
   scheduleId?: string;
   itemCount?: number;
@@ -57,6 +59,7 @@ export function parseWorkerArgs(argv: readonly string[]): ParsedWorkerArgs {
   let itemId: string | undefined;
   let from: string | undefined;
   let latestConfig = false;
+  let requiresRetryGrant = false;
   let trigger: Trigger | undefined;
   let scheduleId: string | undefined;
   let itemCount: number | undefined;
@@ -93,6 +96,9 @@ export function parseWorkerArgs(argv: readonly string[]): ParsedWorkerArgs {
       case '--latest-config':
         latestConfig = true;
         break;
+      case '--wait-for-retry-grant':
+        requiresRetryGrant = true;
+        break;
       case '--trigger':
         trigger = TriggerSchema.parse(requireFlagValue(argv, i, '--trigger'));
         i += 1;
@@ -128,6 +134,9 @@ export function parseWorkerArgs(argv: readonly string[]): ParsedWorkerArgs {
   if (!action) {
     throw new Error('缺少必需的后台工作进程参数 --action');
   }
+  if (requiresRetryGrant && action !== 'resume' && action !== 'retry-item') {
+    throw new Error('只有重试操作支持等待父进程许可');
+  }
 
   return {
     rootDir,
@@ -136,6 +145,7 @@ export function parseWorkerArgs(argv: readonly string[]): ParsedWorkerArgs {
     itemId,
     from,
     latestConfig,
+    requiresRetryGrant,
     trigger,
     scheduleId,
     itemCount,
@@ -156,9 +166,49 @@ export async function runWorkerMain(
   argv: readonly string[] = process.argv.slice(2),
 ): Promise<void> {
   const parsed = parseWorkerArgs(argv);
+  if (!parsed.requiresRetryGrant) {
+    return executeWorkerAction(parsed);
+  }
+
+  await waitForRetryGrant();
+  let started = false;
+  try {
+    await executeWorkerAction(parsed, () => {
+      started = true;
+      reportRetryStartup({ type: 'retry_started' });
+    });
+  } catch (err) {
+    if (!started) {
+      reportRetryStartup({
+        type: 'retry_start_failed',
+        message: `后台重试启动失败：${err instanceof Error ? err.message : String(err)}`,
+      });
+    }
+    throw err;
+  }
+}
+
+/** 初始化工作进程并执行所选操作，结尾释放本进程的资源 */
+async function executeWorkerAction(
+  parsed: ParsedWorkerArgs,
+  onStarted?: () => void,
+): Promise<void> {
   const core = await createCore({ rootDir: parsed.rootDir });
+  const retryRunId = parsed.requiresRetryGrant ? parsed.runId : undefined;
 
   try {
+    if (parsed.requiresRetryGrant) {
+      const runId = requireRunId(parsed);
+      const ownsReservation = core.context.repos.locks.updateHeartbeat(
+        PIPELINE_LOCK_NAME,
+        runId,
+        core.context.now().toISOString(),
+        process.pid,
+      );
+      if (!ownsReservation) {
+        throw new Error(`任务 ${runId} 的重试启动资格已失效，请刷新后重试`);
+      }
+    }
     switch (parsed.action) {
       case 'execute-run': {
         const runId = requireRunId(parsed);
@@ -180,10 +230,10 @@ export async function runWorkerMain(
       case 'resume': {
         const runId = requireRunId(parsed);
         const fromStage = parsed.from ? StageSchema.parse(parsed.from) : undefined;
-        await core.tasks.resume(runId, {
+        await resumeRun(core.context, runId, {
           fromStage,
           useLatestConfig: parsed.latestConfig,
-          detach: false,
+          onStarted,
         });
         break;
       }
@@ -205,10 +255,10 @@ export async function runWorkerMain(
           }
           fromStep = parsed.from;
         }
-        await core.tasks.retryItem(runId, parsed.itemId, {
+        await retryRunItem(core.context, runId, parsed.itemId, {
           fromStep,
           useLatestConfig: parsed.latestConfig,
-          detach: false,
+          onStarted,
         });
         break;
       }
@@ -291,6 +341,9 @@ export async function runWorkerMain(
     );
     throw err;
   } finally {
+    if (retryRunId) {
+      releasePipelineLock(core.context, retryRunId);
+    }
     await core.close();
   }
 }

@@ -9,6 +9,7 @@ import {
 import { revalidatePath } from 'next/cache';
 import { z } from 'zod';
 import { getCore } from '@/lib/core';
+import { STAGE_LABELS } from '@/lib/format';
 
 /** 网页端提交操作后的统一响应结构 */
 export interface ActionResult<T = undefined> {
@@ -142,9 +143,7 @@ export async function resumeRunAction(formData: FormData): Promise<ActionResult>
     safeRevalidate(`/runs/${runId}`);
     return {
       ok: true,
-      message: fromStage
-        ? `已提交从 ${fromStage} 阶段重跑（旧产物已归档）`
-        : '已提交从断点阶段继续执行',
+      message: fromStage ? `已从「${STAGE_LABELS[fromStage]}」开始重跑` : '已从中断处继续执行',
     };
   } catch (err) {
     return { ok: false, error: err instanceof Error ? err.message : String(err) };
@@ -170,7 +169,7 @@ export async function retryItemAction(formData: FormData): Promise<ActionResult>
       detach: true,
     });
     safeRevalidate(`/runs/${runId}`);
-    return { ok: true, message: `已提交单条新闻重做（起点：${fromStep}）` };
+    return { ok: true, message: '已开始重做这条新闻' };
   } catch (err) {
     return { ok: false, error: err instanceof Error ? err.message : String(err) };
   }
