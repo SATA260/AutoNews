@@ -9,11 +9,11 @@ export const runtime = 'nodejs';
 export default async function SettingsPage() {
   const core = await getCore();
   const settings = core.config.getSettings();
-  const cliNames = Object.keys(settings.clis);
+  const modelRoutes = core.system.getModelRoutes();
 
   const [doctor, ...modelPairs] = await Promise.all([
     core.system.doctor(),
-    ...cliNames.map(
+    ...modelRoutes.map(
       async (cli) => [cli, await core.system.listModels(cli).catch(() => [] as string[])] as const,
     ),
   ]);
@@ -28,7 +28,7 @@ export default async function SettingsPage() {
         </p>
       </div>
 
-      <StageRoutingForm settings={settings} modelsByCli={modelsByCli} />
+      <StageRoutingForm settings={settings} modelRoutes={modelRoutes} modelsByCli={modelsByCli} />
 
       <section className="space-y-4 rounded-xl border border-slate-200 bg-white p-5 shadow-xs">
         <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-100 pb-3">

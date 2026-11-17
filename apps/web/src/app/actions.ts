@@ -400,7 +400,7 @@ const StageFieldPatchSchema = z.object({
   retries: z.number().int().min(0),
 });
 
-/** 更新各个 AI 处理阶段所使用的命令行工具与模型配置（保存后下一期或启用最新配置重试即生效） */
+/** 更新各阶段的调用方式与模型配置 */
 export async function updateStageRoutingAction(formData: FormData): Promise<ActionResult> {
   try {
     const stageKeys = ['select', 'summarize', 'polish', 'factcheck', 'package'] as const;
@@ -424,11 +424,11 @@ export async function updateStageRoutingAction(formData: FormData): Promise<Acti
       .parse(parseRequiredIntField(formData.get('maxConcurrentCalls'), '最大并发模型调用数'));
 
     const core = await getCore();
-    const currentSettings = core.config.getSettings();
+    const modelRoutes = core.system.getModelRoutes();
     for (const key of stageKeys) {
       const cliName = stages[key]?.cli ?? '';
-      if (!Object.hasOwn(currentSettings.clis, cliName)) {
-        throw new Error(`未在配置中定义命令行工具: ${cliName}`);
+      if (!modelRoutes.includes(cliName)) {
+        throw new Error(`未在配置中定义调用方式：${cliName}`);
       }
     }
 
@@ -445,7 +445,7 @@ export async function updateStageRoutingAction(formData: FormData): Promise<Acti
       },
     });
     safeRevalidate('/settings');
-    return { ok: true, message: '各阶段命令行与模型路由配置已保存并立即生效' };
+    return { ok: true, message: '各阶段模型配置已保存，对新任务生效' };
   } catch (err) {
     return { ok: false, error: err instanceof Error ? err.message : String(err) };
   }

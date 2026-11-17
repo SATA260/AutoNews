@@ -20,6 +20,7 @@ const FIXTURE_AGY = path.resolve(
   'fixtures',
   'fake-agy.mjs',
 );
+const FIXTURE_CODEX = fileURLToPath(new URL('./fixtures/fake-codex.mjs', import.meta.url));
 
 const tempDirs: string[] = [];
 const envSnapshot = { ...process.env };
@@ -33,7 +34,7 @@ async function makeBridge(
   extraConfigs?: Record<
     string,
     {
-      adapter: 'agy' | 'generic';
+      adapter: 'agy' | 'codex' | 'generic';
       bin: string;
       extraArgs?: string[];
       argsTemplate?: string[];
@@ -63,6 +64,52 @@ async function makeBridge(
 }
 
 describe('@aidaily/cli-bridge', () => {
+  it('invokes the local Codex executable and reads its final structured result and usage', async () => {
+    await fs.chmod(FIXTURE_CODEX, 0o755);
+    const calls: CallRecord[] = [];
+    const { bridge, tmpDir } = await makeBridge(
+      {
+        codex: { adapter: 'codex', bin: FIXTURE_CODEX, extraArgs: [] },
+      },
+      calls,
+    );
+    const request = {
+      cli: 'codex',
+      model: 'fixture-codex',
+      prompt: '验证来自标准输入的提示词',
+      schema: z.object({ title: z.string(), note: z.string().optional() }),
+      timeoutMs: 3_000,
+      retries: 2,
+    };
+    expect(await bridge.health('codex')).toMatchObject({ ok: true });
+    expect(await bridge.listModels('codex')).toEqual(['fixture-codex']);
+    expect(await bridge.invoke(request)).toMatchObject({
+      data: { title: '最终输出' },
+      conversationId: 'fixture-thread',
+      usage: { inputTokens: 80, outputTokens: 20 },
+    });
+    expect(calls[0]?.args).not.toContain(request.prompt);
+    expect(await fs.readdir(path.join(tmpDir, 'cli-bridge'))).toEqual([]);
+
+    process.env.FAKE_CODEX_MODE = 'auth';
+    await expect(bridge.invoke(request)).rejects.toBeInstanceOf(CliAuthError);
+    process.env.FAKE_CODEX_MODE = 'auth_no_output';
+    await expect(bridge.invoke(request)).rejects.toBeInstanceOf(CliAuthError);
+    process.env.FAKE_CODEX_MODE = 'unrelated_401';
+    await expect(bridge.invoke({ ...request, retries: 0 })).rejects.toBeInstanceOf(CliExitError);
+    expect(calls.map((call) => call.status)).toEqual([
+      'ok',
+      'auth_error',
+      'auth_error',
+      'exit_error',
+    ]);
+
+    process.env.FAKE_CODEX_MODE = 'old_version';
+    expect(await bridge.health('codex')).toMatchObject({ ok: false });
+    process.env.FAKE_CODEX_MODE = 'bad_catalog';
+    await expect(bridge.listModels('codex')).rejects.toBeInstanceOf(CliOutputError);
+  });
+
   it('invokes agy with structured schema, records usage, and cleans isolated workDir', async () => {
     await fs.chmod(FIXTURE_AGY, 0o755);
     const calls: CallRecord[] = [];

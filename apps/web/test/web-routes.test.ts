@@ -433,10 +433,14 @@ describe('apps/web routes and Server Actions', () => {
 
     const validRoutingFd = new FormData();
     for (const key of ['select', 'summarize', 'polish', 'factcheck', 'package']) {
-      validRoutingFd.set(`stage_${key}_cli`, 'agy');
+      validRoutingFd.set(`stage_${key}_cli`, key === 'select' ? 'deepseek' : 'agy');
       validRoutingFd.set(
         `stage_${key}_model`,
-        key === 'polish' ? 'claude-sonnet-4-5' : 'gemini-2.5-pro',
+        key === 'select'
+          ? 'deepseek-flash'
+          : key === 'polish'
+            ? 'claude-sonnet-4-5'
+            : 'gemini-2.5-pro',
       );
       validRoutingFd.set(`stage_${key}_timeoutSec`, '150');
       validRoutingFd.set(`stage_${key}_retries`, '0');
@@ -446,6 +450,10 @@ describe('apps/web routes and Server Actions', () => {
     expect(routeRes.ok).toBe(true);
 
     const core = await getCore();
+    expect(core.config.getSettings().ai.stages.select).toMatchObject({
+      cli: 'deepseek',
+      model: 'deepseek-flash',
+    });
     expect(core.config.getSettings().ai.stages.polish.model).toBe('claude-sonnet-4-5');
     expect(core.config.getSettings().ai.stages.polish.retries).toBe(0);
 

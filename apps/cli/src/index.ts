@@ -1142,8 +1142,8 @@ export function buildProgram(io: CliIo = DEFAULT_IO, onExitCode?: (code: number)
   // 19. aidaily models [--cli agy]
   program
     .command('models')
-    .description('查询指定大模型命令行工具当前可用的模型列表')
-    .option('--cli <cli>', '命令行工具配置名称', 'agy')
+    .description('查询指定调用方式提供的模型列表')
+    .option('--cli <cli>', '本机 CLI 或 HTTP API 的配置名称', 'agy')
     .action(async (opts: { cli: string }, cmd: Command) => {
       const gOpts = getGlobals(cmd);
       const print = createPrinter(io, Boolean(gOpts.json));
@@ -1153,7 +1153,7 @@ export function buildProgram(io: CliIo = DEFAULT_IO, onExitCode?: (code: number)
           models.length > 0 ? models.map((m) => `  - ${m}`).join('\n') : '未查询到可用模型。';
         print(
           { cli: opts.cli, models },
-          `命令行工具 "${opts.cli}" 可用模型（共 ${models.length} 个）:\n${text}`,
+          `调用方式「${opts.cli}」的模型列表（共 ${models.length} 个）\n${text}`,
         );
         return 0;
       });

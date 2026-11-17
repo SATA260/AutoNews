@@ -1,40 +1,13 @@
-import type { CliConfig, LlmCallStatus, LlmStage } from '@aidaily/contracts';
-import type { z } from 'zod';
+import type { CliConfig } from '@aidaily/contracts';
+import type { InvokeRequest, TokenUsage } from '@aidaily/model-runtime';
 
-/** 关联的任务追踪信息，用于记录每次命令行调用属于哪一期任务和哪条新闻 */
-export interface InvokeMeta {
-  runId?: string;
-  stage?: LlmStage;
-  itemId?: string;
-}
-
-/** 发起一次模型命令行调用所需的请求参数 */
-export interface InvokeRequest<T> {
-  cli: string;
-  prompt: string;
-  schema?: z.ZodType<T>;
-  model?: string;
-  timeoutMs: number;
-  retries: number;
-  signal?: AbortSignal;
-  meta?: InvokeMeta;
-}
-
-/** 单次模型调用消耗的输入与输出 Token 数量 */
-export interface TokenUsage {
-  inputTokens: number;
-  outputTokens: number;
-}
-
-/** 模型命令行调用成功后的标准化返回结果 */
-export interface InvokeResult<T> {
-  data: T;
-  rawStdout: string;
-  durationMs: number;
-  attempts: number;
-  usage?: TokenUsage;
-  conversationId?: string;
-}
+export type {
+  CallRecord,
+  InvokeMeta,
+  InvokeRequest,
+  InvokeResult,
+  TokenUsage,
+} from '@aidaily/model-runtime';
 
 /** 适配器拼装出来的实际子进程命令行参数与环境 */
 export interface AdapterCommand {
@@ -43,6 +16,7 @@ export interface AdapterCommand {
   stdin?: string;
   env?: Record<string, string>;
   outFile?: string;
+  normalizeOutput?: (payload: unknown) => unknown;
 }
 
 /** 适配器从命令行输出中解析出的数据主体与附带统计信息 */
@@ -72,28 +46,6 @@ export interface CliAdapter {
   healthcheck(cfg: CliConfig): Promise<{ ok: boolean; detail: string }>;
   /** 可选方法：查询该命令行工具当前支持选用的模型列表 */
   listModels?(cfg: CliConfig): Promise<string[]>;
-}
-
-/** 单次命令行调用（包含失败重试）向日志系统上报的完整审计记录 */
-export interface CallRecord {
-  runId?: string;
-  stage?: LlmStage;
-  itemId?: string;
-  cli: string;
-  model?: string;
-  attempt: number;
-  status: LlmCallStatus;
-  durationMs: number;
-  inputTokens?: number;
-  outputTokens?: number;
-  conversationId?: string;
-  prompt: string;
-  args: string[];
-  rawStdout: string;
-  rawStderr: string;
-  parsed?: unknown;
-  error?: string;
-  createdAt: string;
 }
 
 /** 通用外部命令执行参数 */

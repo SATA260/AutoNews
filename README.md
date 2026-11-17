@@ -13,7 +13,9 @@ ai每日报/
 │   └── web/                 # 本地 Next.js 管理后台
 ├── packages/
 │   ├── contracts/           # 全局共享 Zod 校验规则与 TypeScript 类型契约
-│   ├── cli-bridge/          # 外部大模型 CLI 调用兼容层（内置 agy 与通用 CLI 适配器）
+│   ├── cli-bridge/          # 本机命令适配（agy、Codex CLI、通用 CLI）
+│   ├── model-api/           # HTTP 模型接口（OpenAI 兼容协议）
+│   ├── model-runtime/       # 两种调用方式共用的排队、重试、校验和审计
 │   ├── tts/                 # 语音合成抽象接口、单句缓存、响度统一与时间轴拼装
 │   └── core/                # 共享业务内核：抓取、编辑校对、渲染质检、投稿、定时调度与恢复
 ├── templates/
@@ -32,7 +34,7 @@ ai每日报/
 - **Node.js**：`>= 24.0.0`（项目使用 Node 内置 `node:sqlite`，纯 ESM）
 - **ffmpeg / ffprobe**：负责音频响度统一、黑屏与静音质检、帧序列合成为 MP4
 - **Playwright Chromium**：负责驱动前端模板逐帧截屏与封面导出（`npx playwright install chromium`）
-- **大模型命令行工具**：默认配置为 `agy`（需在本机完成登录与可用性验证），也支持通过配置文件扩展其他命令行工具
+- **大模型调用**：可选择已登录的 `agy`、本机 Codex CLI，或配置 DeepSeek 等 OpenAI 兼容 HTTP 服务
 - **B 站投稿工具**：`biliup`（需通过扫码完成凭据登录）
 
 ---
@@ -71,13 +73,23 @@ npm run aidaily -- bili login
 
 ## 核心配置规则
 
-1. **分阶段独立选择 CLI 与模型（动态生效）**
-   - 五个 AI 阶段（`select`、`summarize`、`polish`、`factcheck`、`package`）各自独立配置 `cli`、`model`、`timeoutSec`、`retries`。
+1. **分阶段选择调用方式与模型**
+   - 五个 AI 阶段（`select`、`summarize`、`polish`、`factcheck`、`package`）各自独立配置 `cli`、`model`、`timeoutSec`、`retries`。字段 `cli` 填写 `clis` 或 `ai.providers` 中的名称。
    - 既可直接编辑 `config/settings.yaml`，也可以通过 CLI（`aidaily config set ...`）或网页管理台 `/settings` 随时调整。
 2. **每期条数与定时执行时间不设默认值**
    - 手动运行（CLI `aidaily run -n <条数>` 或网页弹窗）及新建定时任务（CLI `aidaily schedule create --time <HH:mm> -n <条数>` 或网页 `/schedules`）都必须由操作者**显式填写正整数条数与 24 小时制时间**，系统不会静默使用任何默认值。
 3. **强制开启 B 站 AI 生成内容声明**
    - 投稿环节锁定启用平台 AI 生成内容声明，并在视频简介尾部自动附加可配置的声明说明。
+
+### Codex CLI 与 DeepSeek
+
+通过 `codex login status` 验证本机登录，再用 `npm run aidaily -- models --cli codex` 查看本机目录。定时任务需要能从其 `PATH` 找到 `codex`，也可以在 `clis.codex.bin` 中配置绝对路径。
+
+DeepSeek 连接已列在 `config/settings.yaml` 的 `ai.providers.deepseek`。让 Web 或 CLI 的启动进程继承 `DEEPSEEK_API_KEY`，或把密钥放在 `storage/secrets/deepseek-api-key` 中并设置文件权限 `600`。私有文件也适用于 launchd 定时任务。准备好凭据后运行 `npm run aidaily -- models --cli deepseek`，在设置页为需要的阶段选择 `deepseek` 并填写模型 ID。
+
+接入其它兼容服务时，在 `ai.providers` 中添加命名连接，指定 `adapter: openai-compatible`、地址前缀 `baseUrl` 和 `protocol: chat-completions` 或 `protocol: responses`。使用 `apiKeyEnv` 或 `apiKeyFile` 配置该服务自己的密钥引用。仅支持文本输出的 Chat Completions 网关可设置 `jsonMode: prompt`。服务未提供模型列表时可手填模型 ID。
+
+新任务使用保存后的配置。失败任务勾选「使用最新系统配置」后，可从所选阶段切换模型重新执行。
 
 ---
 

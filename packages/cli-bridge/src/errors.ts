@@ -1,13 +1,11 @@
+import { ModelCallError } from '@aidaily/model-runtime';
+
 /**
  * CLI 桥接层统一异常基类，通过 `retryable` 标记调用方是否允许自动重试。
  */
-export class CliBridgeError extends Error {
-  readonly retryable: boolean;
-
+export class CliBridgeError extends ModelCallError {
   constructor(message: string, retryable: boolean, options?: ErrorOptions) {
-    super(message, options);
-    this.name = new.target.name;
-    this.retryable = retryable;
+    super(message, retryable, 'exit_error', options);
   }
 }
 
@@ -23,6 +21,8 @@ export class CliNotFoundError extends CliBridgeError {
 
 /** 命令行工具未登录或鉴权凭证失效（不可重试，需人工重新登录） */
 export class CliAuthError extends CliBridgeError {
+  override readonly status = 'auth_error';
+
   constructor(message: string, cause?: unknown) {
     super(message, false, { cause });
   }
@@ -42,6 +42,7 @@ export class PromptTooLargeError extends CliBridgeError {
 
 /** 子进程执行超出设定时长已被强杀（可重试） */
 export class CliTimeoutError extends CliBridgeError {
+  override readonly status = 'timeout';
   readonly timeoutMs: number;
 
   constructor(timeoutMs: number, cause?: unknown) {
@@ -64,7 +65,8 @@ export class CliExitError extends CliBridgeError {
 
 /** 模型输出非合法 JSON 或未通过 Zod Schema 校验（可携带错误提示重试） */
 export class CliOutputError extends CliBridgeError {
-  readonly issuesSummary: string;
+  override readonly status = 'bad_output';
+  override readonly issuesSummary: string;
   readonly rawOutput: string;
 
   constructor(message: string, issuesSummary: string, rawOutput: string, cause?: unknown) {

@@ -9,6 +9,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import {
   abandonRun,
   cancelRun,
+  computeArticleId,
   createCore,
   createRun,
   executeRun,
@@ -187,6 +188,132 @@ const STUB_RENDER_QA = {
 };
 
 describe('editorial workflow, TTS timeline, interruption recovery, and retry engine', () => {
+  it('routes old snapshots to their CLI and uses snapshotted HTTP and CLI routes together on retry', async () => {
+    const { rootDir } = await setupWorkflowWorkspace();
+    const now = new Date('2026-11-16T08:00:00.000Z');
+    const articleId = computeArticleId('https://primary.example.com/item-route');
+    const article = {
+      slug: 'item-route',
+      title: '国内团队发布支持本地部署的新模型',
+      pubDate: 'Mon, 16 Nov 2026 07:30:00 GMT',
+      body: '国内团队宣布推出新一代开源语言模型，用户可以在本地设备运行模型并生成文本。',
+    };
+    const feed = makeFeedMockFetch([article]);
+    const requested: Array<{ url: string; model: string }> = [];
+    const fixtureKey = 'mock-deepseek-key';
+    const core = await createCore({
+      rootDir,
+      now: () => now,
+      fetchImpl: async (input, init) => {
+        const url = input.toString();
+        if (!url.includes('gateway.test')) {
+          return feed(input, init);
+        }
+        expect(new Headers(init?.headers).get('authorization')).toBe(`Bearer ${fixtureKey}`);
+        if (url.endsWith('/models')) {
+          return Response.json({ data: [{ id: 'fixture-old' }, { id: 'fixture-new' }] });
+        }
+        const { model } = JSON.parse(init?.body as string) as { model: string };
+        requested.push({ url, model });
+        return Response.json({
+          id: 'select-fixture',
+          choices: [
+            {
+              finish_reason: 'stop',
+              message: {
+                content: JSON.stringify({
+                  events: [
+                    {
+                      title: article.title,
+                      articleIds: [articleId],
+                      category: '开源模型',
+                      entity: '国内团队',
+                      score: 9,
+                      publicAppeal: 8,
+                      reason: '读者可在本地使用',
+                      duplicateOfHistory: false,
+                    },
+                  ],
+                }),
+              },
+            },
+          ],
+        });
+      },
+    });
+
+    try {
+      const legacyId = createRun(core.context, { itemCount: 1, trigger: 'manual-cli' });
+      const legacy = structuredClone(core.context.settings);
+      delete legacy.ai.providers;
+      core.context.repos.runs.updateStatus(legacyId, 'queued', {
+        configSnapshotJson: JSON.stringify(legacy),
+      });
+      await core.config.updateSettings({ clis: { agy: { bin: 'fixture-missing-agy' } } });
+      await executeRun(core.context, legacyId, { stopAfterStage: 'select' });
+      expect(await core.tasks.getLlmCalls(legacyId)).toEqual([
+        expect.objectContaining({ cli: 'agy', status: 'ok' }),
+      ]);
+      abandonRun(core.context, legacyId);
+
+      await fs.writeFile(path.join(core.context.paths.secretsDir, 'fixture-deepseek'), fixtureKey, {
+        mode: 0o600,
+      });
+      await core.config.updateSettings({
+        clis: { agy: { bin: FAKE_AGY_BIN } },
+        ai: {
+          providers: {
+            fixture: {
+              adapter: 'openai-compatible',
+              protocol: 'chat-completions',
+              baseUrl: 'https://old.gateway.test/v1',
+              apiKeyFile: 'fixture-deepseek',
+            },
+          },
+          stages: { select: { cli: 'fixture', model: 'fixture-old' } },
+        },
+      });
+      expect(core.system.getModelRoutes()).toContain('fixture');
+      expect(await core.system.listModels('fixture')).toEqual(['fixture-old', 'fixture-new']);
+      const runId = createRun(core.context, { itemCount: 1, trigger: 'manual-web' });
+      await executeRun(core.context, runId, { stopAfterStage: 'select' });
+
+      await core.config.updateSettings({
+        ai: {
+          providers: { fixture: { baseUrl: 'https://new.gateway.test/v1' } },
+          stages: { select: { model: 'fixture-new' } },
+        },
+      });
+      await resumeRun(core.context, runId, { fromStage: 'select', stopAfterStage: 'edit' });
+      await resumeRun(core.context, runId, {
+        fromStage: 'select',
+        stopAfterStage: 'select',
+        useLatestConfig: true,
+      });
+      expect(requested).toEqual([
+        { url: 'https://old.gateway.test/v1/chat/completions', model: 'fixture-old' },
+        { url: 'https://old.gateway.test/v1/chat/completions', model: 'fixture-old' },
+        { url: 'https://new.gateway.test/v1/chat/completions', model: 'fixture-new' },
+      ]);
+      const logs = await core.tasks.getLlmCalls(runId);
+      expect(logs).toContainEqual(
+        expect.objectContaining({ stage: 'summarize', cli: 'agy', status: 'ok' }),
+      );
+      const selectCall = logs.find(({ cli }) => cli === 'fixture');
+      expect(selectCall?.logPath).toBeTruthy();
+      if (selectCall) {
+        expect(JSON.stringify(await core.tasks.getLlmCallLog(runId, selectCall.id))).not.toContain(
+          fixtureKey,
+        );
+      }
+      const snapshot = core.context.repos.runs.getById(runId)?.configSnapshotJson;
+      expect(snapshot).toContain('fixture-deepseek');
+      expect(snapshot).not.toContain(fixtureKey);
+    } finally {
+      await core.close();
+    }
+  });
+
   it('runs end-to-end collect through narrate with accurate ffprobe timeline and LLM logs', async () => {
     const { rootDir, scriptFile } = await setupWorkflowWorkspace();
     const now = new Date('2026-11-16T08:00:00.000Z');

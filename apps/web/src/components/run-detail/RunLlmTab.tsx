@@ -45,7 +45,7 @@ export function RunLlmTab({
                   <th className="px-3 py-2 font-medium">记录编号</th>
                   <th className="px-3 py-2 font-medium">阶段</th>
                   <th className="px-3 py-2 font-medium">条目</th>
-                  <th className="px-3 py-2 font-medium">CLI / 模型</th>
+                  <th className="px-3 py-2 font-medium">调用方式 / 模型</th>
                   <th className="px-3 py-2 font-medium">轮次</th>
                   <th className="px-3 py-2 font-medium">状态</th>
                   <th className="px-3 py-2 font-medium">耗时</th>

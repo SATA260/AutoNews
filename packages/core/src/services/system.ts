@@ -14,7 +14,9 @@ const MIN_DISK_FREE_BYTES = 1024 * 1024 * 1024;
 export interface SystemService {
   /** 检查 Node 版本、命令行工具、浏览器、语音合成接口、磁盘空间与配置可用性 */
   doctor(): Promise<DoctorReport>;
-  /** 查询指定大模型命令行工具支持的可用模型列表 */
+  /** 列出当前配置的阶段模型调用方式 */
+  getModelRoutes(): string[];
+  /** 查询指定调用方式支持的模型列表 */
   listModels(cli: string): Promise<string[]>;
 }
 
@@ -78,20 +80,26 @@ export function createSystemService(ctx: CoreContext): SystemService {
         });
       }
 
-      // 3. 大模型命令行（检查配置中各 AI 阶段引用的命令行工具）
+      // 检查各 AI 阶段正在使用的模型调用方式。
       const llmClis = Array.from(new Set(Object.values(ctx.settings.ai.stages).map((s) => s.cli)));
       for (const cliName of llmClis) {
+        const providers = ctx.settings.ai.providers;
+        const provider =
+          providers && Object.hasOwn(providers, cliName) ? providers[cliName] : undefined;
+        const checkName = provider ? `api:${cliName}` : `cli:${cliName}`;
         try {
-          const cliHealth = await ctx.bridge.health(cliName);
+          const cliHealth = provider
+            ? await ctx.modelApi.health(provider)
+            : await ctx.bridge.health(cliName);
           checks.push({
-            name: `cli:${cliName}`,
+            name: checkName,
             ok: cliHealth.ok,
             detail: cliHealth.detail,
             required: true,
           });
         } catch (err) {
           checks.push({
-            name: `cli:${cliName}`,
+            name: checkName,
             ok: false,
             detail: err instanceof Error ? err.message : String(err),
             required: true,
@@ -206,9 +214,21 @@ export function createSystemService(ctx: CoreContext): SystemService {
       });
     },
 
-    /** 查询指定大模型命令行工具支持的可用模型清单 */
+    /** 返回用于编辑阶段的本机命令和 HTTP 连接名称 */
+    getModelRoutes(): string[] {
+      return [
+        ...Object.keys(ctx.settings.clis).filter(
+          (name) => name !== ctx.settings.publish.bilibili.cli,
+        ),
+        ...Object.keys(ctx.settings.ai.providers ?? {}),
+      ];
+    },
+
+    /** 查询本机工具或 HTTP 服务的模型清单 */
     async listModels(cli: string): Promise<string[]> {
-      return ctx.bridge.listModels(cli);
+      const providers = ctx.settings.ai.providers;
+      const provider = providers && Object.hasOwn(providers, cli) ? providers[cli] : undefined;
+      return provider ? ctx.modelApi.listModels(provider) : ctx.bridge.listModels(cli);
     },
   };
 }

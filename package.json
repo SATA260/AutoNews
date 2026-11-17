@@ -8,6 +8,8 @@
   },
   "workspaces": [
     "packages/contracts",
+    "packages/model-runtime",
+    "packages/model-api",
     "packages/cli-bridge",
     "packages/tts",
     "packages/core",
@@ -17,7 +19,7 @@
   "scripts": {
     "build": "npm run build --workspaces --if-present",
     "dev": "npm run dev -w apps/web",
-    "typecheck": "npm run build -w @aidaily/contracts && npm run build -w @aidaily/cli-bridge && npm run build -w @aidaily/tts && npm run build -w @aidaily/core && npm run typecheck --workspaces --if-present",
+    "typecheck": "npm run build -w @aidaily/contracts && npm run build -w @aidaily/model-runtime && npm run build -w @aidaily/model-api && npm run build -w @aidaily/cli-bridge && npm run build -w @aidaily/tts && npm run build -w @aidaily/core && npm run typecheck --workspaces --if-present",
     "lint": "biome check .",
     "format": "biome check --write .",
     "test": "vitest run",

@@ -13,16 +13,17 @@ const AI_STAGE_INFO: Array<{ key: AiStageName; title: string; hint: string }> = 
   { key: 'package', title: '整期编排与包装', hint: '确定新闻先后顺序、开场总结词与标题标签' },
 ];
 
-/** 分阶段独立切换命令行工具与大模型的表单组件（选项来自实时模型列表接口） */
+/** 按阶段选择调用方式，可从模型列表选择或手填模型 ID */
 export function StageRoutingForm({
   settings,
+  modelRoutes,
   modelsByCli,
 }: {
   settings: Settings;
+  modelRoutes: string[];
   modelsByCli: Record<string, string[]>;
 }) {
   const router = useRouter();
-  const availableClis = Object.keys(settings.clis);
   const [stageState, setStageState] = useState(settings.ai.stages);
   const [maxConcurrentCalls, setMaxConcurrentCalls] = useState(
     String(settings.ai.maxConcurrentCalls),
@@ -40,7 +41,7 @@ export function StageRoutingForm({
       const curr = next[stageKey];
       if (field === 'cli') {
         const models = modelsByCli[value] ?? [];
-        const nextModel = models.includes(curr.model) ? curr.model : (models[0] ?? curr.model);
+        const nextModel = models.includes(curr.model) ? curr.model : '';
         next[stageKey] = { ...curr, cli: value, model: nextModel };
       } else if (field === 'model') {
         next[stageKey] = { ...curr, model: value };
@@ -74,9 +75,9 @@ export function StageRoutingForm({
     >
       <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-100 pb-3">
         <div>
-          <h2 className="text-base font-semibold text-slate-900">分阶段 CLI 与模型路由</h2>
+          <h2 className="text-base font-semibold text-slate-900">分阶段模型设置</h2>
           <p className="mt-0.5 text-xs text-slate-600">
-            每个环节可独立指定不同的模型命令行与具体模型，保存后立即写入配置文件并在下一期任务中生效。
+            每个环节可独立选择调用方式和模型，保存后对新任务生效。
           </p>
         </div>
         <div className="flex items-center gap-2">
@@ -114,14 +115,14 @@ export function StageRoutingForm({
 
               <div className="md:col-span-2">
                 <label className="block text-[11px] text-slate-500">
-                  命令行工具
+                  调用方式
                   <select
                     name={`stage_${key}_cli`}
                     value={cfg.cli}
                     onChange={(e) => updateField(key, 'cli', e.target.value)}
                     className="mt-1 w-full rounded-md border border-slate-300 bg-white px-2 py-1.5 text-xs font-normal text-slate-900"
                   >
-                    {availableClis.map((cliName) => (
+                    {modelRoutes.map((cliName) => (
                       <option key={cliName} value={cliName}>
                         {cliName}
                       </option>
@@ -132,19 +133,20 @@ export function StageRoutingForm({
 
               <div className="md:col-span-4">
                 <label className="block text-[11px] text-slate-500">
-                  模型选择
-                  <select
+                  模型 ID
+                  <input
                     name={`stage_${key}_model`}
+                    list={`stage_${key}_models`}
+                    required
                     value={cfg.model}
                     onChange={(e) => updateField(key, 'model', e.target.value)}
                     className="mt-1 w-full rounded-md border border-slate-300 bg-white px-2 py-1.5 font-mono text-xs font-normal text-slate-900"
-                  >
+                  />
+                  <datalist id={`stage_${key}_models`}>
                     {modelCandidates.map((m) => (
-                      <option key={m} value={m}>
-                        {m}
-                      </option>
+                      <option key={m} value={m} />
                     ))}
-                  </select>
+                  </datalist>
                 </label>
               </div>
 
