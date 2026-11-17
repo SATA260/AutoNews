@@ -4,6 +4,7 @@ import path from 'node:path';
 import { type DoctorCheckItem, type DoctorReport, DoctorReportSchema } from '@aidaily/contracts';
 import { execa } from 'execa';
 import { chromium } from 'playwright';
+import { getModelRouteNames } from '../config/model-connections.js';
 import type { CoreContext } from '../context.js';
 import { resolveChromiumExecutablePath } from '../media/compositor.js';
 import { resolveBiliupExecutable } from '../publish/bilibili.js';
@@ -216,12 +217,7 @@ export function createSystemService(ctx: CoreContext): SystemService {
 
     /** 返回用于编辑阶段的本机命令和 HTTP 连接名称 */
     getModelRoutes(): string[] {
-      return [
-        ...Object.keys(ctx.settings.clis).filter(
-          (name) => name !== ctx.settings.publish.bilibili.cli,
-        ),
-        ...Object.keys(ctx.settings.ai.providers ?? {}),
-      ];
+      return getModelRouteNames(ctx.settings);
     },
 
     /** 查询本机工具或 HTTP 服务的模型清单 */

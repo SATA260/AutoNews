@@ -1,3 +1,4 @@
+import { ModelApiConnections } from '@/components/ModelApiConnections';
 import { StageRoutingForm, WorkflowSettingsForm } from '@/components/SettingsForms';
 import { getCore } from '@/lib/core';
 import { formatTimestamp } from '@/lib/format';
@@ -5,11 +6,20 @@ import { formatTimestamp } from '@/lib/format';
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
 
-/** 系统配置页：提供分阶段动态模型路由配置、语音与通知扩展状态检视以及补抓发布参数表单 */
+/** 系统配置页：管理 API 连接、阶段模型和其他运行参数 */
 export default async function SettingsPage() {
   const core = await getCore();
   const settings = core.config.getSettings();
   const modelRoutes = core.system.getModelRoutes();
+  const selectedRoutes = new Set(Object.values(settings.ai.stages).map(({ cli }) => cli));
+  const connections = Object.entries(settings.ai.providers ?? {}).map(([name, provider]) => ({
+    name,
+    baseUrl: provider.baseUrl,
+    protocol: provider.protocol,
+    jsonMode: provider.jsonMode,
+    hasCredential: Boolean(provider.apiKeyEnv || provider.apiKeyFile),
+    inUse: selectedRoutes.has(name),
+  }));
 
   const [doctor, ...modelPairs] = await Promise.all([
     core.system.doctor(),
@@ -28,6 +38,7 @@ export default async function SettingsPage() {
         </p>
       </div>
 
+      <ModelApiConnections connections={connections} />
       <StageRoutingForm settings={settings} modelRoutes={modelRoutes} modelsByCli={modelsByCli} />
 
       <section className="space-y-4 rounded-xl border border-slate-200 bg-white p-5 shadow-xs">

@@ -38,13 +38,7 @@ contentLimits:              # 默认值取自当前模板，模板适配器可�
 ai:
   # cli 填 clis 或 ai.providers 中的调用名称，可在网页设置中逐阶段切换。
   maxConcurrentCalls: 3
-  providers:
-    deepseek:
-      adapter: openai-compatible
-      protocol: chat-completions
-      baseUrl: https://api.deepseek.com
-      apiKeyEnv: DEEPSEEK_API_KEY
-      apiKeyFile: deepseek-api-key
+  providers: {}
   stages:
     select:    { cli: agy, model: gemini-3.8-flash-medium, timeoutSec: 300, retries: 2 }
     summarize: { cli: agy, model: gemini-3.8-flash-high,   timeoutSec: 240, retries: 2 }

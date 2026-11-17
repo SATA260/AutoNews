@@ -38,7 +38,8 @@ export function StageRoutingForm({
   ) => {
     setStageState((prev) => {
       const next = { ...prev };
-      const curr = next[stageKey];
+      const draft = prev[stageKey];
+      const curr = modelRoutes.includes(draft.cli) ? draft : settings.ai.stages[stageKey];
       if (field === 'cli') {
         const models = modelsByCli[value] ?? [];
         const nextModel = models.includes(curr.model) ? curr.model : '';
@@ -99,7 +100,8 @@ export function StageRoutingForm({
 
       <div className="space-y-3">
         {AI_STAGE_INFO.map(({ key, title, hint }) => {
-          const cfg = stageState[key];
+          const draft = stageState[key];
+          const cfg = modelRoutes.includes(draft.cli) ? draft : settings.ai.stages[key];
           const modelCandidates = Array.from(
             new Set([cfg.model, ...(modelsByCli[cfg.cli] ?? [])].filter(Boolean)),
           );
@@ -118,10 +120,14 @@ export function StageRoutingForm({
                   调用方式
                   <select
                     name={`stage_${key}_cli`}
-                    value={cfg.cli}
+                    value={modelRoutes.includes(cfg.cli) ? cfg.cli : ''}
+                    required
                     onChange={(e) => updateField(key, 'cli', e.target.value)}
                     className="mt-1 w-full rounded-md border border-slate-300 bg-white px-2 py-1.5 text-xs font-normal text-slate-900"
                   >
+                    <option value="" disabled>
+                      请选择调用方式
+                    </option>
                     {modelRoutes.map((cliName) => (
                       <option key={cliName} value={cliName}>
                         {cliName}

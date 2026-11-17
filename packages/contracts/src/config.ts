@@ -42,15 +42,19 @@ function isModelApiBaseUrl(value: string): boolean {
   );
 }
 
+const ModelApiBaseUrlSchema = z
+  .string()
+  .trim()
+  .refine(isModelApiBaseUrl, '请填写 HTTP(S) API 地址前缀，省略用户名、密码和查询参数');
+const ModelApiProtocolSchema = z.enum(['chat-completions', 'responses']);
+const ModelApiJsonModeSchema = z.enum(['json-object', 'prompt']);
+
 /** 配置第三方模型服务使用的 HTTP 协议、地址和密钥引用 */
 export const ModelApiProviderSchema = z
   .strictObject({
     adapter: z.literal('openai-compatible'),
-    protocol: z.enum(['chat-completions', 'responses']),
-    baseUrl: z
-      .string()
-      .trim()
-      .refine(isModelApiBaseUrl, '填写 HTTP(S) 地址前缀，用户名、密码和查询参数须省略'),
+    protocol: ModelApiProtocolSchema,
+    baseUrl: ModelApiBaseUrlSchema,
     apiKeyEnv: z
       .string()
       .regex(/^[A-Za-z_][A-Za-z0-9_]*$/)
@@ -59,7 +63,7 @@ export const ModelApiProviderSchema = z
       .string()
       .regex(/^[A-Za-z0-9_][A-Za-z0-9_.-]*$/)
       .optional(),
-    jsonMode: z.enum(['json-object', 'prompt']).optional(),
+    jsonMode: ModelApiJsonModeSchema.optional(),
   })
   .refine((config) => config.protocol === 'chat-completions' || config.jsonMode === undefined, {
     path: ['jsonMode'],
@@ -67,6 +71,32 @@ export const ModelApiProviderSchema = z
   });
 /** 第三方模型 HTTP 服务的配置 */
 export type ModelApiProvider = z.infer<typeof ModelApiProviderSchema>;
+
+/** 校验从设置页提交的连接名称、请求协议以及可选的新密钥 */
+export const ModelApiConnectionInputSchema = z
+  .strictObject({
+    name: z
+      .string()
+      .trim()
+      .min(1, '请填写连接名称')
+      .max(80, '连接名称最多 80 个字符')
+      .refine(
+        (name) => !['__proto__', 'constructor', 'prototype'].includes(name.toLowerCase()),
+        '请使用其他连接名称',
+      ),
+    previousName: z.string().min(1).optional(),
+    baseUrl: ModelApiBaseUrlSchema,
+    protocol: ModelApiProtocolSchema,
+    jsonMode: ModelApiJsonModeSchema.optional(),
+    apiKey: z
+      .string()
+      .trim()
+      .max(16 * 1024, 'API 密钥过长')
+      .regex(/^[!-~]+$/, 'API 密钥应为一行有效字符')
+      .optional(),
+    clearApiKey: z.boolean().optional(),
+  })
+  .refine((input) => !(input.apiKey && input.clearApiKey), '请在更换和移除密钥中选择一项');
 
 /** 语音合成调度配置（支持随时切换不同的合成引擎与后处理响度参数） */
 export const TtsSettingsSchema = z.object({

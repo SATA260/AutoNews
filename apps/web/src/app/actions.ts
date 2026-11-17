@@ -1,6 +1,7 @@
 'use server';
 
 import {
+  AiStageNameSchema,
   PIPELINE_STAGES,
   ScheduleTimeSchema,
   type SourceTestResult,
@@ -400,13 +401,46 @@ const StageFieldPatchSchema = z.object({
   retries: z.number().int().min(0),
 });
 
+/** 将网页提交的 API 连接和密钥交给配置服务保存 */
+export async function saveModelApiConnectionAction(formData: FormData): Promise<ActionResult> {
+  try {
+    const core = await getCore();
+    const apiKey = formData.get('apiKey');
+    await core.config.saveModelApiConnection({
+      previousName: formData.get('previousName') ?? undefined,
+      name: formData.get('name'),
+      baseUrl: formData.get('baseUrl'),
+      protocol: formData.get('protocol'),
+      jsonMode: formData.get('jsonMode') ?? undefined,
+      apiKey: typeof apiKey === 'string' && !apiKey.trim() ? undefined : (apiKey ?? undefined),
+      clearApiKey: parseBooleanField(formData.get('clearApiKey')),
+    });
+    safeRevalidate('/settings');
+    return { ok: true, message: 'API 连接已保存' };
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : '保存 API 连接失败' };
+  }
+}
+
+/** 删除未被阶段使用的 API 连接 */
+export async function removeModelApiConnectionAction(formData: FormData): Promise<ActionResult> {
+  try {
+    const name = z.string().min(1, '请指定要删除的 API 连接').parse(formData.get('name'));
+    const core = await getCore();
+    await core.config.removeModelApiConnection(name);
+    safeRevalidate('/settings');
+    return { ok: true, message: 'API 连接已删除' };
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : '删除 API 连接失败' };
+  }
+}
+
 /** 更新各阶段的调用方式与模型配置 */
 export async function updateStageRoutingAction(formData: FormData): Promise<ActionResult> {
   try {
-    const stageKeys = ['select', 'summarize', 'polish', 'factcheck', 'package'] as const;
-    const stages: Record<string, z.infer<typeof StageFieldPatchSchema>> = {};
-    for (const key of stageKeys) {
-      stages[key] = StageFieldPatchSchema.parse({
+    const stageEntries = AiStageNameSchema.options.map((key) => [
+      key,
+      {
         cli: formData.get(`stage_${key}_cli`),
         model: formData.get(`stage_${key}_model`),
         timeoutSec: parseRequiredIntField(
@@ -414,8 +448,11 @@ export async function updateStageRoutingAction(formData: FormData): Promise<Acti
           `${key} 阶段超时时间`,
         ),
         retries: parseRequiredIntField(formData.get(`stage_${key}_retries`), `${key} 阶段重试次数`),
-      });
-    }
+      },
+    ]);
+    const stages = z
+      .record(AiStageNameSchema, StageFieldPatchSchema)
+      .parse(Object.fromEntries(stageEntries));
     const maxConcurrentCalls = z
       .number()
       .int()
@@ -424,26 +461,7 @@ export async function updateStageRoutingAction(formData: FormData): Promise<Acti
       .parse(parseRequiredIntField(formData.get('maxConcurrentCalls'), '最大并发模型调用数'));
 
     const core = await getCore();
-    const modelRoutes = core.system.getModelRoutes();
-    for (const key of stageKeys) {
-      const cliName = stages[key]?.cli ?? '';
-      if (!modelRoutes.includes(cliName)) {
-        throw new Error(`未在配置中定义调用方式：${cliName}`);
-      }
-    }
-
-    await core.config.updateSettings({
-      ai: {
-        maxConcurrentCalls,
-        stages: {
-          select: stages.select,
-          summarize: stages.summarize,
-          polish: stages.polish,
-          factcheck: stages.factcheck,
-          package: stages.package,
-        },
-      },
-    });
+    await core.config.updateStageRouting({ maxConcurrentCalls, stages });
     safeRevalidate('/settings');
     return { ok: true, message: '各阶段模型配置已保存，对新任务生效' };
   } catch (err) {

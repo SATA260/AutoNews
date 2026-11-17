@@ -60,16 +60,17 @@ function applyPatchToDocument(
   }
 }
 
-/** 更新全局配置文件：先用语法树局部修改保留注释，校验全部字段通过后再原子写入磁盘 */
-export async function updateSettingsFile(
+/** 串行修改最新的配置文档，保留注释并在校验通过后原子写入 */
+export async function editSettingsFile(
   filePath: string,
-  patch: DeepPartial<Settings>,
+  edit: (doc: Document) => void | Promise<void>,
+  validate?: (settings: Settings) => void,
 ): Promise<Settings> {
   return withFileWriteLock(filePath, async () => {
     const raw = await fs.readFile(filePath, 'utf8');
     const doc = parseDocument(raw);
     assertValidYamlDocument(filePath, doc);
-    applyPatchToDocument(doc, patch as Record<string, unknown>, []);
+    await edit(doc);
 
     const candidate = doc.toJS();
     const parsed = SettingsSchema.safeParse(candidate);
@@ -80,9 +81,19 @@ export async function updateSettingsFile(
       throw new Error(`更新配置校验失败 (${filePath}): ${details}`);
     }
 
+    validate?.(parsed.data);
     await writeFileAtomic(filePath, doc.toString());
     return parsed.data;
   });
+}
+
+/** 把局部更新写入配置，必要时校验更新后的配置之间是否一致 */
+export async function updateSettingsFile(
+  filePath: string,
+  patch: DeepPartial<Settings>,
+  validate?: (settings: Settings) => void,
+): Promise<Settings> {
+  return editSettingsFile(filePath, (doc) => applyPatchToDocument(doc, patch, []), validate);
 }
 
 /** 校验并原子更新新闻信源清单配置文件，按信源 ID 原位合并以保留注释与格式 */

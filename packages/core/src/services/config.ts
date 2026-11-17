@@ -1,4 +1,9 @@
 import type { DeepPartial, Settings, SourceDef } from '@aidaily/contracts';
+import {
+  getModelRouteNames,
+  removeModelApiConnection,
+  saveModelApiConnection,
+} from '../config/model-connections.js';
 import { updateSettingsFile, updateSourcesFile } from '../config/writer.js';
 import type { CoreContext } from '../context.js';
 
@@ -8,6 +13,12 @@ export interface ConfigService {
   getSettings(): Settings;
   /** 局部更新全局配置并校验、原子写回配置文件后即时刷新内存快照 */
   updateSettings(patch: DeepPartial<Settings>): Promise<Settings>;
+  /** 保存各模型阶段配置，确保选择的调用方式仍然存在 */
+  updateStageRouting(ai: Pick<Settings['ai'], 'stages' | 'maxConcurrentCalls'>): Promise<void>;
+  /** 新增或编辑网页提交的模型 API 连接及密钥 */
+  saveModelApiConnection(input: unknown): Promise<void>;
+  /** 从当前配置移除未被阶段选用的模型 API 连接 */
+  removeModelApiConnection(name: string): Promise<void>;
   /** 获取当前生效的订阅信源配置清单 */
   getSources(): SourceDef[];
   /** 校验并全量更新订阅信源列表，保留原有注释后即时刷新内存配置 */
@@ -39,6 +50,37 @@ export function createConfigService(ctx: CoreContext): ConfigService {
         await updateSettingsFile(ctx.paths.settingsFile, patch);
         await ctx.reloadConfig();
         return ctx.settings;
+      });
+    },
+
+    /** 在保存阶段设置时检查最新的调用方式，避免与删除连接的请求冲突 */
+    async updateStageRouting(ai) {
+      await serializeConfigUpdate(async () => {
+        await updateSettingsFile(ctx.paths.settingsFile, { ai }, (settings) => {
+          const routes = getModelRouteNames(settings);
+          for (const stage of Object.values(settings.ai.stages)) {
+            if (!routes.includes(stage.cli)) {
+              throw new Error(`未在配置中定义调用方式：${stage.cli}`);
+            }
+          }
+        });
+        await ctx.reloadConfig();
+      });
+    },
+
+    /** 保存自定义 API 连接后立即更新运行时设置 */
+    async saveModelApiConnection(input) {
+      await serializeConfigUpdate(async () => {
+        await saveModelApiConnection(ctx.paths, input);
+        await ctx.reloadConfig();
+      });
+    },
+
+    /** 删除 API 连接后立即更新运行时设置 */
+    async removeModelApiConnection(name) {
+      await serializeConfigUpdate(async () => {
+        await removeModelApiConnection(ctx.paths, name);
+        await ctx.reloadConfig();
       });
     },
 

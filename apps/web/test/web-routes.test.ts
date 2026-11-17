@@ -7,6 +7,8 @@ import { createRun, emitRunEvent, writeJsonAtomic } from '@aidaily/core';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
   createScheduleAction,
+  removeModelApiConnectionAction,
+  saveModelApiConnectionAction,
   startRunAction,
   updateDraftAction,
   updateStageRoutingAction,
@@ -40,6 +42,20 @@ async function setupWebTestWorkspace(): Promise<string> {
   );
   process.env.AIDAILY_ROOT = rootDir;
   return rootDir;
+}
+
+/** 生成自定义 API 连接的提交表单 */
+function apiConnectionForm(name: string, fields: Record<string, string> = {}): FormData {
+  const form = new FormData();
+  for (const [key, value] of Object.entries({
+    name,
+    baseUrl: 'https://model-gateway.test/v1',
+    protocol: 'chat-completions',
+    ...fields,
+  })) {
+    form.set(key, value);
+  }
+  return form;
 }
 
 /** 构造一条处于待人工审核状态的测试任务与对应产物文件 */
@@ -381,6 +397,102 @@ describe('apps/web routes and Server Actions', () => {
     expect(notFoundRes.status).toBe(404);
   });
 
+  it('manages named API connections and stores credentials without putting keys in settings or snapshots', async () => {
+    const root = await setupWebTestWorkspace();
+    const core = await getCore();
+    expect(core.system.getModelRoutes()).not.toContain('deepseek');
+
+    const originalKey = 'fixture-gateway-key-a';
+    const replacementKey = 'fixture-gateway-key-b';
+    const saves = await Promise.all([
+      saveModelApiConnectionAction(apiConnectionForm(' 团队网关 ', { apiKey: originalKey })),
+      saveModelApiConnectionAction(apiConnectionForm('团队网关')),
+    ]);
+    expect(saves).toEqual([
+      expect.objectContaining({ ok: true }),
+      expect.objectContaining({ ok: false, error: expect.stringContaining('已存在') }),
+    ]);
+    expect(await saveModelApiConnectionAction(apiConnectionForm('CoDeX'))).toMatchObject({
+      ok: false,
+      error: expect.stringContaining('已存在'),
+    });
+    expect(
+      await saveModelApiConnectionAction(
+        apiConnectionForm('备用网关', {
+          protocol: 'responses',
+          baseUrl: 'http://127.0.0.1:8080/v1',
+        }),
+      ),
+    ).toMatchObject({ ok: true });
+    expect(core.system.getModelRoutes()).toEqual(expect.arrayContaining(['团队网关', '备用网关']));
+
+    const secrets = core.context.paths.secretsDir;
+    const settingsFile = path.join(root, 'config', 'settings.yaml');
+    const first = core.config.getSettings().ai.providers?.['团队网关'];
+    const firstKeyPath = path.join(secrets, first?.apiKeyFile ?? '');
+    expect(await fs.readFile(firstKeyPath, 'utf8')).toBe(originalKey);
+    expect((await fs.stat(firstKeyPath)).mode & 0o777).toBe(0o600);
+    expect(await fs.readFile(settingsFile, 'utf8')).not.toContain(originalKey);
+
+    const { maxConcurrentCalls, stages } = core.config.getSettings().ai;
+    await core.config.updateStageRouting({
+      maxConcurrentCalls,
+      stages: {
+        ...stages,
+        select: { ...stages.select, cli: '团队网关', model: 'manual-model-id' },
+      },
+    });
+    const runId = createRun(core.context, { itemCount: 1, trigger: 'manual-web' });
+    const snapshot = core.context.repos.runs.getById(runId)?.configSnapshotJson ?? '';
+    expect(snapshot).toContain(first?.apiKeyFile);
+    expect(snapshot).not.toContain(originalKey);
+
+    expect(await removeModelApiConnectionAction(apiConnectionForm('团队网关'))).toMatchObject({
+      ok: false,
+      error: expect.stringContaining('正在使用'),
+    });
+    const changedOrigin = { previousName: '团队网关', baseUrl: 'https://other-gateway.test/v1' };
+    expect(
+      await saveModelApiConnectionAction(apiConnectionForm('新网关', changedOrigin)),
+    ).toMatchObject({
+      ok: false,
+      error: expect.stringContaining('新密钥'),
+    });
+    expect(
+      await saveModelApiConnectionAction(
+        apiConnectionForm('新网关', {
+          ...changedOrigin,
+          apiKey: replacementKey,
+        }),
+      ),
+    ).toMatchObject({ ok: true });
+
+    const updated = core.config.getSettings().ai;
+    expect(updated.stages.select).toMatchObject({ cli: '新网关', model: 'manual-model-id' });
+    expect(core.system.getModelRoutes()).not.toContain('团队网关');
+    const nextKeyPath = path.join(secrets, updated.providers?.['新网关']?.apiKeyFile ?? '');
+    expect(nextKeyPath).not.toBe(firstKeyPath);
+    expect(await fs.readFile(firstKeyPath, 'utf8')).toBe(originalKey);
+    expect(await fs.readFile(nextKeyPath, 'utf8')).toBe(replacementKey);
+    expect(await fs.readFile(settingsFile, 'utf8')).not.toContain(replacementKey);
+    expect(core.context.repos.runs.getById(runId)?.configSnapshotJson).toBe(snapshot);
+
+    expect(
+      await saveModelApiConnectionAction(
+        apiConnectionForm('新网关', {
+          previousName: '新网关',
+          baseUrl: changedOrigin.baseUrl,
+          clearApiKey: 'on',
+        }),
+      ),
+    ).toMatchObject({ ok: true });
+    expect(core.config.getSettings().ai.providers?.['新网关']?.apiKeyFile).toBeUndefined();
+    expect(await removeModelApiConnectionAction(apiConnectionForm('备用网关'))).toMatchObject({
+      ok: true,
+    });
+    expect(core.system.getModelRoutes()).not.toContain('备用网关');
+  });
+
   it('enforces explicit itemCount/time without defaults, dynamic stage model routing, and draft bounds in Server Actions', async () => {
     await setupWebTestWorkspace();
 
@@ -431,13 +543,16 @@ describe('apps/web routes and Server Actions', () => {
     unknownCliFd.set('maxConcurrentCalls', '2');
     expect((await updateStageRoutingAction(unknownCliFd)).ok).toBe(false);
 
+    expect(await saveModelApiConnectionAction(apiConnectionForm('编辑网关'))).toMatchObject({
+      ok: true,
+    });
     const validRoutingFd = new FormData();
     for (const key of ['select', 'summarize', 'polish', 'factcheck', 'package']) {
-      validRoutingFd.set(`stage_${key}_cli`, key === 'select' ? 'deepseek' : 'agy');
+      validRoutingFd.set(`stage_${key}_cli`, key === 'select' ? '编辑网关' : 'agy');
       validRoutingFd.set(
         `stage_${key}_model`,
         key === 'select'
-          ? 'deepseek-flash'
+          ? 'gateway/editor-model'
           : key === 'polish'
             ? 'claude-sonnet-4-5'
             : 'gemini-2.5-pro',
@@ -451,8 +566,8 @@ describe('apps/web routes and Server Actions', () => {
 
     const core = await getCore();
     expect(core.config.getSettings().ai.stages.select).toMatchObject({
-      cli: 'deepseek',
-      model: 'deepseek-flash',
+      cli: '编辑网关',
+      model: 'gateway/editor-model',
     });
     expect(core.config.getSettings().ai.stages.polish.model).toBe('claude-sonnet-4-5');
     expect(core.config.getSettings().ai.stages.polish.retries).toBe(0);

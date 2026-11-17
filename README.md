@@ -81,13 +81,13 @@ npm run aidaily -- bili login
 3. **强制开启 B 站 AI 生成内容声明**
    - 投稿环节锁定启用平台 AI 生成内容声明，并在视频简介尾部自动附加可配置的声明说明。
 
-### Codex CLI 与 DeepSeek
+### Codex CLI 与第三方模型 API
 
 通过 `codex login status` 验证本机登录，再用 `npm run aidaily -- models --cli codex` 查看本机目录。定时任务需要能从其 `PATH` 找到 `codex`，也可以在 `clis.codex.bin` 中配置绝对路径。
 
-DeepSeek 连接已列在 `config/settings.yaml` 的 `ai.providers.deepseek`。让 Web 或 CLI 的启动进程继承 `DEEPSEEK_API_KEY`，或把密钥放在 `storage/secrets/deepseek-api-key` 中并设置文件权限 `600`。私有文件也适用于 launchd 定时任务。准备好凭据后运行 `npm run aidaily -- models --cli deepseek`，在设置页为需要的阶段选择 `deepseek` 并填写模型 ID。
+在「系统设置 → 模型 API 配置」添加连接，填写自定义名称、服务地址前缀、协议及服务所需的密钥。名称不能与其他 API 或本机 CLI 重复。保存后，在「分阶段模型设置」选择该名称，可手填模型 ID，也可通过 `npm run aidaily -- models --cli <连接名称>` 查看服务提供的模型清单。
 
-接入其它兼容服务时，在 `ai.providers` 中添加命名连接，指定 `adapter: openai-compatible`、地址前缀 `baseUrl` 和 `protocol: chat-completions` 或 `protocol: responses`。使用 `apiKeyEnv` 或 `apiKeyFile` 配置该服务自己的密钥引用。仅支持文本输出的 Chat Completions 网关可设置 `jsonMode: prompt`。服务未提供模型列表时可手填模型 ID。
+API 密钥写入 `storage/secrets/` 下的私有文件，设置页只显示配置状态。编辑时可更换密钥，留空会保留已有密钥。也可在 YAML 的 `ai.providers` 中手动配置，使用 `apiKeyEnv` 或 `apiKeyFile` 引用凭据。仅支持文本输出的 Chat Completions 网关可选择「通过提示词要求 JSON」。
 
 新任务使用保存后的配置。失败任务勾选「使用最新系统配置」后，可从所选阶段切换模型重新执行。
 
