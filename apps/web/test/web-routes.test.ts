@@ -280,7 +280,7 @@ describe('apps/web routes and Server Actions', () => {
     expect(missingRes.status).toBe(404);
   });
 
-  it('streams SSE run events, honors Last-Event-ID resume cursor, and returns 400/404 on invalid queries', async () => {
+  it('opens idle SSE streams immediately, streams new events, and resumes from Last-Event-ID', async () => {
     await setupWebTestWorkspace();
     const core = await getCore();
     const runId = createRun(core.context, {
@@ -295,13 +295,39 @@ describe('apps/web routes and Server Actions', () => {
       type: 'stage_started',
       message: '开始抓取信源',
     });
-    const ev2Id = emitRunEvent(core.context, {
-      runId,
-      level: 'warn',
-      stage: 'collect',
-      type: 'source_failed',
-      message: '单个源超时已跳过',
-    });
+    core.context.repos.runs.updateStatus(runId, 'running', { currentStage: 'collect' });
+    const eventsUrl = `http://127.0.0.1:3000/api/runs/${runId}/events`;
+    const params = Promise.resolve({ id: runId });
+    const activeSseRes = await getEventsRoute(
+      new Request(`${eventsUrl}?afterId=${ev1Id}`, { signal: AbortSignal.timeout(2_000) }),
+      { params },
+    );
+    expect(activeSseRes.status).toBe(200);
+    const reader = activeSseRes.body?.getReader();
+    if (!reader) {
+      throw new Error('实时日志响应缺少可读取的数据流');
+    }
+    const decoder = new TextDecoder();
+    let ev2Id: number;
+    try {
+      const firstChunk = await reader.read();
+      expect(firstChunk.done).toBe(false);
+      expect(decoder.decode(firstChunk.value)).toBe(': connected\n\n');
+      expect(activeSseRes.headers.get('x-accel-buffering')).toBe('no');
+
+      ev2Id = emitRunEvent(core.context, {
+        runId,
+        level: 'warn',
+        stage: 'collect',
+        type: 'source_collect_failed',
+        message: '单个源超时已跳过',
+      });
+      const nextChunk = decoder.decode((await reader.read()).value);
+      expect(nextChunk).toContain(`id: ${ev2Id}\nevent: run_event\n`);
+      expect(nextChunk).toContain('单个源超时已跳过');
+    } finally {
+      await reader.cancel();
+    }
     const ev3Id = emitRunEvent(core.context, {
       runId,
       level: 'error',
@@ -315,10 +341,7 @@ describe('apps/web routes and Server Actions', () => {
       error: '全部抓取失败',
     });
 
-    const fullSseRes = await getEventsRoute(
-      new Request(`http://127.0.0.1:3000/api/runs/${runId}/events`),
-      { params: Promise.resolve({ id: runId }) },
-    );
+    const fullSseRes = await getEventsRoute(new Request(eventsUrl), { params });
     expect(fullSseRes.status).toBe(200);
     expect(fullSseRes.headers.get('content-type')).toContain('text/event-stream');
     const fullBody = await fullSseRes.text();
@@ -328,10 +351,10 @@ describe('apps/web routes and Server Actions', () => {
     expect(fullBody).toContain(': done');
 
     const resumedSseRes = await getEventsRoute(
-      new Request(`http://127.0.0.1:3000/api/runs/${runId}/events`, {
+      new Request(`${eventsUrl}?afterId=${ev1Id}`, {
         headers: { 'Last-Event-ID': String(ev2Id) },
       }),
-      { params: Promise.resolve({ id: runId }) },
+      { params },
     );
     expect(resumedSseRes.status).toBe(200);
     const resumedBody = await resumedSseRes.text();

@@ -23,7 +23,7 @@ function parseAfterIdCursor(request: Request): number | null {
 
 /**
  * 提供单期任务实时进度日志的 Server-Sent Events（SSE）推送接口，
- * 支持通过 `Last-Event-ID` 断线续传并每 15 秒发送保活心跳注释。
+ * 建连时立即写出首帧，支持通过 `Last-Event-ID` 断线续传并每 15 秒发送保活注释。
  */
 export async function GET(
   request: Request,
@@ -94,6 +94,7 @@ export async function GET(
       }
       request.signal.addEventListener('abort', onReqAbort, { once: true });
 
+      enqueueText(': connected\n\n');
       heartbeatTimer = setInterval(() => {
         enqueueText(': heartbeat\n\n');
       }, HEARTBEAT_INTERVAL_MS);
@@ -130,6 +131,7 @@ export async function GET(
       'Content-Type': 'text/event-stream; charset=utf-8',
       'Cache-Control': 'no-cache, no-transform',
       Connection: 'keep-alive',
+      'X-Accel-Buffering': 'no',
     },
   });
 }

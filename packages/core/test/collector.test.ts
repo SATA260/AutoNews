@@ -2,12 +2,13 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   canonicalizeUrl,
   collectSources,
   computeArticleId,
   createCore,
+  createRun,
   downloadArticleImage,
   extractArticleContent,
   type Notifier,
@@ -26,6 +27,7 @@ afterEach(async () => {
   await Promise.all(tempDirs.splice(0).map((dir) => fs.rm(dir, { recursive: true, force: true })));
 });
 
+/** 创建独立的采集测试工作区并写入信源配置 */
 async function setupWorkspaceWithSources(
   sources: Array<{
     id: string;
@@ -54,6 +56,7 @@ const PNG_1X1_BYTES = Buffer.from(
   'base64',
 );
 
+/** 为正文与配图抓取测试构造页面 */
 function buildHtmlPage(opts: {
   title: string;
   bodyParagraphs: string[];
@@ -254,7 +257,7 @@ describe('collector module and SourceService', () => {
     expect(oversized).toBeNull();
   });
 
-  it('runs incremental collection twice with 304, overlap dedup, expiry, and failure alerts', async () => {
+  it('reports 304 and source failures while preserving overlap dedup, expiry, and failure alerts', async () => {
     const rootDir = await setupWorkspaceWithSources([
       {
         id: 'primary-rss',
@@ -300,12 +303,15 @@ describe('collector module and SourceService', () => {
     let phase = 1;
     let feedARequestHeaders: Headers | undefined;
     let backupFetched = false;
+    const requestedUrls: string[] = [];
 
     const longBody =
       '人工智能新版本发布，支持本地高效推理，并在多家评测基准上大幅降低延迟与资源占用。'.repeat(12);
 
+    /** 模拟信源在不同采集轮次返回文章、缓存命中或错误 */
     const mockFetch: typeof fetch = async (input, init) => {
       const url = typeof input === 'string' ? input : input.toString();
+      requestedUrls.push(url);
 
       if (url === 'https://backup.example.com/rss.xml') {
         backupFetched = true;
@@ -415,6 +421,7 @@ describe('collector module and SourceService', () => {
           buildHtmlPage({
             title: '超出回溯期旧闻',
             bodyParagraphs: [longBody],
+            ogImage: 'https://feed-a.example.com/old-hero.png',
           }),
           { status: 200, headers: { 'content-type': 'text/html; charset=utf-8' } },
         );
@@ -437,22 +444,31 @@ describe('collector module and SourceService', () => {
       now: () => currentNow,
     });
 
-    core.context.repos.runs.create({
-      id: 'run-collect-1',
-      trigger: 'manual-cli',
-      itemCount: 3,
-      configSnapshotJson: JSON.stringify(core.context.settings),
-      createdAt: currentNow.toISOString(),
+    const runId = createRun(core.context, { trigger: 'manual-cli', itemCount: 3 });
+    core.context.repos.articles.insertIfAbsent({
+      id: 'previously-collected',
+      sourceId: 'primary-rss',
+      canonicalUrl: 'https://feed-a.example.com/previously-collected',
+      title: '之前采入的旧闻',
+      titleNorm: '之前采入的旧闻',
+      lang: 'zh',
+      publishedAt: '2026-11-10T01:00:00.000Z',
+      firstSeenAt: '2026-11-11T01:00:00.000Z',
+      excerpt: null,
+      contentPath: null,
+      contentChars: 0,
+      imagePath: null,
+      extractStatus: 'failed',
     });
 
     const first = await collectSources(core.context, {
-      runId: 'run-collect-1',
+      runId,
       retryDelayMs: 5,
     });
     expect(backupFetched).toBe(false);
     expect(first.sourcesOk.sort()).toEqual(['flaky-rss', 'primary-rss']);
     expect(first.sourcesFailed).toEqual([]);
-    expect(first.newArticleIds).toHaveLength(2);
+    expect(first.newArticleIds).toHaveLength(1);
     expect(first.expiredCount).toBe(1);
 
     const post1Id = computeArticleId('https://feed-a.example.com/post-1');
@@ -466,24 +482,50 @@ describe('collector module and SourceService', () => {
     const stored = await readStoredArticleContent(rootDir, post1?.contentPath ?? null);
     expect(stored?.text.length).toBeGreaterThanOrEqual(400);
 
-    expect(core.context.repos.articles.getById(postOldId)?.status).toBe('expired');
+    expect(core.context.repos.articles.getById(postOldId)).toBeNull();
+    expect(requestedUrls).not.toContain('https://feed-a.example.com/post-old');
+    expect(requestedUrls).not.toContain('https://feed-a.example.com/old-hero.png');
+    expect(core.context.repos.articles.getById('previously-collected')?.status).toBe('expired');
     expect(core.context.repos.articles.getById(shortId)?.extractStatus).toBe('failed');
 
     // 第二轮采集：feed-a 返回 304 保留 ETag 且不新增文章；feed-b 开始连续失败
     phase = 2;
     currentNow = new Date('2026-11-16T11:00:00.000Z');
+    const latestEventId = core.context.repos.runEvents.listAfter(runId, 0, 20).at(-1)?.id ?? 0;
     const second = await collectSources(core.context, {
-      runId: 'run-collect-1',
+      runId,
       retryDelayMs: 5,
     });
     expect(feedARequestHeaders?.get('if-none-match')).toBe('"etag-p1"');
     expect(second.sourcesOk).toEqual(['primary-rss']);
     expect(second.newArticleIds).toEqual([]);
     expect(core.context.repos.sourceState.get('primary-rss')?.etag).toBe('"etag-p1"');
+    const secondEvents = core.context.repos.runEvents.listAfter(runId, latestEventId, 20);
+    expect(secondEvents.map((event) => event.type)).toEqual([
+      'source_collected',
+      'source_collect_failed',
+    ]);
+    expect(secondEvents[0]).toMatchObject({
+      stage: 'collect',
+      level: 'info',
+      message: '主力信源「主力中文源」抓取完成（1/2），新增 0 篇可用文章',
+      data: { sourceId: 'primary-rss', completedSources: 1, totalSources: 2, newArticleCount: 0 },
+    });
+    expect(secondEvents[1]).toMatchObject({
+      stage: 'collect',
+      level: 'warn',
+      message: expect.stringMatching(/^主力信源「波动英文源」抓取失败（2\/2），原因：.+/),
+      data: {
+        sourceId: 'flaky-rss',
+        completedSources: 2,
+        totalSources: 2,
+        error: expect.any(String),
+      },
+    });
 
     // 第三、四轮采集：验证 2 小时重叠窗口跳过更早新链接、非法链接不抬高游标、仅入库新文章，并触发连续 3 次失败告警
     phase = 3;
-    const third = await collectSources(core.context, { runId: 'run-collect-1', retryDelayMs: 5 });
+    const third = await collectSources(core.context, { runId, retryDelayMs: 5 });
     expect(third.newArticleIds).toEqual([computeArticleId('https://feed-a.example.com/post-2')]);
     expect(
       core.context.repos.articles.getById(
@@ -493,7 +535,7 @@ describe('collector module and SourceService', () => {
     expect(core.context.repos.sourceState.get('primary-rss')?.lastItemPublishedAt).toBe(
       '2026-11-16T09:30:00.000Z',
     );
-    const fourth = await collectSources(core.context, { runId: 'run-collect-1', retryDelayMs: 5 });
+    const fourth = await collectSources(core.context, { runId, retryDelayMs: 5 });
     expect(fourth.newArticleIds).toEqual([]);
 
     const healthList = await core.sources.list();
@@ -501,6 +543,9 @@ describe('collector module and SourceService', () => {
     expect(flakyHealth?.healthy).toBe(false);
     expect(flakyHealth?.state?.consecutiveFailures).toBe(3);
     expect(notifications.some((n) => n.type === 'source_unhealthy')).toBe(true);
+    expect(core.context.repos.runEvents.listAfter(runId, 0, 20)).toContainEqual(
+      expect.objectContaining({ type: 'source_unhealthy', level: 'warn' }),
+    );
 
     const testPrimary = await core.sources.test('primary-rss');
     expect(testPrimary.ok).toBe(true);
@@ -511,6 +556,167 @@ describe('collector module and SourceService', () => {
     expect(testMissing.ok).toBe(false);
 
     await core.close();
+  });
+
+  it.each([
+    { pool: 'primary', cursor: null },
+    { pool: 'primary', cursor: '2026-11-15T21:45:00.000Z' },
+    { pool: 'backup', cursor: null },
+  ] as const)(
+    'caps $pool collection with cursor $cursor at the configured boundary',
+    async ({ pool, cursor }) => {
+      const sourceId = 'boundary-rss';
+      const sourceUrl = 'https://boundary.example.com/rss.xml';
+      const rootDir = await setupWorkspaceWithSources([
+        {
+          id: sourceId,
+          name: '时间边界信源',
+          lang: 'zh',
+          tier: 1,
+          kind: 'rss',
+          pool,
+          url: sourceUrl,
+          enabled: true,
+        },
+      ]);
+      const now = new Date('2026-11-16T10:00:00.000Z');
+      const boundaryUrl = 'https://boundary.example.com/boundary';
+      const oldUrl = 'https://boundary.example.com/too-old';
+      const boundaryImage = 'https://boundary.example.com/boundary.png';
+      const oldImage = 'https://boundary.example.com/too-old.png';
+      const longBody =
+        '人工智能新版本发布，支持本地高效推理，并在多家评测基准上大幅降低延迟与资源占用。'.repeat(
+          12,
+        );
+      const requestedUrls: string[] = [];
+
+      const core = await createCore({
+        rootDir,
+        now: () => now,
+        fetchImpl: async (input) => {
+          const url = input.toString();
+          requestedUrls.push(url);
+          if (url === sourceUrl) {
+            return new Response(`<rss version="2.0"><channel>
+            <item><title>正好位于截止时间</title><link>${boundaryUrl}</link>
+              <pubDate>Sun, 15 Nov 2026 22:00:00 GMT</pubDate></item>
+            <item><title>早于截止时间一秒</title><link>${oldUrl}</link>
+              <pubDate>Sun, 15 Nov 2026 21:59:59 GMT</pubDate></item>
+          </channel></rss>`);
+          }
+          if (url === boundaryUrl || url === oldUrl) {
+            return new Response(
+              buildHtmlPage({
+                title: '新闻正文',
+                bodyParagraphs: [longBody],
+                ogImage: url === boundaryUrl ? boundaryImage : oldImage,
+              }),
+            );
+          }
+          return new Response(PNG_1X1_BYTES, { headers: { 'content-type': 'image/png' } });
+        },
+      });
+
+      try {
+        const { settings, repos } = core.context;
+        if (cursor) {
+          repos.sourceState.upsertSuccess({
+            sourceId,
+            lastFetchedAt: cursor,
+            lastItemPublishedAt: cursor,
+            etag: null,
+            lastModified: null,
+          });
+        }
+        const result = await collectSources(core.context, {
+          pool,
+          settings: {
+            ...settings,
+            issue: {
+              ...settings.issue,
+              refill: { ...settings.issue.refill, maxLookbackHours: 12 },
+            },
+          },
+        });
+
+        expect(requestedUrls).toEqual([sourceUrl, boundaryUrl, boundaryImage]);
+        expect(result.newArticleIds).toEqual([computeArticleId(boundaryUrl)]);
+        expect(repos.articles.getById(computeArticleId(oldUrl))).toBeNull();
+        expect(repos.sourceState.get(sourceId)?.lastItemPublishedAt).toBe(
+          '2026-11-15T22:00:00.000Z',
+        );
+      } finally {
+        await core.close();
+      }
+    },
+  );
+
+  it('records fast-source progress while another source is still fetching', async () => {
+    const fastUrl = 'https://fast.example.com/rss.xml';
+    const slowUrl = 'https://slow.example.com/rss.xml';
+    const rootDir = await setupWorkspaceWithSources([
+      {
+        id: 'fast-rss',
+        name: '快速信源',
+        lang: 'zh',
+        tier: 1,
+        kind: 'rss',
+        pool: 'primary',
+        url: fastUrl,
+        enabled: true,
+      },
+      {
+        id: 'slow-rss',
+        name: '慢速信源',
+        lang: 'zh',
+        tier: 1,
+        kind: 'rss',
+        pool: 'primary',
+        url: slowUrl,
+        enabled: true,
+      },
+    ]);
+    let releaseSlowFeed: (() => void) | undefined;
+    const slowFeed = new Promise<void>((resolve) => {
+      releaseSlowFeed = resolve;
+    });
+    const rss = '<rss version="2.0"><channel></channel></rss>';
+    const core = await createCore({
+      rootDir,
+      fetchImpl: async (input) => {
+        if (input.toString() === slowUrl) {
+          await slowFeed;
+        }
+        return new Response(rss);
+      },
+    });
+    const runId = createRun(core.context, { trigger: 'manual-cli', itemCount: 1 });
+    const collection = collectSources(core.context, { runId });
+    try {
+      await vi.waitFor(() => {
+        expect(core.context.repos.runEvents.listAfter(runId, 0, 10)).toContainEqual(
+          expect.objectContaining({
+            type: 'source_collected',
+            data: expect.objectContaining({
+              sourceId: 'fast-rss',
+              completedSources: 1,
+              totalSources: 2,
+            }),
+          }),
+        );
+      });
+      expect(core.context.repos.sourceState.get('slow-rss')).toBeNull();
+      releaseSlowFeed?.();
+      await expect(collection).resolves.toMatchObject({ sourcesOk: ['fast-rss', 'slow-rss'] });
+      expect(core.context.repos.runEvents.listAfter(runId, 0, 10).at(-1)).toMatchObject({
+        type: 'source_collected',
+        data: { sourceId: 'slow-rss', completedSources: 2, totalSources: 2 },
+      });
+    } finally {
+      releaseSlowFeed?.();
+      await collection.catch(() => undefined);
+      await core.close();
+    }
   });
 
   it('throws collect_all_failed when every enabled source in pool fails', async () => {
@@ -560,6 +766,7 @@ describe('collector module and SourceService', () => {
 
     const core = await createCore({
       rootDir,
+      now: () => new Date('2026-11-16T10:00:00.000Z'),
       fetchImpl: async (input) => {
         const url = typeof input === 'string' ? input : input.toString();
         if (url === 'https://slow.example.com/rss.xml') {
@@ -582,10 +789,16 @@ describe('collector module and SourceService', () => {
       },
     });
 
-    await expect(collectSources(core.context, { signal: ac.signal })).rejects.toThrow();
+    const runId = createRun(core.context, { trigger: 'manual-cli', itemCount: 1 });
+    await expect(collectSources(core.context, { runId, signal: ac.signal })).rejects.toMatchObject({
+      name: 'AbortError',
+    });
     const articleId = computeArticleId('https://slow.example.com/post-abort');
     expect(core.context.repos.articles.getById(articleId)).toBeNull();
     expect(core.context.repos.sourceState.get('slow-rss')).toBeNull();
+    expect(core.context.repos.runEvents.listAfter(runId, 0, 10).map((event) => event.type)).toEqual(
+      ['run_created'],
+    );
 
     await core.close();
   });

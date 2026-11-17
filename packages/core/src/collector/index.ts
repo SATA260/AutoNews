@@ -5,6 +5,7 @@ import pLimit from 'p-limit';
 import type { CoreContext } from '../context.js';
 import { PipelineError } from '../errors.js';
 import { writeJsonAtomic } from '../storage/files.js';
+import { emitRunEvent } from '../workflow/events.js';
 import { canonicalizeUrl, computeArticleId, normalizeTitle } from './canonical-url.js';
 import { expireOldArticles } from './expiry.js';
 import { extractArticleContent, fetchArticleHtml, type StoredArticleContent } from './extractor.js';
@@ -48,10 +49,10 @@ async function collectSingleSource(
   seenCanonicalIds: Set<string>,
   articleLimit: ReturnType<typeof pLimit>,
   opts: {
-    runId?: string;
     signal?: AbortSignal;
     retryDelayMs?: number;
     timezone: string;
+    lookbackCutoffMs: number;
   },
 ): Promise<string[]> {
   const prevState = ctx.repos.sourceState.get(source.id);
@@ -83,9 +84,9 @@ async function collectSingleSource(
     ? Date.parse(prevState.lastItemPublishedAt)
     : Number.NaN;
   const hasPrevCursor = !Number.isNaN(prevCursorMs);
-  const overlapStartMs = hasPrevCursor
-    ? prevCursorMs - OVERLAP_WINDOW_MS
-    : Number.NEGATIVE_INFINITY;
+  const earliestItemMs = hasPrevCursor
+    ? Math.max(opts.lookbackCutoffMs, prevCursorMs - OVERLAP_WINDOW_MS)
+    : opts.lookbackCutoffMs;
 
   let confirmedMaxMs = Number.NaN;
   const pendingItems: Array<{
@@ -99,14 +100,6 @@ async function collectSingleSource(
   }> = [];
 
   for (const item of feedResult.items) {
-    // 先校验链接有效性；链接不合法的条目不得推进抓取时间游标
-    let canonicalUrl: string;
-    try {
-      canonicalUrl = canonicalizeUrl(item.url, source.url);
-    } catch {
-      continue;
-    }
-
     const parsedMs = item.publishedAt !== null ? Date.parse(item.publishedAt) : Number.NaN;
     const itemMs = Number.isNaN(parsedMs) ? null : parsedMs;
 
@@ -115,7 +108,15 @@ async function collectSingleSource(
       if (hasPrevCursor) {
         continue;
       }
-    } else if (itemMs < overlapStartMs) {
+    } else if (itemMs < earliestItemMs) {
+      continue;
+    }
+
+    // 链接不合法的条目不得推进抓取时间游标
+    let canonicalUrl: string;
+    try {
+      canonicalUrl = canonicalizeUrl(item.url, source.url);
+    } catch {
       continue;
     }
 
@@ -276,8 +277,8 @@ async function collectSingleSource(
 
 /**
  * 执行新闻信源增量采集流程：
- * 并发拉取指定分组的启用信源，过滤重抓重叠窗口与重复链接，提取正文与配图落盘，
- * 更新信源健康状态并在全部主力信源失败时返回明确错误；若收到取消信号，会等待正在进行的信源安全收尾后再退出。
+ * 并发拉取指定分组的启用信源，按时间窗口和链接筛选条目，再保存正文和配图。
+ * 每个信源结束时记录进度，全部失败时返回明确错误，取消时等待正在采集的信源收尾。
  */
 export async function collectSources(
   ctx: CoreContext,
@@ -294,8 +295,13 @@ export async function collectSources(
   }
 
   const pool = opts?.pool ?? 'primary';
+  const runId = opts?.runId;
   const effectiveSettings = opts?.settings ?? ctx.settings;
+  const maxLookbackHours = effectiveSettings.issue.refill.maxLookbackHours;
+  const lookbackCutoffMs = ctx.now().getTime() - maxLookbackHours * 3600_000;
   const targetSources = ctx.sources.filter((s) => s.enabled && s.kind === 'rss' && s.pool === pool);
+  const totalSources = targetSources.length;
+  const sourceLabel = pool === 'primary' ? '主力信源' : '备用信源';
 
   const feedLimit = pLimit(FEED_CONCURRENCY);
   const articleLimit = pLimit(ARTICLE_CONCURRENCY);
@@ -311,15 +317,14 @@ export async function collectSources(
         if (opts?.signal?.aborted) {
           throw createAbortError();
         }
+        let added: string[];
         try {
-          const added = await collectSingleSource(ctx, source, seenCanonicalIds, articleLimit, {
-            runId: opts?.runId,
+          added = await collectSingleSource(ctx, source, seenCanonicalIds, articleLimit, {
             signal: opts?.signal,
             retryDelayMs: opts?.retryDelayMs,
             timezone: effectiveSettings.timezone,
+            lookbackCutoffMs,
           });
-          sourcesOk.push(source.id);
-          newArticleIds.push(...added);
         } catch (err) {
           if (isAbortError(err) || opts?.signal?.aborted) {
             throw isAbortError(err) ? err : createAbortError();
@@ -327,11 +332,22 @@ export async function collectSources(
           const msg = err instanceof Error ? err.message : String(err);
           sourcesFailed.push({ sourceId: source.id, error: msg });
           const failures = ctx.repos.sourceState.recordFailure(source.id, msg);
+          if (runId) {
+            const completedSources = sourcesOk.length + sourcesFailed.length;
+            emitRunEvent(ctx, {
+              runId,
+              level: 'warn',
+              stage: 'collect',
+              type: 'source_collect_failed',
+              message: `${sourceLabel}「${source.name}」抓取失败（${completedSources}/${totalSources}），原因：${msg}`,
+              data: { sourceId: source.id, pool, completedSources, totalSources, error: msg },
+            });
+          }
           if (failures >= SOURCE_UNHEALTHY_THRESHOLD) {
             const alertMsg = `信源 ${source.name} (${source.id}) 已连续抓取失败 ${failures} 次: ${msg}`;
-            if (opts?.runId) {
+            if (runId) {
               ctx.repos.runEvents.append({
-                runId: opts.runId,
+                runId,
                 ts: ctx.now().toISOString(),
                 level: 'warn',
                 stage: 'collect',
@@ -342,11 +358,32 @@ export async function collectSources(
             }
             await ctx.notifier.notify({
               type: 'source_unhealthy',
-              runId: opts?.runId,
+              runId,
               message: alertMsg,
               data: { sourceId: source.id, consecutiveFailures: failures, error: msg },
             });
           }
+          return;
+        }
+
+        sourcesOk.push(source.id);
+        newArticleIds.push(...added);
+        if (runId) {
+          const completedSources = sourcesOk.length + sourcesFailed.length;
+          emitRunEvent(ctx, {
+            runId,
+            level: 'info',
+            stage: 'collect',
+            type: 'source_collected',
+            message: `${sourceLabel}「${source.name}」抓取完成（${completedSources}/${totalSources}），新增 ${added.length} 篇可用文章`,
+            data: {
+              sourceId: source.id,
+              pool,
+              completedSources,
+              totalSources,
+              newArticleCount: added.length,
+            },
+          });
         }
       }),
     ),
@@ -368,10 +405,7 @@ export async function collectSources(
     );
   }
 
-  const expiredCount =
-    pool === 'primary'
-      ? expireOldArticles(ctx, effectiveSettings.issue.refill.maxLookbackHours)
-      : 0;
+  const expiredCount = pool === 'primary' ? expireOldArticles(ctx, maxLookbackHours) : 0;
 
   return {
     sourcesOk,
