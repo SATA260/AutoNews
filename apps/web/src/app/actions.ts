@@ -257,6 +257,22 @@ export async function updateDraftAction(formData: FormData): Promise<ActionResul
   }
 }
 
+/** 修改封面主标题与副标题，并只重新生成封面图片 */
+export async function updateCoverAction(formData: FormData): Promise<ActionResult> {
+  try {
+    const runId = RunIdSchema.parse(formData.get('runId'));
+    const title = parseRequiredString(formData.get('title'), '封面主标题');
+    const rawSubtitle = formData.get('subtitle');
+    const subtitle = typeof rawSubtitle === 'string' ? rawSubtitle.trim() : '';
+    const core = await getCore();
+    await core.publish.updateCover(runId, { title, subtitle });
+    safeRevalidate(`/runs/${runId}`);
+    return { ok: true, message: '封面文字已保存，封面图片已重新生成' };
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+  }
+}
+
 /** 审核通过并启动后台 B 站投稿上传（强制开启 AI 生成内容声明） */
 export async function approvePublishAction(formData: FormData): Promise<ActionResult> {
   try {

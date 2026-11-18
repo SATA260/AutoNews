@@ -1,4 +1,5 @@
 export * from './compositor.js';
+export * from './cover.js';
 export * from './ffmpeg.js';
 export * from './lipsync.js';
 export * from './narration.js';

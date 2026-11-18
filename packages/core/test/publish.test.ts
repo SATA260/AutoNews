@@ -406,6 +406,46 @@ describe('Bilibili publishing, AI declaration, consumption, and uncertain recove
     expect(tags).toEqual(['AI', 'AI每日报', 'OpenAI', '大模型']);
   });
 
+  it('修改封面文字后只重新生成封面图片，超长文字被拒绝且不影响任务状态', async () => {
+    const { rootDir } = await setupPublishWorkspace();
+    await updateSettingsFile(path.join(rootDir, 'config', 'settings.yaml'), {
+      template: { cover: { dir: path.join(REPO_ROOT, 'templates', 'cover-card') } },
+    });
+    const core = await createCore({ rootDir });
+    try {
+      const runId = createRun(core.context, { itemCount: 1, trigger: 'manual-cli' });
+      await seedCompletedRunReadyForReview(core, runId);
+
+      const before = await core.publish.getCover(runId);
+      expect(before.source).toBe('fallback');
+      expect(before.text.title.length).toBeGreaterThan(0);
+
+      await expect(core.publish.updateCover(runId, { title: '一'.repeat(20) })).rejects.toThrow(
+        /字数上限/,
+      );
+
+      const after = await core.publish.updateCover(runId, {
+        title: 'GPT-6.2 *翻车了*',
+        subtitle: '成本砍到三分之一',
+      });
+      expect(after.source).toBe('manual');
+      expect(after.text).toEqual({ title: 'GPT-6.2 *翻车了*', subtitle: '成本砍到三分之一' });
+
+      const jpg = await fs.readFile(
+        path.join(core.context.paths.runDir(runId), 'output', 'cover.jpg'),
+      );
+      expect(jpg[0]).toBe(0xff);
+      expect(jpg[1]).toBe(0xd8);
+      expect(jpg.byteLength).toBeGreaterThan(10_000);
+      expect(core.context.repos.runs.getById(runId)?.status).toBe('awaiting_review');
+
+      const again = await core.publish.getCover(runId);
+      expect(again.source).toBe('manual');
+    } finally {
+      await core.close();
+    }
+  }, 60_000);
+
   it('阻止发布修改媒体后尚未重新合成的旧成片', async () => {
     const { rootDir, stateFile } = await setupPublishWorkspace();
     const core = await createCore({ rootDir });

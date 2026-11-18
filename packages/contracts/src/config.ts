@@ -165,6 +165,12 @@ const SettingsFieldsSchema = z.object({
   template: z.object({
     active: z.string().min(1),
     registry: z.record(z.string(), TemplateEntrySchema),
+    /** 视频封面模板所在目录（相对项目根目录）；不填时直接截取视频第一帧作为封面 */
+    cover: z
+      .object({
+        dir: z.string().min(1),
+      })
+      .optional(),
   }),
   render: z.object({
     width: z.number().int().positive(),

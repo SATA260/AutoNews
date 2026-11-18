@@ -1,3 +1,4 @@
+export * from './cover-text.js';
 export * from './item-pipeline.js';
 export * from './llm.js';
 export * from './personas.js';

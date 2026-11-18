@@ -1,5 +1,6 @@
 import path from 'node:path';
 import {
+  COVER_TEXT_LIMITS,
   type ContentLimits,
   type IssuePackage,
   IssuePackageSchema,
@@ -103,6 +104,8 @@ export async function runPackageStage(
     passedItemsJson: JSON.stringify(itemsPayload, null, 2),
     contentLimitsJson: JSON.stringify(limits, null, 2),
     publishLimitsJson: JSON.stringify(publishLimits, null, 2),
+    coverTitleMax: String(COVER_TEXT_LIMITS.titleMax),
+    coverSubtitleMax: String(COVER_TEXT_LIMITS.subtitleMax),
   });
 
   const expectedItemIds = passedItems.map((i) => i.id);

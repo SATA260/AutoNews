@@ -5,6 +5,7 @@ import type {
   PolishedItem,
   Settings,
 } from '@aidaily/contracts';
+import { checkCoverText } from './cover-text.js';
 
 /** 确定性规则预检结果（未通过时附带可供模型微调的具体批注） */
 export interface PrecheckResult {
@@ -867,6 +868,13 @@ export function precheckIssuePackage(opts: {
     );
   }
 
+  // 封面文字：漏填只提醒（会用头条导语自动生成），填了但不合规则要求重写
+  if (pkg.cover) {
+    errors.push(...checkCoverText(pkg.cover));
+  } else {
+    warnings.push('未生成封面文字 cover，将用头条导语自动截取封面文字');
+  }
+
   for (let i = 0; i < pkg.intro.narration.length; i++) {
     checkNarrationSentence(
       pkg.intro.narration[i] ?? '',
@@ -936,6 +944,12 @@ export function precheckIssuePackage(opts: {
     { label: 'outro.cta', value: pkg.outro.cta },
     { label: 'publish.title', value: pkg.publish.title },
     { label: 'publish.descriptionIntro', value: pkg.publish.descriptionIntro },
+    ...(pkg.cover
+      ? [
+          { label: 'cover.title', value: pkg.cover.title },
+          { label: 'cover.subtitle', value: pkg.cover.subtitle },
+        ]
+      : []),
     ...pkg.intro.narration.map((s, idx) => ({ label: `intro.narration[${idx}]`, value: s })),
     ...pkg.outro.narration.map((s, idx) => ({ label: `outro.narration[${idx}]`, value: s })),
   ];

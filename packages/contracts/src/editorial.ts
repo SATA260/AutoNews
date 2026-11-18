@@ -158,7 +158,21 @@ export const FactCheckResultSchema = z.object({
 /** 事实审核结果类型 */
 export type FactCheckResult = z.infer<typeof FactCheckResultSchema>;
 
-/** 整期节目编排产出：包括新闻顺序、开场白、动态片尾及投稿标题简介 */
+/** 视频封面上的文字：主标题（大字，可用 *星号* 包住要高亮的词）与副标题（一句话钩子，可留空） */
+export const CoverTextSchema = z.object({
+  title: z.string().trim().min(1),
+  subtitle: z.string().trim(),
+});
+/** 视频封面文字类型 */
+export type CoverText = z.infer<typeof CoverTextSchema>;
+
+/** 封面文字的字数上限（按字符计，不含用于高亮的星号），保证在信息流小图里也能看清 */
+export const COVER_TEXT_LIMITS = {
+  titleMax: 14,
+  subtitleMax: 22,
+} as const;
+
+/** 整期节目编排产出：包括新闻顺序、开场白、动态片尾、投稿标题简介及封面文字 */
 export const IssuePackageSchema = z.object({
   order: z.array(z.string().min(1)).min(1),
   headlineItemId: z.string().min(1),
@@ -178,6 +192,8 @@ export const IssuePackageSchema = z.object({
     descriptionIntro: z.string().min(1),
     tags: z.array(z.string().min(1)),
   }),
+  /** 封面文字；旧数据或模型漏填时为空，届时由头条导语自动生成 */
+  cover: CoverTextSchema.optional(),
 });
 /** 整期节目编排结果类型 */
 export type IssuePackage = z.infer<typeof IssuePackageSchema>;

@@ -801,6 +801,40 @@ export function buildProgram(io: CliIo = DEFAULT_IO, onExitCode?: (code: number)
       setExit(code);
     });
 
+  // 10b. aidaily cover <runId> [--title <t>] [--subtitle <s>]
+  program
+    .command('cover')
+    .description('查看本期封面文字；传入 --title / --subtitle 时修改文字并只重新生成封面图片')
+    .argument('<runId>', '任务 ID')
+    .option('--title <title>', '封面主标题（可用 *星号* 包住要高亮的词）')
+    .option('--subtitle <subtitle>', '封面副标题（传空字符串表示不要副标题）')
+    .action(async (runId: string, opts: { title?: string; subtitle?: string }, cmd: Command) => {
+      const gOpts = getGlobals(cmd);
+      const print = createPrinter(io, Boolean(gOpts.json));
+      const code = await withCore(gOpts, async (core) => {
+        const changed = opts.title !== undefined || opts.subtitle !== undefined;
+        const state = changed
+          ? await core.publish.updateCover(runId, { title: opts.title, subtitle: opts.subtitle })
+          : await core.publish.getCover(runId);
+        const absCoverPath = core.tasks.resolveArtifact(runId, 'output/cover.jpg');
+        const sourceText = { manual: '人工修改', package: 'AI 编排生成', fallback: '自动截取' }[
+          state.source
+        ];
+        print(
+          { ...state, absCoverPath },
+          [
+            changed ? '封面文字已保存，封面图片已重新生成。' : '本期封面文字：',
+            `  主标题：${state.text.title}`,
+            `  副标题：${state.text.subtitle || '（无）'}`,
+            `  来源：${sourceText}`,
+            `  封面图片：${absCoverPath}`,
+          ].join('\n'),
+        );
+        return 0;
+      });
+      setExit(code);
+    });
+
   // 11. aidaily approve <runId> [--title <t>] [--desc-file <f>] [--tags a,b] [--detach]
   program
     .command('approve')

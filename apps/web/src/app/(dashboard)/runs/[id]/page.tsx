@@ -10,6 +10,7 @@ import Link from 'next/link';
 import { notFound } from 'next/navigation';
 import { PublishControls } from '@/components/PublishControls';
 import { RunCancelButton } from '@/components/RunCancelAndItemActions';
+import { CoverEditor } from '@/components/run-detail/CoverEditor';
 import { MediaAdjustments } from '@/components/run-detail/MediaAdjustments';
 import { RunItemsTab } from '@/components/run-detail/RunItemsTab';
 import { RunLlmTab } from '@/components/run-detail/RunLlmTab';
@@ -358,19 +359,39 @@ export default async function RunDetailPage({
       {activeTab === 'publish'
         ? await (async () => {
             const draft = await core.publish.getDraft(detail.id).catch(() => null);
+            const cover = await core.publish.getCover(detail.id).catch(() => null);
             return (
-              <PublishControls
-                runId={detail.id}
-                runStatus={detail.status}
-                mediaDirty={detail.mediaDirty}
-                draft={draft}
-                publishRecord={detail.publishRecord}
-                limits={{
-                  titleMax: settings.publish.bilibili.titleMax,
-                  descMax: settings.publish.bilibili.descMax,
-                  tagsMax: settings.publish.bilibili.tagsMax,
-                }}
-              />
+              <div className="space-y-6">
+                <CoverEditor
+                  runId={detail.id}
+                  editable={
+                    detail.status === 'awaiting_review' || detail.status === 'publish_failed'
+                  }
+                  cover={
+                    cover
+                      ? {
+                          title: cover.text.title,
+                          subtitle: cover.text.subtitle,
+                          source: cover.source,
+                          limits: cover.limits,
+                          coverUpdatedAt: cover.coverUpdatedAt,
+                        }
+                      : null
+                  }
+                />
+                <PublishControls
+                  runId={detail.id}
+                  runStatus={detail.status}
+                  mediaDirty={detail.mediaDirty}
+                  draft={draft}
+                  publishRecord={detail.publishRecord}
+                  limits={{
+                    titleMax: settings.publish.bilibili.titleMax,
+                    descMax: settings.publish.bilibili.descMax,
+                    tagsMax: settings.publish.bilibili.tagsMax,
+                  }}
+                />
+              </div>
             );
           })()
         : null}

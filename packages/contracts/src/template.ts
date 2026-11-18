@@ -146,3 +146,23 @@ export interface TemplateAdapter {
   /** 按虚拟时钟逐帧步进渲染指定的动态章节视频分片与代表帧截图 */
   renderSections?(opts: RenderSectionsOptions): Promise<void>;
 }
+
+/** 传给视频封面模板（`window.__COVER__.setData`）的数据 */
+export interface CoverTemplateData {
+  /** 主标题，可用 *星号* 包住要高亮的词 */
+  title: string;
+  /** 副标题，可为空字符串 */
+  subtitle: string;
+  /** 刊名，如“AI 每日报” */
+  masthead: string;
+  /** 展示用日期，如“11月18日 周三” */
+  date: string;
+  /** 期号，如“VOL.2026.11.18” */
+  issueNumber: string;
+  /** 当期主播标识，决定主题色和立绘摆放 */
+  hostId: HostMascotId;
+  /** 当期主播显示名 */
+  hostName: string;
+  /** 主播立绘图片地址；没有立绘时为空字符串 */
+  mascotUrl: string;
+}

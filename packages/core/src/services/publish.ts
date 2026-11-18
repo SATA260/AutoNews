@@ -1,6 +1,14 @@
 import path from 'node:path';
 import { type PublishDraft, PublishDraftSchema } from '@aidaily/contracts';
 import type { CoreContext } from '../context.js';
+import { checkCoverText, normalizeCoverText } from '../editorial/cover-text.js';
+import {
+  COVER_IMAGE_REL_PATH,
+  type CoverState,
+  readCoverState,
+  renderCoverImage,
+  saveCoverText,
+} from '../media/cover.js';
 import {
   assertReadyToUpload,
   buildBiliLoginCommand,
@@ -12,7 +20,11 @@ import { ensurePublishDraftForRun } from '../publish/description.js';
 import { inTransaction } from '../storage/db.js';
 import type { PublishedHistoryRecord } from '../storage/repos/articles-repo.js';
 import { emitRunEvent } from '../workflow/events.js';
-import { assertPipelineLockAvailable } from '../workflow/lock.js';
+import {
+  acquirePipelineLock,
+  assertPipelineLockAvailable,
+  releasePipelineLock,
+} from '../workflow/lock.js';
 
 /** 确认或重试发布时可选的后台执行模式及重试间隔参数 */
 export interface PublishActionOptions {
@@ -51,7 +63,20 @@ export interface PublishService {
   listHistory(limit?: number): Promise<PublishedHistoryRecord[]>;
   /** 返回用于命令行交互式扫码登录 B 站的可执行程序路径与参数列表 */
   biliLoginCommand(): { bin: string; args: string[] };
+  /** 读取本期当前生效的封面文字（人工修改 / 编排生成 / 自动截取）与封面图片状态 */
+  getCover(runId: string): Promise<CoverState>;
+  /** 人工修改封面主标题或副标题，校验字数后只重新生成封面图片 */
+  updateCover(runId: string, patch: CoverTextPatch): Promise<CoverState>;
 }
+
+/** 局部修改封面文字时允许修改的主标题与副标题 */
+export interface CoverTextPatch {
+  title?: string;
+  subtitle?: string;
+}
+
+/** 允许修改封面的任务状态：待审核与投稿失败 */
+const COVER_EDITABLE_STATUSES = new Set(['awaiting_review', 'publish_failed']);
 
 /** 统计字符串的完整 Unicode 字符个数 */
 function countCodepoints(text: string): number {
@@ -412,6 +437,77 @@ export function createPublishService(
     /** 返回供 CLI 执行交互式 B 站扫码登录的命令结构 */
     biliLoginCommand(): { bin: string; args: string[] } {
       return buildBiliLoginCommand(ctx, ctx.settings);
+    },
+
+    /** 读取本期当前生效的封面文字与封面图片状态 */
+    async getCover(runId: string): Promise<CoverState> {
+      if (!ctx.repos.runs.getById(runId)) {
+        throw new Error(`未找到任务记录: ${runId}`);
+      }
+      const state = await readCoverState(ctx, runId);
+      if (!state) {
+        throw new Error(`任务 ${runId} 尚未完成整期编排，暂无封面文字`);
+      }
+      return state;
+    },
+
+    /** 修改封面文字并只重新生成封面图片（不重新合成视频） */
+    async updateCover(runId: string, patch: CoverTextPatch): Promise<CoverState> {
+      const run = ctx.repos.runs.getById(runId);
+      if (!run) {
+        throw new Error(`未找到任务记录: ${runId}`);
+      }
+      if (!COVER_EDITABLE_STATUSES.has(run.status)) {
+        throw new Error(
+          `任务 ${runId} 当前状态为 ${run.status}，只有待审核或投稿失败的任务可以修改封面`,
+        );
+      }
+      const current = await readCoverState(ctx, runId);
+      if (!current) {
+        throw new Error(`任务 ${runId} 尚未完成整期编排，无法修改封面`);
+      }
+      const next = normalizeCoverText({
+        title: patch.title ?? current.text.title,
+        subtitle: patch.subtitle ?? current.text.subtitle,
+      });
+      const errors = checkCoverText(next);
+      if (errors.length > 0) {
+        throw new Error(errors.join('；'));
+      }
+      if (!ctx.settings.template.cover) {
+        throw new Error('尚未配置封面模板目录（template.cover.dir），无法重新生成封面');
+      }
+
+      acquirePipelineLock(ctx, runId, ctx.settings);
+      try {
+        const { warnings } = await renderCoverImage({
+          ctx,
+          runId,
+          settings: ctx.settings,
+          text: next,
+          outJpg: path.join(ctx.paths.runDir(runId), COVER_IMAGE_REL_PATH),
+        });
+        await saveCoverText(ctx, runId, next);
+        emitRunEvent(ctx, {
+          runId,
+          level: warnings.length > 0 ? 'warn' : 'info',
+          stage: 'publish',
+          type: 'cover_updated',
+          message:
+            warnings.length > 0
+              ? `封面文字已修改并重新生成封面，排版提醒：${warnings.join('；')}`
+              : '封面文字已修改并重新生成封面',
+          data: next,
+        });
+      } finally {
+        releasePipelineLock(ctx, runId);
+      }
+
+      const state = await readCoverState(ctx, runId);
+      if (!state) {
+        throw new Error(`任务 ${runId} 封面状态读取失败`);
+      }
+      return state;
     },
   };
 }

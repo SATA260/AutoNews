@@ -137,6 +137,7 @@ template:
   registry:
     daily-deck: { dir: templates/daily-deck, adapter: daily-deck }
     solid-color: { dir: "", adapter: solid-color } # 测试用
+  cover: { dir: templates/cover-card } # 视频封面模板；删掉这一行则直接用视频第一帧作封面
 
 render:
   width: 1920

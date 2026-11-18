@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=1920, height=1080" />
+    <title>AI 每日报 · 视频封面</title>
+    <link rel="stylesheet" href="./cover.css" />
+  </head>
+  <body>
+    <main id="cover" class="cover" data-host="gemini" aria-label="视频封面">
+      <!-- 背景层：纸张底色、点阵与主播主题色圆形色块 -->
+      <div class="bg-dots" aria-hidden="true"></div>
+      <div class="bg-orb" aria-hidden="true"></div>
+      <div class="bg-ring" aria-hidden="true"></div>
+      <div class="bg-stripe" aria-hidden="true"></div>
+
+      <!-- 主播立绘 -->
+      <div class="mascot-wrap" aria-hidden="true">
+        <img id="mascot" class="mascot" alt="" />
+      </div>
+      <div id="host-sticker" class="host-sticker">
+        <span class="host-sticker-label">本期主播</span>
+        <span id="host-name" class="host-sticker-name"></span>
+      </div>
+
+      <!-- 文字层 -->
+      <section class="copy">
+        <header class="masthead">
+          <span id="masthead" class="masthead-logo">AI 每日报</span>
+          <span id="date" class="masthead-date"></span>
+          <span id="issue" class="masthead-issue"></span>
+        </header>
+        <div class="title-box">
+          <h1 id="title" class="title"></h1>
+        </div>
+        <p id="subtitle" class="subtitle"></p>
+      </section>
+    </main>
+    <script src="./cover.js"></script>
+  </body>
+</html>
