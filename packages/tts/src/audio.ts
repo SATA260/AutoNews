@@ -37,9 +37,9 @@ export interface ConcatSentencesResult {
 
 const DEFAULT_MEDIA_TIMEOUT_MS = 60_000;
 
-/** 统一人声动态均衡与压限滤镜参数（带静音门限，避免放大句间停顿底噪） */
+/** 统一人声均衡与压限滤镜参数（按帧独立均衡并附带静音门限，不压低句尾收音音量也不放大停顿底噪） */
 export const VOICE_LEVELING_FILTER =
-  'dynaudnorm=f=120:g=7:p=0.90:m=12:s=8:t=0.004:b=1,acompressor=threshold=-21dB:ratio=2.5:attack=15:release=180:makeup=1.5';
+  'speechnorm=p=0.88:e=12:c=6:t=0.004:r=0.20:f=0.20,acompressor=threshold=-22dB:ratio=2.5:attack=8:release=100:makeup=2';
 
 /** 生成带合法后缀名的同目录临时文件路径，确保原子重命名且音视频工具能正确识别格式 */
 function makeSiblingTempPath(targetFile: string): string {
@@ -156,7 +156,7 @@ export async function normalizeSegmentToWav(opts: NormalizeSegmentOptions): Prom
       if (applyTrim) {
         args.push(
           '-af',
-          'silenceremove=start_periods=1:start_duration=0.05:start_threshold=-55dB:start_silence=0.04,areverse,silenceremove=start_periods=1:start_duration=0.08:start_threshold=-55dB:start_silence=0.18,areverse',
+          'silenceremove=start_periods=1:start_duration=0:start_threshold=-68dB:start_silence=0.05:detection=peak,areverse,silenceremove=start_periods=1:start_duration=0:start_threshold=-72dB:start_silence=0.15:detection=peak,areverse',
         );
       }
       args.push('-ar', String(opts.sampleRate), '-ac', '1', '-c:a', 'pcm_s16le', tmpOut);
@@ -195,7 +195,7 @@ export async function normalizeSegmentToWav(opts: NormalizeSegmentOptions): Prom
   if (opts.normalizeLoudness) await polishLoudness(opts);
 }
 
-/** 整段音频先进行动态人声均衡与压限平滑句间高低落差，再测量并归一化整体响度、柔和淡出尾部。 */
+/** 整段音频先进行实时人声均衡与压限平滑句间高低落差，再测量并归一化整体响度、保留原声结尾并追加极短尾垫。 */
 async function polishLoudness(opts: NormalizeSegmentOptions): Promise<void> {
   const ffmpeg = opts.ffmpegBin ?? 'ffmpeg';
   const duration = await probeAudioDurationMs(opts.outFile, opts.ffprobeBin, opts.signal);
@@ -224,9 +224,7 @@ async function polishLoudness(opts: NormalizeSegmentOptions): Promise<void> {
     Number(stats[key]),
   );
   if (values.some((value) => !Number.isFinite(value))) throw new Error('语音响度测量结果无效');
-  const fadeOutSec = Math.min(0.08, Math.max(0.02, duration / 3000));
-  const fadeOutStartSec = Math.max(0, duration / 1000 - fadeOutSec);
-  const filter = `${VOICE_LEVELING_FILTER},loudnorm=I=${target}:TP=-1.5:LRA=5:measured_I=${values[0]}:measured_TP=${values[1]}:measured_LRA=${values[2]}:measured_thresh=${values[3]}:offset=${values[4]}:linear=true,afade=t=in:st=0:d=0.015:curve=qsin,afade=t=out:st=${fadeOutStartSec.toFixed(3)}:d=${fadeOutSec.toFixed(3)}:curve=qsin,apad=pad_dur=0.16`;
+  const filter = `${VOICE_LEVELING_FILTER},loudnorm=I=${target}:TP=-1.5:LRA=5:measured_I=${values[0]}:measured_TP=${values[1]}:measured_LRA=${values[2]}:measured_thresh=${values[3]}:offset=${values[4]}:linear=true,afade=t=in:st=0:d=0.005,apad=pad_dur=0.08`;
   await withAtomicWavWrite(opts.outFile, async (tmp) => {
     const result = await execa(
       ffmpeg,

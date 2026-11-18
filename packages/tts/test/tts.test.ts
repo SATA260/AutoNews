@@ -428,21 +428,21 @@ describe('本地语音重试与取消', () => {
     );
   });
 
-  it('保留段落末尾轻声尾音并追加平滑淡出与静音缓冲，避免突然截断', async () => {
+  it('保留段落末尾轻声尾音且不在句尾压低音量，仅追加极短静音缓冲防截断', async () => {
     const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'aidaily-tts-tail-'));
     tempDirs.push(tmpDir);
     const rawWav = path.join(tmpDir, 'raw-tail.wav');
     const outWav = path.join(tmpDir, 'polished-tail.wav');
 
-    // 生成 0.55s 主音 + 0.15s 衰减至 -40dB 的尾音（总计 0.7s）
+    // 构造 0.55s 主语音 + 0.03s 辅音间隙 + 0.05s 轻声尾音(-50dB) + 0.20s 末尾空白（总计 0.83s）
     await execa('ffmpeg', [
       '-y',
       '-f',
       'lavfi',
       '-i',
-      'sine=frequency=440:duration=0.7',
+      'sine=frequency=440:sample_rate=48000:duration=0.83',
       '-af',
-      'volume=0.8:enable=between(t\\,0\\,0.55),volume=0.012:enable=between(t\\,0.55\\,0.70)',
+      'volume=0.8:enable=between(t\\,0\\,0.55),volume=0.0:enable=between(t\\,0.55\\,0.58),volume=0.035:enable=between(t\\,0.58\\,0.63),volume=0.0:enable=between(t\\,0.63\\,0.83)',
       '-ar',
       '48000',
       '-ac',
@@ -460,13 +460,32 @@ describe('本地语音重试与取消', () => {
     });
 
     const outMs = await probeAudioDurationMs(outWav);
-    // 保留轻声尾音后再加上 160ms 平滑缓冲，成片应完整覆盖 0.7s 语音 + 尾部余量
-    expect(outMs).toBeGreaterThanOrEqual(800);
+    // 完整保留 0.63s 含轻声尾音的语音及尾垫，确保不会因闭塞间隙或轻声而被提前截断
+    expect(outMs).toBeGreaterThanOrEqual(700);
+
+    // 验证 0.58s~0.63s 的短促轻声尾音未被裁剪掉且保持清晰可闻
+    const whisperRes = await execa('ffmpeg', [
+      '-hide_banner',
+      '-ss',
+      '0.58',
+      '-t',
+      '0.045',
+      '-i',
+      outWav,
+      '-af',
+      'volumedetect',
+      '-f',
+      'null',
+      '-',
+    ]);
+    const whisperMatch = /mean_volume: ([\d.-]+) dB/.exec(whisperRes.stderr);
+    expect(whisperMatch).not.toBeNull();
+    expect(Number(whisperMatch?.[1] ?? '-100')).toBeGreaterThan(-45);
 
     const tailRes = await execa('ffmpeg', [
       '-hide_banner',
       '-sseof',
-      '-0.12',
+      '-0.06',
       '-i',
       outWav,
       '-af',
@@ -481,7 +500,7 @@ describe('本地语音重试与取消', () => {
     expect(overallRms).toBeLessThan(-50);
   });
 
-  it('将同一段落中过响与过轻的句子均衡到一致响度并保持停顿区与尾音安静', async () => {
+  it('将同一段落中过响与过轻的句子均衡到一致响度并保持结尾平直、停顿区安静', async () => {
     const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'aidaily-tts-level-'));
     tempDirs.push(tmpDir);
     const rawWav = path.join(tmpDir, 'uneven.wav');
@@ -529,8 +548,10 @@ describe('本地语音重试与取消', () => {
 
     const loudHalf = await readSliceMean(0.3, 1.2);
     const pauseGap = await readSliceMean(1.85, 0.3);
-    const quietHalf = await readSliceMean(2.5, 1.4);
+    const quietHalf = await readSliceMean(2.5, 1.2);
+    const quietTailLast200ms = await readSliceMean(4.15, 0.2);
     expect(Math.abs(loudHalf - quietHalf)).toBeLessThan(2.5);
+    expect(Math.abs(quietHalf - quietTailLast200ms)).toBeLessThan(1.2);
     expect(pauseGap).toBeLessThan(-60);
   });
 

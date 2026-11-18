@@ -13,7 +13,7 @@ import type { TtsProvider, TtsServiceOptions } from './types.js';
 
 export const TTS_VERSION = '0.1.0';
 /** 本地语音处理方式变化时递增，用于使旧音频缓存失效。 */
-export const QWEN_AUDIO_PROCESSING_VERSION = 7;
+export const QWEN_AUDIO_PROCESSING_VERSION = 8;
 
 /** 判断指定引擎标识是否属于需要主播音色参考与统一响度后处理的本地语音克隆引擎 */
 export function isLocalVoiceCloneProvider(providerId: string): boolean {
@@ -169,9 +169,8 @@ export class TtsService {
             ...(isLocalClone
               ? {
                   loudnessLUFS: effectiveSettings.postprocess.loudnessLUFS,
-                  fadeInMs: 15,
-                  fadeOutMs: 80,
-                  tailPadMs: 160,
+                  fadeInMs: 5,
+                  tailPadMs: 80,
                 }
               : {}),
           },

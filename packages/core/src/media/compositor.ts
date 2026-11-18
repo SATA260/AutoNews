@@ -1141,7 +1141,7 @@ export async function runRenderStage(opts: {
       sampleRate: settings.tts.postprocess.sampleRate,
       loudnessLUFS: settings.tts.postprocess.loudnessLUFS,
       isSilentProvider: settings.tts.provider === 'silent',
-      // 本地克隆引擎已在段落合成后完成两遍响度与尾音淡出处理，主轨不再重复执行动态均衡
+      // 本地克隆引擎已在段落合成阶段完成两遍响度与人声均衡处理，主轨不再重复执行动态均衡
       levelVoice:
         settings.tts.provider !== 'silent' && !isLocalVoiceCloneProvider(settings.tts.provider),
       bgm: bgmName

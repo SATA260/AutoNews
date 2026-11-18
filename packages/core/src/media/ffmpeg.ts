@@ -145,7 +145,7 @@ export async function buildMasterAudioWav(opts: {
 
       const delayMs = Math.max(0, Math.round(sec.startMs));
       const delayFilter = delayMs > 0 ? `,adelay=${delayMs}|${delayMs}` : '';
-      // 仅针对尚未在语音合成阶段执行均衡的外部音源启用单遍响度拉齐，避免重复放大已淡出的尾音
+      // 仅针对尚未在语音合成阶段执行均衡的外部音源启用单遍响度拉齐，避免重复放大尾部保护静音
       const levelingPrefix =
         opts.levelVoice && !opts.isSilentProvider
           ? `${VOICE_LEVELING_FILTER},loudnorm=I=${opts.loudnessLUFS}:TP=-1.5:LRA=5,`

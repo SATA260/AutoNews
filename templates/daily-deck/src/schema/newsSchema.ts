@@ -977,7 +977,7 @@ function createEmergencyFallbackIssue(): SanitizedDailyIssue {
     mascotMode: 'per-item',
     bgmAudioUrl: null,
     bgmVolumeDb: -18,
-    pagePaddingSec: 0.6,
+    pagePaddingSec: 1.0,
     coverFrameCount: null,
     coverDurationSec: HARD_LIMITS.defaultCoverDurationSec,
     coverSpeechSec: HARD_LIMITS.defaultCoverDurationSec,
@@ -1117,7 +1117,7 @@ export function sanitizeDailyIssue(raw: unknown): SanitizedIssueResult {
 
     const rawPadSec = Number(root.pagePaddingSec);
     const pagePaddingSec =
-      Number.isFinite(rawPadSec) && rawPadSec >= 0 ? Math.min(10, rawPadSec) : 0.6;
+      Number.isFinite(rawPadSec) && rawPadSec >= 0 ? Math.min(10, rawPadSec) : 1.0;
 
     return {
       issue: {

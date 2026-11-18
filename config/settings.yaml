@@ -52,11 +52,11 @@ ai:
         }
     }
   stages:
-    select: { cli: deepseek官key, model: deepseek-flash, timeoutSec: 300, retries: 2 }
-    summarize: { cli: deepseek官key, model: deepseek-flash, timeoutSec: 240, retries: 2 }
-    polish: { cli: deepseek官key, model: deepseek-flash, timeoutSec: 180, retries: 2 }
-    factcheck: { cli: deepseek官key, model: deepseek-flash, timeoutSec: 300, retries: 2 }
-    package: { cli: deepseek官key, model: deepseek-flash, timeoutSec: 240, retries: 2 }
+    select: { cli: agy, model: gemini-4-hydrogen-high, timeoutSec: 300, retries: 2 }
+    summarize: { cli: agy, model: gemini-4-hydrogen-high, timeoutSec: 240, retries: 2 }
+    polish: { cli: agy, model: gemini-4-hydrogen-high, timeoutSec: 180, retries: 2 }
+    factcheck: { cli: agy, model: gemini-4-hydrogen-high, timeoutSec: 300, retries: 2 }
+    package: { cli: agy, model: gemini-4-hydrogen-high, timeoutSec: 240, retries: 2 }
 
 clis:
   codex:
@@ -79,25 +79,57 @@ tts:
       bin: assets/tts/bin/audiocpp_server
       model: assets/tts/models/IndexTTS2.5-GGUF/index-tts2_5-q8_0.gguf
       voices:
-        deepseek: { audio: 'assets/voice/deepseek娘（白露）/白露_qwentts_clean.wav', text: 'assets/voice/deepseek娘（白露）/白露_qwentts_clean.txt' }
-        gpt: { audio: 'assets/voice/gpt娘（阮梅）/阮梅_qwentts_clean.wav', text: 'assets/voice/gpt娘（阮梅）/阮梅_qwentts_clean.txt' }
-        gemini: { audio: 'assets/voice/gemini娘（花火）/花火_qwentts_clean.wav', text: 'assets/voice/gemini娘（花火）/花火_qwentts_clean.txt' }
-        claude: { audio: 'assets/voice/claude娘（布洛妮娅）/布洛妮娅_qwentts_clean.wav', text: 'assets/voice/claude娘（布洛妮娅）/布洛妮娅_qwentts_clean.txt' }
+        deepseek:
+          {
+            audio: 'assets/voice/deepseek娘（白露）/白露_qwentts_clean.wav',
+            text: 'assets/voice/deepseek娘（白露）/白露_qwentts_clean.txt'
+          }
+        gpt:
+          {
+            audio: 'assets/voice/gpt娘（阮梅）/阮梅_qwentts_clean.wav',
+            text: 'assets/voice/gpt娘（阮梅）/阮梅_qwentts_clean.txt'
+          }
+        gemini:
+          {
+            audio: 'assets/voice/gemini娘（花火）/花火_qwentts_clean.wav',
+            text: 'assets/voice/gemini娘（花火）/花火_qwentts_clean.txt'
+          }
+        claude:
+          {
+            audio: 'assets/voice/claude娘（布洛妮娅）/布洛妮娅_qwentts_clean.wav',
+            text: 'assets/voice/claude娘（布洛妮娅）/布洛妮娅_qwentts_clean.txt'
+          }
     qwen-local:
       backend: metal
       bin: assets/tts/bin/audiocpp_server
       model: assets/tts/models/Qwen3-TTS-12Hz-1.7B-Base-GGUF/qwen3-tts-12hz-1.7b-base-q8_0_v2.gguf
       voices:
-        deepseek: { audio: 'assets/voice/deepseek娘（白露）/白露_qwentts_clean.wav', text: 'assets/voice/deepseek娘（白露）/白露_qwentts_clean.txt' }
-        gpt: { audio: 'assets/voice/gpt娘（阮梅）/阮梅_qwentts_clean.wav', text: 'assets/voice/gpt娘（阮梅）/阮梅_qwentts_clean.txt' }
-        gemini: { audio: 'assets/voice/gemini娘（花火）/花火_qwentts_clean.wav', text: 'assets/voice/gemini娘（花火）/花火_qwentts_clean.txt' }
-        claude: { audio: 'assets/voice/claude娘（布洛妮娅）/布洛妮娅_qwentts_clean.wav', text: 'assets/voice/claude娘（布洛妮娅）/布洛妮娅_qwentts_clean.txt' }
+        deepseek:
+          {
+            audio: 'assets/voice/deepseek娘（白露）/白露_qwentts_clean.wav',
+            text: 'assets/voice/deepseek娘（白露）/白露_qwentts_clean.txt'
+          }
+        gpt:
+          {
+            audio: 'assets/voice/gpt娘（阮梅）/阮梅_qwentts_clean.wav',
+            text: 'assets/voice/gpt娘（阮梅）/阮梅_qwentts_clean.txt'
+          }
+        gemini:
+          {
+            audio: 'assets/voice/gemini娘（花火）/花火_qwentts_clean.wav',
+            text: 'assets/voice/gemini娘（花火）/花火_qwentts_clean.txt'
+          }
+        claude:
+          {
+            audio: 'assets/voice/claude娘（布洛妮娅）/布洛妮娅_qwentts_clean.wav',
+            text: 'assets/voice/claude娘（布洛妮娅）/布洛妮娅_qwentts_clean.txt'
+          }
   postprocess:
     sampleRate: 48000
     loudnessLUFS: -16
     trimSilence: true
     sentenceGapMs: 240
-    sectionGapMs: 600
+    sectionGapMs: 0
 
 template:
   active: daily-deck
@@ -109,7 +141,7 @@ render:
   width: 1920
   height: 1080
   fps: 30
-  pagePaddingSec: 0.6 # 每页语音播完后的停留时间
+  pagePaddingSec: 1.0 # 每条口播念完后的画面停顿时间（秒）
   bgm: { file: "", volumeDb: -9, duckDb: -5 }
 
 publish:

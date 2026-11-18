@@ -427,7 +427,7 @@ export function createDailyDeckAdapter(): TemplateAdapter {
         mascotMode: issue.hostId || issue.hostLive2dModelUrl ? 'fixed-host' : 'per-item',
         bgmAudioUrl: issue.bgmAudioUrl ?? null,
         bgmVolumeDb: issue.bgmVolumeDb ?? -18,
-        pagePaddingSec: issue.pagePaddingSec ?? 0.6,
+        pagePaddingSec: issue.pagePaddingSec ?? 1.0,
         coverFrameCount,
         coverDurationSec,
         coverSpeechSec,
