@@ -137,8 +137,8 @@ button {
 }
 
 .deck-canvas.has-subtitles {
-  padding: 20px 64px 12px;
-  gap: 10px;
+  padding: 14px 64px 48px;
+  gap: 8px;
 }
 
 /* 顶部双层响应式章节进度导航栏 */
@@ -373,43 +373,52 @@ button {
   overflow: hidden;
 }
 
-/* 视频画布最下方居中同步口播字幕槽 */
+/* 视频画布下方居中同步口播字幕槽 */
 .deck-subtitle-dock {
   position: relative;
-  z-index: 15;
-  min-height: 54px;
+  z-index: 25;
+  height: 96px;
   width: 100%;
   flex-shrink: 0;
   display: flex;
   align-items: center;
   justify-content: center;
+  overflow: visible;
   pointer-events: none;
 }
 
 .deck-subtitle-pill {
-  max-width: 1160px;
-  padding: 8px 26px;
-  border-radius: 999px;
-  overflow: hidden;
+  max-width: 1360px;
+  padding: 10px 34px;
+  border-radius: 20px;
   overflow-wrap: anywhere;
-  background: rgba(17, 20, 26, 0.88);
-  border: 1px solid rgba(255, 255, 255, 0.16);
-  box-shadow: 0 8px 22px rgba(10, 12, 16, 0.18);
+  white-space: pre-line;
+  background: rgba(15, 18, 24, 0.9);
+  border: 1.5px solid rgba(255, 255, 255, 0.18);
+  box-shadow: 0 10px 26px rgba(10, 12, 16, 0.22);
   color: #ffffff;
-  font-size: 27px;
-  font-weight: 700;
-  line-height: 1.32;
+  font-size: 40px;
+  font-weight: 800;
+  line-height: 1.28;
   letter-spacing: 0.02em;
   text-align: center;
-  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.45);
+  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.5);
 }
 
-.deck-subtitle-pill.is-long {
-  font-size: 24px;
+.deck-subtitle-pill.is-multiline {
+  font-size: 36px;
+  line-height: 1.26;
+  padding: 9px 32px;
+}
+
+.deck-subtitle-pill.is-three-lines {
+  font-size: 30px;
+  line-height: 1.24;
+  padding: 8px 28px;
 }
 
 .deck-subtitle-dock.no-mascot .deck-subtitle-pill {
-  max-width: 1460px;
+  max-width: 1560px;
 }
 
 .page-turn-stage {
@@ -436,6 +445,10 @@ button {
   height: 100%;
   padding: 30px 48px 28px;
   overflow: hidden;
+}
+
+.deck-canvas.has-subtitles .page-sheet-inner {
+  padding: 22px 48px 18px;
 }
 
 .page-exit-dim {
@@ -810,6 +823,10 @@ button {
   gap: 14px;
   padding: 0;
   overflow: hidden;
+}
+
+.deck-canvas.has-subtitles .news-editorial-layout {
+  gap: 10px;
 }
 
 .news-editorial-layout.has-mascot {

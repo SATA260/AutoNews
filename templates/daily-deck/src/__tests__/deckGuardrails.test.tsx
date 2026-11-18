@@ -6,6 +6,7 @@ import { PAGE_TURN_DURATION_MS } from '../components/deck/PageTransitionStage';
 import { DeckErrorBoundary } from '../components/guard/DeckErrorBoundary';
 import { SAMPLE_DAILY_ISSUE } from '../data/sampleIssue';
 import { HARD_LIMITS, sanitizeDailyIssue } from '../schema/newsSchema';
+import { formatSubtitleLines, measureSubtitleUnits } from '../utils/formatSubtitle';
 import { mediaReadyTracker, transitionTiming } from '../utils/mediaReadyTracker';
 
 beforeEach(() => {
@@ -443,5 +444,78 @@ describe('Layer 2-5: Editorial Deck, Segmented Chapter Bar, Virtual Clock & Erro
     expect(cues).toHaveLength(2);
     expect(cues[0]).toEqual({ text: '第一句字幕正常区间', startSec: 0, endSec: 2.5 });
     expect(cues[1]).toEqual({ text: '第二句重叠起点会顺延', startSec: 2.5, endSec: 4.99 });
+  });
+
+  it('formats long subtitles by breaking on punctuation first or splitting evenly without punctuation', async () => {
+    // 1. 未超单行宽度的短句保持单行不折行
+    expect(formatSubtitleLines('两款已对付费订阅和API开放，因达高风险门槛收紧了安全限制')).toEqual([
+      '两款已对付费订阅和API开放，因达高风险门槛收紧了安全限制',
+    ]);
+
+    // 2. 包含标点的长句优先按语义最均衡的分句标点换行，标点保留在上一行末尾
+    expect(
+      formatSubtitleLines(
+        'Google把任务放进专属隔离虚拟机，付款前也会暂停确认，不过也坦言目前仍可能失败',
+      ),
+    ).toEqual(['Google把任务放进专属隔离虚拟机，', '付款前也会暂停确认，不过也坦言目前仍可能失败']);
+
+    expect(
+      formatSubtitleLines(
+        '编程同档位实测中，新模型比上代用量少近半、得分升近两成半，单任务费用降百分之五十八',
+      ),
+    ).toEqual([
+      '编程同档位实测中，新模型比上代用量少近半、得分升近两成半，',
+      '单任务费用降百分之五十八',
+    ]);
+
+    // 3. 没有可用标点的长句均匀分成两行，且不拆断英文单词和小数版本号
+    const noPunctLines = formatSubtitleLines(
+      'DeepMind最新发布的超大规模强化学习推理引擎已全面向开发者开放测试',
+    );
+    expect(noPunctLines).toHaveLength(2);
+    expect(noPunctLines[0]).toContain('DeepMind');
+    expect(
+      Math.abs(
+        measureSubtitleUnits(noPunctLines[0] ?? '') - measureSubtitleUnits(noPunctLines[1] ?? ''),
+      ),
+    ).toBeLessThanOrEqual(2.5);
+
+    const decimalLines = formatSubtitleLines(
+      '微软今天推出的新一代本地代码模型GPT-6.2和辅助代理系统已经全面开放给个人开发者使用',
+    );
+    expect(decimalLines.join('')).toContain('GPT-6.2');
+    expect(decimalLines.every((l) => !l.endsWith('GPT-6') && !l.startsWith('.2'))).toBe(true);
+
+    // 4. 页面组件渲染超长字幕时应用多行样式并保留换行符
+    render(
+      <NewsDeck
+        initialData={{
+          fps: 30,
+          coverDurationSec: 5,
+          coverSubtitles: [
+            {
+              text: 'OpenAI发布GPT-6.2双模型Astra和Sol，输出字数更少，表现更强',
+              startSec: 0,
+              endSec: 4.5,
+            },
+          ],
+          outroDurationSec: 4,
+          items: [
+            {
+              title: '多行智能排版验证',
+              summary: '验证字幕条在需要换行时自动添加 is-multiline 类名并按标点折行。',
+              durationSec: 5,
+            },
+          ],
+        }}
+      />,
+    );
+
+    await act(async () => {
+      await window.__NEWS_DECK__!.seekTo(1000, 1000 / 30);
+    });
+    const subEl = screen.getByTestId('deck-subtitle-text');
+    expect(subEl).toHaveClass('is-multiline');
+    expect(subEl.textContent).toBe('OpenAI发布GPT-6.2双模型Astra和Sol，\n输出字数更少，表现更强');
   });
 });

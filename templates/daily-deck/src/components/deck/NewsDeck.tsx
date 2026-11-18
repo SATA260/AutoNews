@@ -21,6 +21,7 @@ import {
   type SanitizedSubtitleCue,
   sanitizeDailyIssue,
 } from '../../schema/newsSchema';
+import { formatSubtitleLines } from '../../utils/formatSubtitle';
 import { mediaReadyTracker, transitionTiming } from '../../utils/mediaReadyTracker';
 import { DeckErrorBoundary } from '../guard/DeckErrorBoundary';
 import { ViewportScaler } from '../guard/ViewportScaler';
@@ -1107,6 +1108,9 @@ export const NewsDeck: React.FC<NewsDeckProps> = ({ initialData }) => {
         (cue) => currentLocalSec >= cue.startSec && currentLocalSec < cue.endSec,
       )
     : undefined;
+  const subtitleLines = activeSubtitle
+    ? formatSubtitleLines(activeSubtitle.text, hasVisibleMascot ? 28.5 : 31.5)
+    : [];
 
   const renderPageByIndex = useCallback(
     (pageIdx: number, isExiting: boolean) => {
@@ -1242,14 +1246,18 @@ export const NewsDeck: React.FC<NewsDeckProps> = ({ initialData }) => {
               data-testid="deck-subtitle-dock"
               aria-live="polite"
             >
-              {activeSubtitle && (
+              {subtitleLines.length > 0 && (
                 <div
                   className={`deck-subtitle-pill ${
-                    Array.from(activeSubtitle.text).length >= 26 ? 'is-long' : ''
+                    subtitleLines.length >= 3
+                      ? 'is-multiline is-three-lines'
+                      : subtitleLines.length === 2
+                        ? 'is-multiline'
+                        : ''
                   }`}
                   data-testid="deck-subtitle-text"
                 >
-                  {activeSubtitle.text}
+                  {subtitleLines.join('\n')}
                 </div>
               )}
             </footer>

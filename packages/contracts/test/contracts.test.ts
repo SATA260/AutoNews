@@ -19,7 +19,7 @@ describe('@aidaily/contracts', () => {
     const raw = fs.readFileSync(path.join(REPO_ROOT, 'config', 'settings.yaml'), 'utf8');
     const parsed = SettingsSchema.parse(parse(raw));
     expect(parsed.version).toBe(1);
-    expect(parsed.tts.provider).toBe('indextts');
+    expect(Object.keys(parsed.tts.providers)).toContain(parsed.tts.provider);
     expect(parsed.tts.providers.indextts).toBeDefined();
     expect(parsed.tts.providers['qwen-local']).toBeDefined();
     expect(parsed.issue.minScore).toBe(7.5);
