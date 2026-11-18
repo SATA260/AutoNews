@@ -10,6 +10,7 @@
       "**",
       "!templates",
       "!storage",
+      "!.baocut-out",
       "!tmp",
       "!docs",
       "!config",

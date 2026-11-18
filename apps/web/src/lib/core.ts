@@ -11,6 +11,8 @@ interface GlobalCoreSlot {
   corePromise: Promise<Core>;
   configFingerprint?: string;
   reloadPromise?: Promise<void>;
+  /** 按调用先后排队取用核心引擎的等待链 */
+  accessQueue?: Promise<void>;
 }
 
 const globalSlotHost = globalThis as typeof globalThis & {
@@ -36,6 +38,28 @@ export function getCoreVersion(): string {
   return CORE_VERSION;
 }
 
+/** 等待已有核心引擎就绪；若磁盘上的配置文件被外部修改过，先重载配置再返回 */
+async function refreshSlotIfConfigChanged(slot: GlobalCoreSlot): Promise<Core> {
+  const core = await slot.corePromise;
+  const latestFingerprint = await readConfigFingerprint(core);
+  if (latestFingerprint && slot.configFingerprint && latestFingerprint !== slot.configFingerprint) {
+    if (!slot.reloadPromise) {
+      slot.reloadPromise = core.context
+        .reloadConfig()
+        .then(async () => {
+          slot.configFingerprint = (await readConfigFingerprint(core)) ?? latestFingerprint;
+        })
+        .finally(() => {
+          slot.reloadPromise = undefined;
+        });
+    }
+    await slot.reloadPromise;
+  } else if (latestFingerprint && !slot.configFingerprint) {
+    slot.configFingerprint = latestFingerprint;
+  }
+  return core;
+}
+
 /**
  * 获取或初始化全局核心业务引擎单例；
  * 支持通过 `AIDAILY_ROOT` 环境变量切换目标工作区，并在根目录变更、代码代际升级或磁盘配置更新时自动刷新实例或重载配置。
@@ -50,28 +74,15 @@ export async function getCore(): Promise<Core> {
     existing.generation === CORE_SLOT_GENERATION &&
     existing.rootDirKey === rootDirKey
   ) {
-    const core = await existing.corePromise;
-    const latestFingerprint = await readConfigFingerprint(core);
-    if (
-      latestFingerprint &&
-      existing.configFingerprint &&
-      latestFingerprint !== existing.configFingerprint
-    ) {
-      if (!existing.reloadPromise) {
-        existing.reloadPromise = core.context
-          .reloadConfig()
-          .then(async () => {
-            existing.configFingerprint = (await readConfigFingerprint(core)) ?? latestFingerprint;
-          })
-          .finally(() => {
-            existing.reloadPromise = undefined;
-          });
-      }
-      await existing.reloadPromise;
-    } else if (latestFingerprint && !existing.configFingerprint) {
-      existing.configFingerprint = latestFingerprint;
-    }
-    return core;
+    // 排队按调用先后依次检查配置，保证先发起的请求先拿到核心引擎，避免并发提交时顺序错乱
+    const access = (existing.accessQueue ?? Promise.resolve())
+      .catch(() => undefined)
+      .then(() => refreshSlotIfConfigChanged(existing));
+    existing.accessQueue = access.then(
+      () => undefined,
+      () => undefined,
+    );
+    return access;
   }
 
   const prevCloseChain = (globalSlotHost.__aidailyCoreClosing ?? Promise.resolve()).then(
