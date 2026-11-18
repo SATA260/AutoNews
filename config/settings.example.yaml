@@ -1,0 +1,16 @@
+# 配置示例。真正生效的是 config/settings.yaml。
+# 这里只标出配音相关的可选项，避免把本机密钥写进示例。
+
+tts:
+  provider: qwen-local
+  # 配音全部完成后是否先停下来试听。false 表示配完直接继续合成视频。
+  pauseAfterNarrate: false
+  providers:
+    silent: { charsPerSecond: 4.5 }
+  postprocess:
+    sampleRate: 48000
+    loudnessLUFS: -16
+    trimSilence: true
+    denoise: true
+    sentenceGapMs: 250
+    sectionGapMs: 600

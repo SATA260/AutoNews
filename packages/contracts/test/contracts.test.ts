@@ -5,10 +5,13 @@ import { describe, expect, it } from 'vitest';
 import { parse } from 'yaml';
 import {
   PolishedItemSchema,
+  RETRYABLE_RUN_STATUSES,
+  RunStatusSchema,
   ScheduleTimeSchema,
   SettingsSchema,
   SourcesFileSchema,
   TimelineSchema,
+  UpdateSectionNarrationInputSchema,
   zodToJsonSchema,
 } from '../src/index.js';
 
@@ -24,6 +27,19 @@ describe('@aidaily/contracts', () => {
     expect(parsed.tts.providers['qwen-local']).toBeDefined();
     expect(parsed.issue.minScore).toBe(7.5);
     expect(parsed.publish.bilibili.aiDeclaration).toBe(true);
+    expect(parsed.tts.pauseAfterNarrate).toBe(false);
+    expect(RETRYABLE_RUN_STATUSES).toEqual([
+      'failed',
+      'cancelled',
+      'interrupted',
+      'awaiting_audio_review',
+      'awaiting_review',
+      'rejected',
+      'publish_failed',
+      'published',
+    ]);
+    expect(RunStatusSchema.safeParse('awaiting_audio_review').success).toBe(true);
+    expect(RunStatusSchema.safeParse('published').success).toBe(true);
     expect('itemCount' in parsed.issue).toBe(false);
     expect('schedule' in parsed).toBe(false);
   });
@@ -54,6 +70,29 @@ describe('@aidaily/contracts', () => {
     expect(serialized).not.toContain('maxLength');
     expect(serialized).not.toContain('maxItems');
     expect(serialized).not.toContain('additionalProperties');
+  });
+
+  it('accepts separate speech and subtitle text and does not regenerate audio unless asked', () => {
+    const parsed = UpdateSectionNarrationInputSchema.parse({
+      ttsText: ' 欢迎收看。 ',
+      subtitleText: '欢迎收看今天的节目。',
+    });
+    expect(parsed).toEqual({
+      ttsText: '欢迎收看。',
+      subtitleText: '欢迎收看今天的节目。',
+      regenerateAudio: false,
+    });
+    expect(
+      UpdateSectionNarrationInputSchema.safeParse({ ttsText: '   ', subtitleText: '字幕' }).success,
+    ).toBe(false);
+    expect(
+      UpdateSectionNarrationInputSchema.safeParse({
+        ttsText: '语音',
+        subtitleText: '字幕',
+        regenerateAudio: false,
+        provider: 'qwen-local',
+      }).data,
+    ).toMatchObject({ regenerateAudio: false, provider: 'qwen-local' });
   });
 
   it('validates TimelineSchema', () => {

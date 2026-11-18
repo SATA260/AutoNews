@@ -222,6 +222,33 @@ export function createPublishRepo(db: DatabaseSync) {
       });
     },
 
+    /**
+     * 重新打开已发布任务时，把已发布、仅本地完结或失败的投稿改回可编辑草稿。
+     * 清空当前稿件编号和错误说明，保留已经尝试过的次数。
+     * 正在上传或结果不明的记录不会被改动。
+     */
+    resetForRevive(runId: string, updatedAt: string): PublishRecord | null {
+      return inTransaction(db, () => {
+        const existing = this.getByRun(runId);
+        if (!existing) {
+          return null;
+        }
+        if (
+          existing.status !== 'published' &&
+          existing.status !== 'consumed_only' &&
+          existing.status !== 'failed'
+        ) {
+          return null;
+        }
+        db.prepare(`
+          UPDATE publish_records
+          SET status = 'draft', bvid = NULL, error = NULL, updated_at = ?
+          WHERE run_id = ?
+        `).run(updatedAt, runId);
+        return this.getByRun(runId);
+      });
+    },
+
     /** 查询指定任务对应的投稿记录 */
     getByRun(runId: string): PublishRecord | null {
       const row = db.prepare('SELECT * FROM publish_records WHERE run_id = ?').get(runId) as

@@ -28,8 +28,8 @@ const FILTER_PRESETS: Array<{ key: string; label: string; statuses?: RunStatus[]
   },
   {
     key: 'awaiting_review',
-    label: '待审核 / 待定案',
-    statuses: ['awaiting_review', 'publish_uncertain'],
+    label: '待试听 / 待审核',
+    statuses: ['awaiting_audio_review', 'awaiting_review', 'publish_uncertain'],
   },
   {
     key: 'published',

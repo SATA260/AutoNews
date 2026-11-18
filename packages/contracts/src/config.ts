@@ -102,6 +102,8 @@ export const ModelApiConnectionInputSchema = z
 export const TtsSettingsSchema = z.object({
   provider: z.string().min(1),
   providers: z.record(z.string(), z.record(z.string(), z.unknown())).default({}),
+  /** 配音全部完成后是否先停下来，等人试听满意再合成视频。默认不停，直接继续做视频 */
+  pauseAfterNarrate: z.boolean().default(false),
   postprocess: z.object({
     sampleRate: z.number().int().positive(),
     loudnessLUFS: z.number().min(-70).max(-5),

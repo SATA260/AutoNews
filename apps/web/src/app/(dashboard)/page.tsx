@@ -44,7 +44,10 @@ export default async function DashboardPage() {
     : [null, [] as RunEvent[]];
 
   const reviewPendingRuns = recentRuns.filter(
-    (r) => r.status === 'awaiting_review' || r.status === 'publish_uncertain',
+    (r) =>
+      r.status === 'awaiting_audio_review' ||
+      r.status === 'awaiting_review' ||
+      r.status === 'publish_uncertain',
   );
   const failedRuns = recentRuns.filter(
     (r) => r.status === 'failed' || r.status === 'interrupted' || r.status === 'publish_failed',
@@ -72,7 +75,7 @@ export default async function DashboardPage() {
           <div className="flex flex-wrap items-center justify-between gap-2">
             <div>
               <h3 className="text-sm font-semibold text-amber-900">
-                有 {reviewPendingRuns.length} 期任务等待人工审核或确认投稿结果
+                有 {reviewPendingRuns.length} 期任务等待试听配音、人工审核或确认投稿结果
               </h3>
               <p className="mt-0.5 text-xs text-amber-800">
                 请核对成片画质、简介文案及 AI 声明后决定发布、驳回或仅本地完结。

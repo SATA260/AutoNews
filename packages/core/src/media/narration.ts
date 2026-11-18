@@ -1,23 +1,33 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import type {
-  IssuePackage,
-  NarrationSection,
-  RunItemRecord,
-  SectionAudio,
-  Settings,
-  Timeline,
+import {
+  type IssuePackage,
+  MEDIA_ADJUSTABLE_RUN_STATUSES,
+  type NarrationOverrideMap,
+  NarrationOverrideMapSchema,
+  type NarrationSection,
+  type NarrationSectionView,
+  type RunItemRecord,
+  type SectionAudio,
+  type Settings,
+  SettingsSchema,
+  type Timeline,
+  UpdateSectionNarrationInputSchema,
 } from '@aidaily/contracts';
 import {
+  alignDisplaySentencesToWav,
   buildNarrationParagraph,
   isLocalVoiceCloneProvider,
+  prepareNarrationSentences,
   probeAudioDurationMs,
   QWEN_AUDIO_PROCESSING_VERSION,
 } from '@aidaily/tts';
 import type { CoreContext } from '../context.js';
 import { PipelineError } from '../errors.js';
+import { inTransaction } from '../storage/db.js';
 import { readJsonOrNull, writeJsonAtomic } from '../storage/files.js';
+import { emitRunEvent } from '../workflow/events.js';
 import { buildTimeline } from './timeline.js';
 
 /** 语音合成阶段完成后写入检查点的结果摘要 */
@@ -35,9 +45,9 @@ interface SectionProgressRecord {
   audio: SectionAudio;
 }
 
-/** 计算单个口播段落与当前合成配置的校验摘要，配置或文案变化时使旧进度失效 */
+/** 计算单个口播段落与当前合成配置的校验摘要，配置或语音文案变化时使旧音频失效。画面字幕不参与这个摘要 */
 function computeSectionDigest(section: NarrationSection, settings: Settings): string {
-  const providerId = settings.tts.provider;
+  const providerId = section.provider ?? settings.tts.provider;
   const providerConfig = settings.tts.providers[providerId] ?? {};
   const { sampleRate, loudnessLUFS, trimSilence } = settings.tts.postprocess;
   const denoise = settings.tts.postprocess.denoise ?? true;
@@ -54,10 +64,17 @@ function computeSectionDigest(section: NarrationSection, settings: Settings): st
   return crypto.createHash('sha1').update(payload, 'utf8').digest('hex');
 }
 
+/** 人工保存的分段配音文件名，和整期编排放在一起，重做编排时会一并备份 */
+const NARRATION_OVERRIDES_FILE = 'narration-overrides.json';
+
+/** 段落标识只允许字母、数字、横线和下划线，避免写出任务目录外面 */
+const SECTION_KEY_PATTERN = /^[a-zA-Z0-9_-]+$/;
+
 /** 按最终播出顺序组装本期节目的开场、各条新闻正文及结尾口播段落列表 */
 export function buildNarrationSections(
   pkg: IssuePackage,
   itemsById: ReadonlyMap<string, RunItemRecord>,
+  overrides: NarrationOverrideMap = {},
 ): NarrationSection[] {
   const sections: NarrationSection[] = [
     {
@@ -86,7 +103,139 @@ export function buildNarrationSections(
     sentences: pkg.outro.narration,
   });
 
-  return sections;
+  return sections.map((section) => applySectionOverride(section, overrides[section.key]));
+}
+
+/** 把人工保存的语音、字幕和引擎套到原始段落上。没有修改时保持原稿 */
+function applySectionOverride(
+  section: NarrationSection,
+  override: NarrationOverrideMap[string] | undefined,
+): NarrationSection {
+  if (!override) {
+    return section;
+  }
+  return {
+    ...section,
+    sentences: override.ttsSentences,
+    displaySentences: override.displaySentences,
+    ...(override.provider ? { provider: override.provider } : {}),
+  };
+}
+
+/** 画面字幕优先用人工分句；没有人工分句时用清理后的语音分句 */
+function resolveDisplaySentences(section: NarrationSection): string[] {
+  const custom = section.displaySentences?.map((sentence) => sentence.trim()).filter(Boolean);
+  if (custom && custom.length > 0) {
+    return custom;
+  }
+  return prepareNarrationSentences(section.sentences);
+}
+
+/** 多行文本按行拆开；只有一行时按句号、问号和叹号拆开，方便编辑框里直接改断句 */
+function splitSubtitleText(text: string): string[] {
+  const lines = text
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+  if (lines.length === 0) {
+    throw new Error('字幕文本不能为空');
+  }
+  if (lines.length > 1) {
+    return lines;
+  }
+  const onlyLine = lines[0] ?? '';
+  const parts = onlyLine
+    .split(/(?<=[。！？!?]+)(?![。！？!?])\s*/u)
+    .map((part) => part.trim())
+    .filter(Boolean);
+  return parts.length > 0 ? parts : [onlyLine];
+}
+
+/** 判断两组分句是否逐句相同 */
+function sameSentences(left: readonly string[], right: readonly string[]): boolean {
+  return left.length === right.length && left.every((sentence, index) => sentence === right[index]);
+}
+
+/** 把编辑框里的语音文本整理成适合整段合成的分句 */
+function splitTtsText(text: string): string[] {
+  const lines = text
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+  const prepared = prepareNarrationSentences(lines.length > 0 ? lines : [text]);
+  if (prepared.length === 0) {
+    throw new Error('语音文本清理后为空');
+  }
+  return prepared;
+}
+
+/** 读取本期人工配音修改。文件不存在时当作没有修改 */
+async function readNarrationOverrides(runDir: string): Promise<NarrationOverrideMap> {
+  const raw = await readJsonOrNull<unknown>(path.join(runDir, NARRATION_OVERRIDES_FILE));
+  if (raw === null) {
+    return {};
+  }
+  const parsed = NarrationOverrideMapSchema.safeParse(raw);
+  if (!parsed.success) {
+    throw new Error('配音修改记录无法读取，请恢复原稿后再试');
+  }
+  return parsed.data;
+}
+
+/** 把本期主播和音色摘要写进即将使用的每个语音引擎配置，保证换引擎后仍用同一个主播 */
+async function settingsForNarrationProviders(
+  ctx: CoreContext,
+  runId: string,
+  settings: Settings,
+  providerIds: readonly string[],
+): Promise<Settings> {
+  const row = ctx.db.prepare('SELECT host_id FROM runs WHERE id = ?').get(runId) as
+    | { host_id: string | null }
+    | undefined;
+  const hostId = row?.host_id ?? null;
+  const providers = { ...settings.tts.providers };
+  for (const providerId of new Set(providerIds)) {
+    if (isLocalVoiceCloneProvider(providerId) && !hostId) {
+      throw new PipelineError('tts_failed', '尚未确定本期主播，请从选题阶段重新运行或指定主播');
+    }
+    const providerConfig = {
+      ...(providers[providerId] ?? {}),
+      ...(hostId && isLocalVoiceCloneProvider(providerId) ? { hostId } : {}),
+    };
+    const identity = await ctx.tts.getActiveProvider(providerId).cacheIdentity?.(providerConfig);
+    providers[providerId] = {
+      ...providerConfig,
+      ...(identity ? { referenceHash: identity } : {}),
+    };
+  }
+  return {
+    ...settings,
+    tts: {
+      ...settings.tts,
+      providers,
+    },
+  };
+}
+
+/** 读取任务保存下来的配置。旧配置没有新字段时按默认值补上 */
+function readRunSettings(ctx: CoreContext, runId: string): Settings {
+  const run = ctx.repos.runs.getById(runId);
+  if (!run) {
+    throw new Error(`未找到任务记录: ${runId}`);
+  }
+  const parsed = SettingsSchema.safeParse(JSON.parse(run.configSnapshotJson));
+  if (!parsed.success) {
+    throw new Error(`任务配置快照无效: ${parsed.error.message}`);
+  }
+  return parsed.data;
+}
+
+/** 确认当前状态允许改配音、字幕、配图或背景音乐 */
+function assertNarrationEditable(ctx: CoreContext, runId: string): void {
+  const status = ctx.repos.runs.getById(runId)?.status;
+  if (!status || !MEDIA_ADJUSTABLE_RUN_STATUSES.includes(status)) {
+    throw new Error('当前任务状态不允许修改配音或字幕');
+  }
 }
 
 /**
@@ -109,31 +258,16 @@ export async function runNarrateStage(opts: {
 
   const items = ctx.repos.runItems.listByRun(runId);
   const itemsById = new Map(items.map((i) => [i.id, i]));
-  const sections = buildNarrationSections(packageData, itemsById);
-  const row = ctx.db.prepare('SELECT host_id FROM runs WHERE id = ?').get(runId) as
-    | { host_id: string | null }
-    | undefined;
-  const providerId = settings.tts.provider;
-  if (isLocalVoiceCloneProvider(providerId) && !row?.host_id)
-    throw new PipelineError('tts_failed', '尚未确定本期主播，请从选题阶段重新运行或指定主播');
-  const providerConfig = {
-    ...(settings.tts.providers[providerId] ?? {}),
-    ...(row?.host_id ? { hostId: row.host_id } : {}),
-  };
-  const identity = await ctx.tts.getActiveProvider(providerId).cacheIdentity?.(providerConfig);
-  const effectiveSettings: Settings = {
-    ...settings,
-    tts: {
-      ...settings.tts,
-      providers: {
-        ...settings.tts.providers,
-        [providerId]: { ...providerConfig, ...(identity ? { referenceHash: identity } : {}) },
-      },
-    },
-  };
+  const overrides = await readNarrationOverrides(runDir);
+  const sections = buildNarrationSections(packageData, itemsById, overrides);
+  const effectiveSettings = await settingsForNarrationProviders(ctx, runId, settings, [
+    settings.tts.provider,
+    ...sections.map((section) => section.provider ?? settings.tts.provider),
+  ]);
 
   const savedProgress =
     (await readJsonOrNull<Record<string, SectionProgressRecord>>(progressFile)) ?? {};
+  let progressDirty = false;
   const audioByKey = new Map<string, SectionAudio>();
   const pendingSections: NarrationSection[] = [];
   const digestByKey = new Map<string, string>();
@@ -152,10 +286,32 @@ export async function runNarrateStage(opts: {
           await fs.access(resolvedAudioFile);
           const probedMs = await probeAudioDurationMs(resolvedAudioFile, undefined, signal);
           if (Math.abs(probedMs - prev.audio.speechMs) <= 40) {
-            audioByKey.set(section.key, {
-              ...prev.audio,
-              file: resolvedAudioFile,
-            });
+            const displaySentences = resolveDisplaySentences(section);
+            const savedTexts = prev.audio.sentences.map((sentence) => sentence.text);
+            const displayChanged =
+              displaySentences.length !== savedTexts.length ||
+              displaySentences.some((text, index) => text !== savedTexts[index]);
+            const reusedAudio: SectionAudio = displayChanged
+              ? {
+                  ...prev.audio,
+                  file: resolvedAudioFile,
+                  speechMs: probedMs,
+                  sentences: await alignDisplaySentencesToWav(
+                    resolvedAudioFile,
+                    section.sentences,
+                    displaySentences,
+                    probedMs,
+                  ),
+                }
+              : {
+                  ...prev.audio,
+                  file: resolvedAudioFile,
+                };
+            if (displayChanged) {
+              savedProgress[section.key] = { hash: digest, audio: reusedAudio };
+              progressDirty = true;
+            }
+            audioByKey.set(section.key, reusedAudio);
             continue;
           }
         } catch {
@@ -231,6 +387,10 @@ export async function runNarrateStage(opts: {
     orderedAudio.push(audio);
   }
 
+  if (progressDirty) {
+    await writeJsonAtomic(progressFile, savedProgress);
+  }
+
   const timeline = buildTimeline({
     sections,
     audioSections: orderedAudio,
@@ -251,4 +411,325 @@ export async function runNarrateStage(opts: {
     },
     timeline,
   };
+}
+
+/** 读取整期编排。还没编排完时不能单独改某一段配音 */
+async function loadIssuePackage(ctx: CoreContext, runId: string): Promise<IssuePackage> {
+  const raw = await readJsonOrNull<{ packageData?: IssuePackage }>(
+    path.join(ctx.paths.runDir(runId), 'stages', 'package.json'),
+  );
+  if (!raw?.packageData) {
+    throw new Error('还没有整期编排，不能修改配音');
+  }
+  return raw.packageData;
+}
+
+/** 给页面用的段落名称：开场、第几条新闻、片尾 */
+function sectionLabel(
+  section: NarrationSection,
+  itemsById: ReadonlyMap<string, RunItemRecord>,
+  itemOrdinal: number,
+): string {
+  if (section.kind === 'intro') {
+    return '开场导语';
+  }
+  if (section.kind === 'outro') {
+    return '片尾总结';
+  }
+  const title = section.itemId ? itemsById.get(section.itemId)?.finalJson?.shortTitle : undefined;
+  return title ? `第${itemOrdinal}条 ${title}` : `第${itemOrdinal}条`;
+}
+
+/** 按当前配音进度重写整期时间轴，让字幕和每段音频时长重新对齐 */
+async function rebuildTimeline(
+  ctx: CoreContext,
+  runId: string,
+  settings: Settings,
+  sections: NarrationSection[],
+): Promise<Timeline> {
+  const runDir = ctx.paths.runDir(runId);
+  const progressFile = path.join(runDir, 'audio', 'sections-progress.json');
+  const saved = (await readJsonOrNull<Record<string, SectionProgressRecord>>(progressFile)) ?? {};
+  const audioSections: SectionAudio[] = [];
+  for (const section of sections) {
+    const audio = saved[section.key]?.audio;
+    if (!audio?.file) {
+      throw new Error(`缺少段落 ${section.key} 的配音，请先生成本段音频`);
+    }
+    audioSections.push(audio);
+  }
+  const timeline = buildTimeline({
+    sections,
+    audioSections,
+    runDir,
+    pagePaddingSec: settings.render.pagePaddingSec,
+    sectionGapMs: settings.tts.postprocess.sectionGapMs,
+  });
+  await writeJsonAtomic(path.join(runDir, 'timeline.json'), timeline);
+  return timeline;
+}
+
+/** 把某一段新的音频结果写进配音进度，供下次整期配音直接复用 */
+async function saveSectionProgress(
+  runDir: string,
+  section: NarrationSection,
+  settings: Settings,
+  audio: SectionAudio,
+  preserveHash?: string,
+): Promise<void> {
+  const progressFile = path.join(runDir, 'audio', 'sections-progress.json');
+  const saved = (await readJsonOrNull<Record<string, SectionProgressRecord>>(progressFile)) ?? {};
+  saved[section.key] = {
+    hash: preserveHash ?? computeSectionDigest(section, settings),
+    audio,
+  };
+  await writeJsonAtomic(progressFile, saved);
+}
+
+/** 配音或字幕变了之后，作废已合成的画面，等人工确认再重新做视频 */
+function markAudiovisualStale(
+  ctx: CoreContext,
+  runId: string,
+  sectionKey: string,
+  detail: { regenerateAudio: boolean; provider: string; reset?: boolean },
+): void {
+  inTransaction(ctx.db, () => {
+    ctx.db.prepare('UPDATE runs SET media_dirty = 1 WHERE id = ?').run(runId);
+    ctx.repos.runStages.markStaleFrom(runId, ['render', 'qa']);
+    emitRunEvent(ctx, {
+      runId,
+      level: 'info',
+      stage: 'narrate',
+      type: 'section_narration_updated',
+      message: detail.reset
+        ? `已恢复「${sectionKey}」的原稿并重新配音`
+        : detail.regenerateAudio
+          ? `已按所选语音引擎重新生成「${sectionKey}」`
+          : `已保存「${sectionKey}」的字幕文本，原配音保持不变`,
+      data: { sectionKey, ...detail },
+    });
+  });
+}
+
+/** 列出每一段当前的语音文本、字幕文本、引擎和音频，供页面编辑 */
+export async function listNarrationSectionViews(
+  ctx: CoreContext,
+  runId: string,
+): Promise<NarrationSectionView[]> {
+  const runDir = ctx.paths.runDir(runId);
+  const packageFile = path.join(runDir, 'stages', 'package.json');
+  const rawPackage = await readJsonOrNull<{ packageData?: IssuePackage }>(packageFile);
+  if (!rawPackage?.packageData) {
+    return [];
+  }
+  const settings = readRunSettings(ctx, runId);
+  const items = ctx.repos.runItems.listByRun(runId);
+  const itemsById = new Map(items.map((item) => [item.id, item]));
+  const overrides = await readNarrationOverrides(runDir);
+  const sections = buildNarrationSections(rawPackage.packageData, itemsById, overrides);
+  const timeline = await readJsonOrNull<Timeline>(path.join(runDir, 'timeline.json'));
+  let itemOrdinal = 0;
+  return sections.map((section) => {
+    if (section.kind === 'item') {
+      itemOrdinal += 1;
+    }
+    const timelineSection = timeline?.sections.find((item) => item.key === section.key);
+    const subtitleSentences =
+      section.displaySentences ??
+      timelineSection?.sentences.map((sentence) => sentence.text) ??
+      section.sentences;
+    const audioFile = timelineSection?.audioFile ?? null;
+    return {
+      key: section.key,
+      kind: section.kind,
+      itemId: section.itemId,
+      label: sectionLabel(section, itemsById, itemOrdinal),
+      ttsText: section.sentences.join('\n'),
+      subtitleText: subtitleSentences.join('\n'),
+      provider: section.provider ?? settings.tts.provider,
+      audioFile,
+      speechMs: timelineSection?.speechMs ?? null,
+      hasOverride: Boolean(overrides[section.key]),
+    };
+  });
+}
+
+/** 保存某一段的语音文本和字幕。可以选择只改字幕，或按指定引擎重新生成这一段音频 */
+export async function updateSingleSectionNarration(
+  ctx: CoreContext,
+  runId: string,
+  sectionKey: string,
+  rawInput: unknown,
+): Promise<NarrationSectionView> {
+  if (!SECTION_KEY_PATTERN.test(sectionKey)) {
+    throw new Error(`非法的口播段落标识: ${sectionKey}`);
+  }
+  assertNarrationEditable(ctx, runId);
+  const input = UpdateSectionNarrationInputSchema.parse(rawInput);
+  const settings = readRunSettings(ctx, runId);
+  if (input.provider && !Object.hasOwn(settings.tts.providers, input.provider)) {
+    throw new Error(`未配置语音合成引擎: ${input.provider}`);
+  }
+  const runDir = ctx.paths.runDir(runId);
+  const packageData = await loadIssuePackage(ctx, runId);
+  const itemsById = new Map(ctx.repos.runItems.listByRun(runId).map((item) => [item.id, item]));
+  const overrides = await readNarrationOverrides(runDir);
+  const currentSections = buildNarrationSections(packageData, itemsById, overrides);
+  const current = currentSections.find((section) => section.key === sectionKey);
+  if (!current) {
+    throw new Error(`未找到口播段落: ${sectionKey}`);
+  }
+
+  const requestedTts = splitTtsText(input.ttsText);
+  const displaySentences = splitSubtitleText(input.subtitleText);
+  const currentProvider = current.provider ?? settings.tts.provider;
+  let ttsSentences = requestedTts;
+  let provider = input.provider;
+  if (!input.regenerateAudio) {
+    const spokenSentences = prepareNarrationSentences(current.sentences);
+    const ttsUnchanged =
+      sameSentences(requestedTts, current.sentences) ||
+      sameSentences(requestedTts, spokenSentences);
+    const providerUnchanged = !input.provider || input.provider === currentProvider;
+    if (!ttsUnchanged || !providerUnchanged) {
+      throw new Error(
+        '仅保存字幕时不能修改语音文本或语音引擎。若要改读音或换引擎，请重新生成本段音频',
+      );
+    }
+    // 字幕对齐必须使用已经合成进音频的原句，不能改用编辑框里尚未重配的语音文本
+    ttsSentences = current.sentences;
+    provider = current.provider;
+  }
+  const nextOverrides: NarrationOverrideMap = {
+    ...overrides,
+    [sectionKey]: {
+      ttsSentences,
+      displaySentences,
+      ...(provider ? { provider } : {}),
+    },
+  };
+  const nextSections = buildNarrationSections(packageData, itemsById, nextOverrides);
+  const nextSection = nextSections.find((section) => section.key === sectionKey);
+  if (!nextSection) {
+    throw new Error(`未找到口播段落: ${sectionKey}`);
+  }
+
+  const audioDir = path.join(runDir, 'audio');
+  const effectiveSettings = await settingsForNarrationProviders(ctx, runId, settings, [
+    provider ?? settings.tts.provider,
+  ]);
+  const progressFile = path.join(audioDir, 'sections-progress.json');
+  const saved = (await readJsonOrNull<Record<string, SectionProgressRecord>>(progressFile)) ?? {};
+
+  if (input.regenerateAudio) {
+    const [audio] = await ctx.tts.synthesizeSections([nextSection], audioDir, {
+      settingsOverride: effectiveSettings.tts,
+    });
+    if (!audio) {
+      throw new Error(`段落 ${sectionKey} 没有生成音频`);
+    }
+    await saveSectionProgress(runDir, nextSection, effectiveSettings, audio);
+  } else {
+    const existingFile = saved[sectionKey]?.audio.file ?? path.join(audioDir, `${sectionKey}.wav`);
+    const resolved = path.resolve(existingFile);
+    const resolvedAudioDir = path.resolve(audioDir);
+    if (!resolved.startsWith(`${resolvedAudioDir}${path.sep}`)) {
+      throw new Error(`段落音频路径越界: ${sectionKey}`);
+    }
+    try {
+      await fs.access(resolved);
+    } catch {
+      throw new Error('当前段落还没有配音，请先重新生成本段音频');
+    }
+    const speechMs = await probeAudioDurationMs(resolved);
+    const sentences = await alignDisplaySentencesToWav(
+      resolved,
+      ttsSentences,
+      displaySentences,
+      speechMs,
+    );
+    if (sentences.length === 0) {
+      throw new Error('字幕文本不能为空');
+    }
+    await saveSectionProgress(
+      runDir,
+      nextSection,
+      effectiveSettings,
+      {
+        key: sectionKey,
+        file: resolved,
+        speechMs,
+        sentences,
+      },
+      saved[sectionKey]?.hash,
+    );
+  }
+
+  await writeJsonAtomic(path.join(runDir, NARRATION_OVERRIDES_FILE), nextOverrides);
+  await rebuildTimeline(ctx, runId, settings, nextSections);
+  markAudiovisualStale(ctx, runId, sectionKey, {
+    regenerateAudio: input.regenerateAudio,
+    provider: provider ?? settings.tts.provider,
+  });
+  const views = await listNarrationSectionViews(ctx, runId);
+  const view = views.find((item) => item.key === sectionKey);
+  if (!view) {
+    throw new Error(`未找到口播段落: ${sectionKey}`);
+  }
+  return view;
+}
+
+/** 去掉某一段的人工修改，按原稿和当前默认引擎重新生成音频 */
+export async function resetSingleSectionNarration(
+  ctx: CoreContext,
+  runId: string,
+  sectionKey: string,
+): Promise<NarrationSectionView> {
+  if (!SECTION_KEY_PATTERN.test(sectionKey)) {
+    throw new Error(`非法的口播段落标识: ${sectionKey}`);
+  }
+  assertNarrationEditable(ctx, runId);
+  const settings = readRunSettings(ctx, runId);
+  const runDir = ctx.paths.runDir(runId);
+  const packageData = await loadIssuePackage(ctx, runId);
+  const itemsById = new Map(ctx.repos.runItems.listByRun(runId).map((item) => [item.id, item]));
+  const overrides = await readNarrationOverrides(runDir);
+  if (!overrides[sectionKey]) {
+    const views = await listNarrationSectionViews(ctx, runId);
+    const existing = views.find((item) => item.key === sectionKey);
+    if (!existing) {
+      throw new Error(`未找到口播段落: ${sectionKey}`);
+    }
+    return existing;
+  }
+  const nextOverrides = { ...overrides };
+  delete nextOverrides[sectionKey];
+  const nextSections = buildNarrationSections(packageData, itemsById, nextOverrides);
+  const nextSection = nextSections.find((section) => section.key === sectionKey);
+  if (!nextSection) {
+    throw new Error(`未找到口播段落: ${sectionKey}`);
+  }
+  const effectiveSettings = await settingsForNarrationProviders(ctx, runId, settings, [
+    settings.tts.provider,
+  ]);
+  const [audio] = await ctx.tts.synthesizeSections([nextSection], path.join(runDir, 'audio'), {
+    settingsOverride: effectiveSettings.tts,
+  });
+  if (!audio) {
+    throw new Error(`段落 ${sectionKey} 没有生成音频`);
+  }
+  await saveSectionProgress(runDir, nextSection, effectiveSettings, audio);
+  await writeJsonAtomic(path.join(runDir, NARRATION_OVERRIDES_FILE), nextOverrides);
+  await rebuildTimeline(ctx, runId, settings, nextSections);
+  markAudiovisualStale(ctx, runId, sectionKey, {
+    regenerateAudio: true,
+    provider: settings.tts.provider,
+    reset: true,
+  });
+  const views = await listNarrationSectionViews(ctx, runId);
+  const view = views.find((item) => item.key === sectionKey);
+  if (!view) {
+    throw new Error(`未找到口播段落: ${sectionKey}`);
+  }
+  return view;
 }

@@ -54,7 +54,10 @@ export function RunLiveLogPanel({
         });
         if (
           parsed.type === 'stage_done' ||
+          parsed.type === 'awaiting_audio_review' ||
           parsed.type === 'awaiting_review' ||
+          parsed.type === 'run_revived' ||
+          parsed.type === 'section_narration_updated' ||
           parsed.type === 'run_failed' ||
           parsed.type === 'run_cancelled' ||
           parsed.type === 'run_published' ||

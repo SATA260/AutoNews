@@ -51,6 +51,7 @@ export const RunStatusSchema = z.enum([
   'failed',
   'cancelled',
   'interrupted',
+  'awaiting_audio_review',
   'awaiting_review',
   'rejected',
   'publishing',
@@ -67,8 +68,20 @@ export const RETRYABLE_RUN_STATUSES: readonly RunStatus[] = [
   'failed',
   'cancelled',
   'interrupted',
-  'rejected',
+  'awaiting_audio_review',
   'awaiting_review',
+  'rejected',
+  'publish_failed',
+  'published',
+] as const;
+
+/** 允许在页面上改配音、字幕、配图或背景音乐的任务状态 */
+export const MEDIA_ADJUSTABLE_RUN_STATUSES: readonly RunStatus[] = [
+  'awaiting_audio_review',
+  'awaiting_review',
+  'rejected',
+  'publish_failed',
+  'published',
 ] as const;
 
 /** 任务是如何启动的：命令行手动启动、网页后台手动启动或定时任务自动启动 */

@@ -7,6 +7,7 @@ import type { TtsSettings } from '@aidaily/contracts';
 import { execa } from 'execa';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
+  alignDisplaySentencesToWav,
   alignSentencesToWav,
   computeTtsCacheKey,
   createIndexTtsProvider,
@@ -29,6 +30,7 @@ function baseSettings(provider = 'silent'): TtsSettings {
     providers: {
       silent: { charsPerSecond: 10 },
     },
+    pauseAfterNarrate: false,
     postprocess: {
       sampleRate: 48000,
       loudnessLUFS: -16,
@@ -212,6 +214,115 @@ describe('@aidaily/tts', () => {
       prevEndMs = cue.offsetMs + cue.durationMs;
     }
     expect(prevEndMs).toBeLessThanOrEqual(400);
+  });
+
+  it('keeps manual subtitle text when aligning the same or a different sentence count', async () => {
+    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'aidaily-tts-display-'));
+    tempDirs.push(tmpDir);
+    const wavPath = path.join(tmpDir, 'two-sentences.wav');
+    await execa('ffmpeg', [
+      '-y',
+      '-f',
+      'lavfi',
+      '-i',
+      'sine=frequency=440:sample_rate=48000:duration=1.66',
+      '-af',
+      'volume=0.45:enable=between(t\\,0\\,0.60),volume=0.0:enable=between(t\\,0.60\\,0.90),volume=0.45:enable=between(t\\,0.90\\,1.50),volume=0.0:enable=between(t\\,1.50\\,1.66)',
+      '-ar',
+      '48000',
+      '-ac',
+      '1',
+      '-c:a',
+      'pcm_s16le',
+      wavPath,
+    ]);
+
+    const matched = await alignDisplaySentencesToWav(
+      wavPath,
+      ['第一句故意写得稍微短一些。', '第二句在后面包含稍微多一点的内容用来检验停顿低谷吸附。'],
+      ['画面字幕甲。', '画面字幕乙。'],
+      1660,
+    );
+    expect(matched.map((cue) => cue.text)).toEqual(['画面字幕甲。', '画面字幕乙。']);
+    expect(matched[1]?.offsetMs).toBeGreaterThanOrEqual(550);
+    expect(matched[1]?.offsetMs).toBeLessThanOrEqual(920);
+    let previousEnd = 0;
+    for (const cue of matched) {
+      expect(cue.offsetMs).toBeGreaterThanOrEqual(previousEnd);
+      expect(cue.durationMs).toBeGreaterThan(0);
+      previousEnd = cue.offsetMs + cue.durationMs;
+    }
+
+    const split = await alignDisplaySentencesToWav(
+      wavPath,
+      ['只有一句语音稿。'],
+      ['字幕一', '字幕二', '字幕三'],
+      1660,
+    );
+    expect(split.map((cue) => cue.text)).toEqual(['字幕一', '字幕二', '字幕三']);
+    previousEnd = 0;
+    for (const cue of split) {
+      expect(cue.offsetMs).toBeGreaterThanOrEqual(previousEnd);
+      expect(cue.durationMs).toBeGreaterThan(0);
+      expect(cue.offsetMs + cue.durationMs).toBeLessThanOrEqual(1660);
+      previousEnd = cue.offsetMs + cue.durationMs;
+    }
+  });
+
+  it('synthesizes the speech text only and can switch engine per section', async () => {
+    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'aidaily-tts-provider-'));
+    tempDirs.push(tmpDir);
+    const spoken: string[] = [];
+    const makeProvider = (id: string): TtsProvider => ({
+      id,
+      async healthcheck() {
+        return { ok: true, detail: 'ok' };
+      },
+      async synthesize(req) {
+        spoken.push(`${id}:${req.text}`);
+        await execa('ffmpeg', [
+          '-y',
+          '-f',
+          'lavfi',
+          '-i',
+          'sine=frequency=440:duration=0.4',
+          '-ar',
+          '48000',
+          '-ac',
+          '1',
+          req.outFile,
+        ]);
+      },
+    });
+    const service = new TtsService({
+      settings: baseSettings('engine-a'),
+      cacheDir: path.join(tmpDir, 'cache'),
+    });
+    service.register(makeProvider('engine-a'));
+    service.register(makeProvider('engine-b'));
+    const sections = await service.synthesizeSections(
+      [
+        {
+          key: 'intro',
+          kind: 'intro',
+          provider: 'engine-a',
+          sentences: ['语音甲。'],
+          displaySentences: ['字幕甲'],
+        },
+        {
+          key: 'item-01',
+          kind: 'item',
+          itemId: 'i1',
+          provider: 'engine-b',
+          sentences: ['语音乙。'],
+          displaySentences: ['字幕乙一', '字幕乙二'],
+        },
+      ],
+      path.join(tmpDir, 'out'),
+    );
+    expect(spoken).toEqual(['engine-a:语音甲。', 'engine-b:语音乙。']);
+    expect(sections[0]?.sentences.map((cue) => cue.text)).toEqual(['字幕甲']);
+    expect(sections[1]?.sentences.map((cue) => cue.text)).toEqual(['字幕乙一', '字幕乙二']);
   });
 
   it('hits cache on repeat synthesis without re-invoking provider', async () => {

@@ -19,6 +19,8 @@ import {
   parseBvidFromOutput,
   recoverStaleRuns,
   resolveBiliCookieFile,
+  resumeRun,
+  runNarrateStage,
   updateSettingsFile,
   writeJsonAtomic,
 } from '../src/index.js';
@@ -441,6 +443,14 @@ describe('Bilibili publishing, AI declaration, consumption, and uncertain recove
 
       const again = await core.publish.getCover(runId);
       expect(again.source).toBe('manual');
+
+      core.context.repos.runs.updateStatus(runId, 'published');
+      const republished = await core.publish.updateCover(runId, {
+        title: '已发布后的*新封面*',
+        subtitle: '只换封面',
+      });
+      expect(republished.text).toEqual({ title: '已发布后的*新封面*', subtitle: '只换封面' });
+      expect(core.context.repos.runs.getById(runId)?.status).toBe('published');
     } finally {
       await core.close();
     }
@@ -823,4 +833,176 @@ describe('Bilibili publishing, AI declaration, consumption, and uncertain recove
 
     await core.close();
   });
+
+  it('reopens a published run from render, keeps the old video, and requires a manual second upload', async () => {
+    const { rootDir, stateFile } = await setupPublishWorkspace({ mode: 'auto' });
+    await updateSettingsFile(path.join(rootDir, 'config', 'settings.yaml'), {
+      tts: { provider: 'silent' },
+    });
+    const core = await createCore({ rootDir, now: () => new Date('2026-11-18T08:00:00.000Z') });
+    const runId = createRun(core.context, { itemCount: 1, trigger: 'manual-web' });
+    await seedCompletedRunReadyForReview(core, runId, 'art-unused');
+    const packageCheckpoint = JSON.parse(
+      await fs.readFile(
+        path.join(core.context.paths.runDir(runId), 'stages', 'package.json'),
+        'utf8',
+      ),
+    ) as { packageData: import('@aidaily/contracts').IssuePackage };
+    const packageData = packageCheckpoint.packageData;
+    await runNarrateStage({
+      ctx: core.context,
+      runId,
+      settings: core.context.settings,
+      packageData,
+    });
+    for (const [stage, rel] of [
+      ['collect', 'stages/collect.json'],
+      ['select', 'stages/select.json'],
+      ['edit', 'stages/edit.json'],
+      ['package', 'stages/package.json'],
+      ['narrate', 'stages/narrate.json'],
+    ] as const) {
+      const abs = path.join(core.context.paths.runDir(runId), rel);
+      await fs.mkdir(path.dirname(abs), { recursive: true });
+      try {
+        await fs.access(abs);
+      } catch {
+        await fs.writeFile(abs, '{}\n');
+      }
+      core.context.repos.runStages.markStage(runId, stage, 'done', { checkpointPath: rel });
+    }
+
+    await core.publish.approve(runId, { retryDelaysMs: [0] });
+    expect(core.context.repos.runs.getById(runId)?.status).toBe('published');
+    expect(core.context.repos.publish.getByRun(runId)?.bvid).toBe('BV1NM411P7a9');
+    expect(core.context.repos.articles.getById('art-used')?.status).toBe('consumed');
+    expect(core.context.repos.history.listRecent('2020-01-01T00:00:00.000Z')).toHaveLength(1);
+    await expect(core.publish.updateDraft(runId, { description: '还不能改' })).rejects.toThrow(
+      /不允许修改/,
+    );
+
+    const nowIso = '2026-11-18T09:00:00.000Z';
+    core.context.repos.articles.insertIfAbsent({
+      id: 'art-locked',
+      sourceId: 'openai-blog',
+      canonicalUrl: 'https://openai.com/news/locked-by-other',
+      title: '被其他任务占用的文章',
+      titleNorm: '被其他任务占用的文章',
+      lang: 'en',
+      publishedAt: nowIso,
+      firstSeenAt: nowIso,
+      excerpt: 'Locked elsewhere.',
+      contentPath: 'storage/articles/art-locked.txt',
+      contentChars: 120,
+      imagePath: null,
+      extractStatus: 'ok',
+    });
+    core.context.repos.articles.markReserved(['art-locked'], 'other-run');
+    core.context.repos.events.insertMany([
+      {
+        id: 'ev-locked',
+        runId,
+        rank: 9,
+        role: 'reserve',
+        refillRound: 0,
+        title: '被其他任务占用的文章',
+        category: '行业',
+        entity: 'Other',
+        score: 5,
+        publicAppeal: 5,
+        reason: '用来确认不会抢走别人的文章',
+        articleIds: ['art-locked'],
+      },
+    ]);
+
+    const introWav = path.join(core.context.paths.runDir(runId), 'audio', 'intro.wav');
+    const wavBefore = await fs.readFile(introWav);
+    await core.tasks.updateSectionNarration(runId, 'intro', {
+      ttsText: '欢迎收看今天的 AI 每日报。',
+      subtitleText: '只改画面字幕',
+      regenerateAudio: false,
+    });
+    expect(await fs.readFile(introWav)).toEqual(wavBefore);
+    const timeline = JSON.parse(
+      await fs.readFile(path.join(core.context.paths.runDir(runId), 'timeline.json'), 'utf8'),
+    ) as import('@aidaily/contracts').Timeline;
+    expect(timeline.sections[0]?.sentences[0]?.text).toBe('只改画面字幕');
+    expect(
+      core.context.repos.runStages.listByRun(runId).find((s) => s.stage === 'render')?.status,
+    ).toBe('stale');
+
+    const callsBeforeResume = JSON.parse(await fs.readFile(stateFile, 'utf8')) as {
+      calls: string[][];
+    };
+    await resumeRun(core.context, runId, {
+      stageOverrides: {
+        render: async ({ ctx, runId: currentId }) => {
+          const outputDir = path.join(ctx.paths.runDir(currentId), 'output');
+          await fs.mkdir(outputDir, { recursive: true });
+          await fs.writeFile(path.join(outputDir, 'video.mp4'), 'revived-mp4');
+          await fs.writeFile(path.join(outputDir, 'cover.jpg'), 'revived-jpg');
+          return { rendered: true };
+        },
+        qa: async () => ({ passed: true }),
+      },
+    });
+
+    const callsAfterResume = JSON.parse(await fs.readFile(stateFile, 'utf8')) as {
+      calls: string[][];
+    };
+    expect(callsAfterResume.calls).toHaveLength(callsBeforeResume.calls.length);
+    expect(core.context.repos.runs.getById(runId)?.status).toBe('awaiting_review');
+    expect(core.context.repos.publish.getByRun(runId)).toMatchObject({
+      status: 'draft',
+      bvid: null,
+    });
+    expect(
+      core.context.repos.runEvents
+        .listAfter(runId, 0, 500)
+        .some(
+          (event) =>
+            event.type === 'run_revived' &&
+            typeof event.data === 'object' &&
+            event.data !== null &&
+            (event.data as { bvid?: string }).bvid === 'BV1NM411P7a9',
+        ),
+    ).toBe(true);
+    expect(core.context.repos.history.listRecent('2020-01-01T00:00:00.000Z')).toHaveLength(0);
+    expect(core.context.repos.articles.getById('art-used')).toMatchObject({
+      status: 'reserved',
+      reservedByRun: runId,
+    });
+    expect(core.context.repos.articles.getById('art-locked')).toMatchObject({
+      status: 'reserved',
+      reservedByRun: 'other-run',
+    });
+    const archived = await fs.readdir(path.join(core.context.paths.runDir(runId), 'archive'), {
+      recursive: true,
+    });
+    const archivedVideo = archived
+      .map((entry) => String(entry))
+      .find((entry) => entry.endsWith('video.mp4'));
+    expect(archivedVideo).toBeTruthy();
+    expect(
+      await fs.readFile(
+        path.join(core.context.paths.runDir(runId), 'archive', archivedVideo ?? ''),
+      ),
+    ).toEqual(Buffer.from('fake-mp4-content'));
+
+    const revised = await core.publish.updateDraft(runId, {
+      description: '重做后的简介，加入新的章节说明。',
+    });
+    expect(revised.description).toContain('重做后的简介');
+    await fs.writeFile(
+      stateFile,
+      JSON.stringify({ mode: 'ok', bvid: 'BV1CL411P7a2', calls: callsAfterResume.calls }),
+      'utf8',
+    );
+    await core.publish.approve(runId, { retryDelaysMs: [0] });
+    expect(core.context.repos.runs.getById(runId)?.status).toBe('published');
+    expect(core.context.repos.publish.getByRun(runId)?.bvid).toBe('BV1CL411P7a2');
+    expect(core.context.repos.articles.getById('art-used')?.status).toBe('consumed');
+
+    await core.close();
+  }, 60_000);
 });

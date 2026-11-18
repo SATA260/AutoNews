@@ -557,6 +557,7 @@ export async function updateWorkflowSettingsAction(formData: FormData): Promise<
         reservationHoldHours: z.number().int().positive(),
         maxRevisions: z.number().int().min(0).max(5),
         ttsProvider: z.string().trim().min(1).optional(),
+        pauseAfterNarrate: z.boolean(),
         activeTemplate: z.string().trim().min(1),
         pagePaddingSec: z.number().nonnegative(),
         bgmVolumeDb: z.number().min(-30).max(0).optional(),
@@ -587,6 +588,7 @@ export async function updateWorkflowSettingsAction(formData: FormData): Promise<
         ...(typeof rawTtsProvider === 'string' && rawTtsProvider.trim()
           ? { ttsProvider: rawTtsProvider.trim() }
           : {}),
+        pauseAfterNarrate: parseBooleanField(formData.get('pauseAfterNarrate')),
         activeTemplate: formData.get('activeTemplate'),
         pagePaddingSec: parseRequiredNumberField(
           formData.get('pagePaddingSec'),
@@ -644,7 +646,10 @@ export async function updateWorkflowSettingsAction(formData: FormData): Promise<
       editorial: {
         maxRevisions: parsed.maxRevisions,
       },
-      ...(parsed.ttsProvider !== undefined ? { tts: { provider: parsed.ttsProvider } } : {}),
+      tts: {
+        ...(parsed.ttsProvider !== undefined ? { provider: parsed.ttsProvider } : {}),
+        pauseAfterNarrate: parsed.pauseAfterNarrate,
+      },
       template: {
         active: parsed.activeTemplate,
       },
@@ -802,6 +807,54 @@ export async function setItemImageAction(formData: FormData): Promise<ActionResu
     });
     safeRevalidate(`/runs/${runId}`);
     return { ok: true, message: '图片设置已保存，请重新合成视频' };
+  } catch (error) {
+    return { ok: false, error: error instanceof Error ? error.message : String(error) };
+  }
+}
+
+/** 保存某一段的语音文本和字幕。可以只改字幕，或按所选引擎重做这一段音频 */
+export async function updateSectionNarrationAction(formData: FormData): Promise<ActionResult> {
+  try {
+    const runId = RunIdSchema.parse(formData.get('runId'));
+    const sectionKey = z
+      .string()
+      .trim()
+      .regex(/^[a-zA-Z0-9_-]+$/, '段落标识无效')
+      .parse(formData.get('sectionKey'));
+    const providerRaw = formData.get('provider');
+    const provider = typeof providerRaw === 'string' ? providerRaw.trim() : '';
+    const core = await getCore();
+    await core.tasks.updateSectionNarration(runId, sectionKey, {
+      ttsText: String(formData.get('ttsText') ?? ''),
+      subtitleText: String(formData.get('subtitleText') ?? ''),
+      ...(provider ? { provider } : {}),
+      regenerateAudio: parseBooleanField(formData.get('regenerateAudio')),
+    });
+    safeRevalidate(`/runs/${runId}`);
+    return {
+      ok: true,
+      message: parseBooleanField(formData.get('regenerateAudio'))
+        ? '已重新生成本段配音'
+        : '已保存字幕文本，原配音保持不变',
+    };
+  } catch (error) {
+    return { ok: false, error: error instanceof Error ? error.message : String(error) };
+  }
+}
+
+/** 取消某一段的人工修改，并按原稿重新生成这一段音频 */
+export async function resetSectionNarrationAction(formData: FormData): Promise<ActionResult> {
+  try {
+    const runId = RunIdSchema.parse(formData.get('runId'));
+    const sectionKey = z
+      .string()
+      .trim()
+      .regex(/^[a-zA-Z0-9_-]+$/, '段落标识无效')
+      .parse(formData.get('sectionKey'));
+    const core = await getCore();
+    await core.tasks.resetSectionNarration(runId, sectionKey);
+    safeRevalidate(`/runs/${runId}`);
+    return { ok: true, message: '已恢复这一段的原稿并重新配音' };
   } catch (error) {
     return { ok: false, error: error instanceof Error ? error.message : String(error) };
   }

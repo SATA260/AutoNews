@@ -8,6 +8,8 @@ import {
   HostMascotIdSchema,
   type ItemVersion,
   type LlmCallRecord,
+  MEDIA_ADJUSTABLE_RUN_STATUSES,
+  type NarrationSectionView,
   PIPELINE_STAGES,
   RETRYABLE_RUN_STATUSES,
   type RetryOptions,
@@ -23,6 +25,11 @@ import {
 import type { CoreContext } from '../context.js';
 import type { EditSubStep } from '../editorial/item-pipeline.js';
 import { listBgmFiles } from '../media/bgm.js';
+import {
+  listNarrationSectionViews,
+  resetSingleSectionNarration,
+  updateSingleSectionNarration,
+} from '../media/narration.js';
 import { resolveSafeArtifactPath } from '../paths.js';
 import { inTransaction } from '../storage/db.js';
 import { readJsonOrNull, writeFileAtomic } from '../storage/files.js';
@@ -84,14 +91,24 @@ export interface TaskWatchOptions {
 export interface TaskService {
   /** 列出可用于新任务的背景音乐。 */
   listBgm(): Promise<string[]>;
-  /** 修改待审核任务的配图设置。 */
+  /** 修改配图。待试听、待审核、已驳回、发布失败和已完成的任务都可以改 */
   setItemImage(
     runId: string,
     itemId: string,
     input: { mode: 'auto' | 'none' | 'custom'; data?: Uint8Array; caption?: string },
   ): Promise<void>;
-  /** 修改待审核任务的背景音乐。 */
+  /** 修改背景音乐。待试听、待审核、已驳回、发布失败和已完成的任务都可以改 */
   setBgm(runId: string, bgmFile: string): Promise<void>;
+  /** 读取每一段当前的语音文本、字幕文本和音频，供页面编辑 */
+  getNarrationSections(runId: string): Promise<NarrationSectionView[]>;
+  /** 保存某一段的语音文本和字幕，并按需要只重做这一段音频 */
+  updateSectionNarration(
+    runId: string,
+    sectionKey: string,
+    input: unknown,
+  ): Promise<NarrationSectionView>;
+  /** 取消某一段的人工修改，按原稿重新生成这一段音频 */
+  resetSectionNarration(runId: string, sectionKey: string): Promise<NarrationSectionView>;
   /** 创建并启动新一期视频生产任务（新闻条数必须显式指定为正整数） */
   start(opts: TaskStartOptions): Promise<{ runId: string }>;
   /** 恢复中断或失败的任务，或指定从某个历史步骤重新向后运行 */
@@ -188,6 +205,8 @@ function isWatchingTerminalStatus(status: RunStatus, configSnapshotJson: string)
     case 'running':
     case 'publishing':
       return false;
+    case 'awaiting_audio_review':
+      return true;
     case 'awaiting_review': {
       // 自动发布模式在审阅点会紧接着直接发起上传，因此继续观察直到发布落定
       try {
@@ -270,8 +289,9 @@ export function createTaskService(ctx: CoreContext): TaskService {
     },
     /** 保存图片后更新条目设置。 */
     async setItemImage(runId, itemId, input) {
-      if (ctx.repos.runs.getById(runId)?.status !== 'awaiting_review')
-        throw new Error('只有待审核任务可以修改配图');
+      const runStatus = ctx.repos.runs.getById(runId)?.status;
+      if (!runStatus || !MEDIA_ADJUSTABLE_RUN_STATUSES.includes(runStatus))
+        throw new Error('当前任务状态不允许修改配图');
       const item = ctx.repos.runItems.getById(itemId);
       if (!item || item.runId !== runId || item.status !== 'passed')
         throw new Error('未找到本期已通过的新闻条目');
@@ -300,7 +320,7 @@ export function createTaskService(ctx: CoreContext): TaskService {
         inTransaction(ctx.db, () => {
           const result = ctx.db
             .prepare(
-              "UPDATE run_items SET image_mode = ?, custom_image_path = ?, custom_image_caption = ?, updated_at = ? WHERE id = ? AND run_id = ? AND EXISTS (SELECT 1 FROM runs WHERE id = ? AND status = 'awaiting_review')",
+              `UPDATE run_items SET image_mode = ?, custom_image_path = ?, custom_image_caption = ?, updated_at = ? WHERE id = ? AND run_id = ? AND EXISTS (SELECT 1 FROM runs WHERE id = ? AND status IN (${MEDIA_ADJUSTABLE_RUN_STATUSES.map(() => '?').join(', ')}))`,
             )
             .run(
               input.mode,
@@ -310,6 +330,7 @@ export function createTaskService(ctx: CoreContext): TaskService {
               itemId,
               runId,
               runId,
+              ...MEDIA_ADJUSTABLE_RUN_STATUSES,
             );
           if (Number(result.changes) !== 1) throw new Error('任务状态已改变，请刷新后重试');
           ctx.db.prepare('UPDATE runs SET media_dirty = 1 WHERE id = ?').run(runId);
@@ -329,10 +350,10 @@ export function createTaskService(ctx: CoreContext): TaskService {
       inTransaction(ctx.db, () => {
         const result = ctx.db
           .prepare(
-            "UPDATE runs SET bgm_file = ?, media_dirty = 1 WHERE id = ? AND status = 'awaiting_review'",
+            `UPDATE runs SET bgm_file = ?, media_dirty = 1 WHERE id = ? AND status IN (${MEDIA_ADJUSTABLE_RUN_STATUSES.map(() => '?').join(', ')})`,
           )
-          .run(bgmFile, runId);
-        if (Number(result.changes) !== 1) throw new Error('只有待审核任务可以修改背景音乐');
+          .run(bgmFile, runId, ...MEDIA_ADJUSTABLE_RUN_STATUSES);
+        if (Number(result.changes) !== 1) throw new Error('当前任务状态不允许修改背景音乐');
         ctx.repos.runStages.markStaleFrom(runId, ['render', 'qa']);
       });
     },
@@ -550,6 +571,24 @@ export function createTaskService(ctx: CoreContext): TaskService {
       });
     },
 
+    /** 读取每一段当前的语音文本、字幕文本和音频 */
+    async getNarrationSections(runId) {
+      if (!ctx.repos.runs.getById(runId)) {
+        throw new Error(`未找到任务记录: ${runId}`);
+      }
+      return listNarrationSectionViews(ctx, runId);
+    },
+
+    /** 保存某一段配音或字幕修改 */
+    async updateSectionNarration(runId, sectionKey, input) {
+      return updateSingleSectionNarration(ctx, runId, sectionKey, input);
+    },
+
+    /** 恢复某一段原稿并重新配音 */
+    async resetSectionNarration(runId, sectionKey) {
+      return resetSingleSectionNarration(ctx, runId, sectionKey);
+    },
+
     /** 查询指定任务当前可用的继续与重跑入口 */
     async getRetryOptions(runId: string): Promise<RetryOptions> {
       return getRunRetryOptions(ctx, runId);
@@ -594,6 +633,9 @@ export function createTaskService(ctx: CoreContext): TaskService {
         status: run.status,
         currentStage: run.currentStage,
         itemCount: run.itemCount,
+        hostId: run.hostId,
+        bgmFile: run.bgmFile,
+        mediaDirty: run.mediaDirty,
         attempt: run.attempt,
         errorCode: run.errorCode,
         error: run.error,

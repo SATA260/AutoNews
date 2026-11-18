@@ -10,10 +10,58 @@ export const NarrationSectionSchema = z.object({
   key: z.string().min(1),
   kind: NarrationSectionKindSchema,
   itemId: z.string().optional(),
+  /** 实际送进语音引擎的分句。画面字幕可以和这些句子不同 */
   sentences: z.array(z.string().min(1)).min(1),
+  /** 只显示在画面上的字幕分句。不填时画面字幕与语音分句相同 */
+  displaySentences: z.array(z.string().min(1)).optional(),
+  /** 这一段单独使用的语音引擎。不填时用全局当前引擎 */
+  provider: z.string().min(1).optional(),
 });
 /** 语音合成段落输入类型 */
 export type NarrationSection = z.infer<typeof NarrationSectionSchema>;
+
+/** 人工保存的某一段配音：语音分句、画面字幕分句，以及可选的单独引擎 */
+export const SectionNarrationOverrideSchema = z.object({
+  ttsSentences: z.array(z.string().min(1)).min(1),
+  displaySentences: z.array(z.string().min(1)).min(1),
+  provider: z.string().min(1).optional(),
+});
+/** 单段配音人工修改记录 */
+export type SectionNarrationOverride = z.infer<typeof SectionNarrationOverrideSchema>;
+
+/** 按段落标识保存的整期配音修改 */
+export const NarrationOverrideMapSchema = z.record(
+  z.string().min(1),
+  SectionNarrationOverrideSchema,
+);
+/** 整期配音修改表 */
+export type NarrationOverrideMap = z.infer<typeof NarrationOverrideMapSchema>;
+
+/** 页面上编辑某一段配音时看到的当前文案、引擎和音频 */
+export const NarrationSectionViewSchema = z.object({
+  key: z.string().min(1),
+  kind: NarrationSectionKindSchema,
+  itemId: z.string().optional(),
+  label: z.string().min(1),
+  ttsText: z.string().min(1),
+  subtitleText: z.string().min(1),
+  provider: z.string().min(1),
+  audioFile: z.string().nullable(),
+  speechMs: z.number().nonnegative().nullable(),
+  hasOverride: z.boolean(),
+});
+/** 单段配音的页面展示数据 */
+export type NarrationSectionView = z.infer<typeof NarrationSectionViewSchema>;
+
+/** 保存某一段配音修改时提交的文本、引擎，以及是否重新生成音频 */
+export const UpdateSectionNarrationInputSchema = z.object({
+  ttsText: z.string().trim().min(1, '请填写语音用的文本'),
+  subtitleText: z.string().trim().min(1, '请填写字幕展示的文本'),
+  provider: z.string().trim().min(1).optional(),
+  regenerateAudio: z.boolean().default(false),
+});
+/** 保存单段配音修改的输入 */
+export type UpdateSectionNarrationInput = z.infer<typeof UpdateSectionNarrationInputSchema>;
 
 /** 段落内部每一句话的音频起始位置与时长（毫秒） */
 export const SentenceTimingSchema = z.object({

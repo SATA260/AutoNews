@@ -14,6 +14,7 @@ export const RUN_STATUS_TEXT: Record<RunStatus, string> = {
   failed: '已失败',
   cancelled: '已取消',
   interrupted: '已中断',
+  awaiting_audio_review: '待试听配音',
   awaiting_review: '待人工审核',
   rejected: '已驳回',
   publishing: '上传发布中',
@@ -74,6 +75,7 @@ export function runStatusBadgeClass(status: RunStatus): string {
   switch (status) {
     case 'published':
       return 'bg-emerald-100 text-emerald-800 border-emerald-200';
+    case 'awaiting_audio_review':
     case 'awaiting_review':
       return 'bg-amber-100 text-amber-800 border-amber-200';
     case 'running':

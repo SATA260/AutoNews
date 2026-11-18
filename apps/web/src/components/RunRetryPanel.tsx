@@ -1,6 +1,6 @@
 'use client';
 
-import { PIPELINE_STAGES, type RetryOptions, type Stage } from '@aidaily/contracts';
+import { PIPELINE_STAGES, type RetryOptions, type RunStatus, type Stage } from '@aidaily/contracts';
 import { useRouter } from 'next/navigation';
 import { useState, useTransition } from 'react';
 import { abandonRunAction, resumeRunAction } from '@/app/actions';
@@ -11,10 +11,12 @@ export function RunRetryPanel({
   runId,
   retryOptions,
   retryDeadlineFormatted,
+  runStatus,
 }: {
   runId: string;
   retryOptions: RetryOptions;
   retryDeadlineFormatted: string;
+  runStatus?: RunStatus;
 }) {
   const router = useRouter();
   const [useLatestConfig, setUseLatestConfig] = useState(false);
@@ -87,13 +89,19 @@ export function RunRetryPanel({
     return PIPELINE_STAGES.slice(idx);
   };
 
+  const published = runStatus === 'published';
+
   return (
     <div className="rounded-xl border border-amber-200 bg-amber-50/70 p-4 shadow-sm">
       <div className="flex flex-wrap items-center justify-between gap-2">
         <div>
-          <h3 className="text-sm font-semibold text-slate-900">任务恢复与指定阶段重跑</h3>
+          <h3 className="text-sm font-semibold text-slate-900">
+            {published ? '复活已发布任务并从指定阶段重跑' : '任务恢复与指定阶段重跑'}
+          </h3>
           <p className="mt-0.5 text-xs text-slate-600">
-            已预留的文章与检查点保留至：{retryDeadlineFormatted}
+            {published
+              ? '旧成片会自动备份到 archive/。重跑完成后进入待审核，可以改简介，再选择投稿或仅本地完结。'
+              : `已预留的文章与检查点保留至：${retryDeadlineFormatted}`}
           </p>
         </div>
 
@@ -134,14 +142,16 @@ export function RunRetryPanel({
           </button>
         ))}
 
-        <button
-          type="button"
-          disabled={isPending}
-          onClick={handleAbandon}
-          className="ml-auto rounded-lg border border-rose-300 bg-white px-3 py-2 text-xs font-medium text-rose-700 hover:bg-rose-50 disabled:opacity-50"
-        >
-          放弃本期并释放文章
-        </button>
+        {published ? null : (
+          <button
+            type="button"
+            disabled={isPending}
+            onClick={handleAbandon}
+            className="ml-auto rounded-lg border border-rose-300 bg-white px-3 py-2 text-xs font-medium text-rose-700 hover:bg-rose-50 disabled:opacity-50"
+          >
+            放弃本期并释放文章
+          </button>
+        )}
       </div>
 
       {feedbackMessage}

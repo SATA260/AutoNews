@@ -1349,4 +1349,109 @@ describe('editorial workflow, TTS timeline, interruption recovery, and retry eng
       await core.close();
     }
   }, 30_000);
+
+  it('pauses after narration when requested, then continues through video review', async () => {
+    const { rootDir } = await setupWorkflowWorkspace();
+    const now = new Date('2026-11-16T08:00:00.000Z');
+    const mockFetch = makeFeedMockFetch([
+      {
+        slug: 'pause-item',
+        title: '开源语音模型发布可离线试听版本',
+        pubDate: 'Mon, 16 Nov 2026 07:20:00 GMT',
+        body: '研究团队发布可在本地离线运行的语音模型，用户可以先试听再决定是否生成完整视频。',
+      },
+    ]);
+    const core = await createCore({ rootDir, fetchImpl: mockFetch, now: () => now });
+    try {
+      await core.config.updateSettings({ tts: { pauseAfterNarrate: true } });
+      const runId = createRun(core.context, { itemCount: 1, trigger: 'manual-web' });
+      await executeRun(core.context, runId, { stageOverrides: STUB_RENDER_QA });
+      expect(core.context.repos.runs.getById(runId)?.status).toBe('awaiting_audio_review');
+      expect(
+        core.context.repos.runStages.listByRun(runId).find((stage) => stage.stage === 'narrate')
+          ?.status,
+      ).toBe('done');
+      expect(
+        core.context.repos.runStages.listByRun(runId).find((stage) => stage.stage === 'render')
+          ?.status,
+      ).toBe('pending');
+
+      core.context.repos.articles.releaseByRun(runId);
+      const stoppedId = createRun(core.context, { itemCount: 1, trigger: 'manual-web' });
+      await executeRun(core.context, stoppedId, {
+        stopAfterStage: 'narrate',
+        stageOverrides: STUB_RENDER_QA,
+      });
+      expect(core.context.repos.runs.getById(stoppedId)?.status).toBe('awaiting_audio_review');
+
+      await resumeRun(core.context, runId, { stageOverrides: STUB_RENDER_QA });
+      expect(core.context.repos.runs.getById(runId)?.status).toBe('awaiting_review');
+      expect(
+        core.context.repos.runStages.listByRun(runId).find((stage) => stage.stage === 'qa')?.status,
+      ).toBe('done');
+    } finally {
+      await core.close();
+    }
+  }, 90_000);
+
+  it('reopens a consumed run from selection and from one news item without running out of candidates', async () => {
+    const { rootDir } = await setupWorkflowWorkspace();
+    const now = new Date('2026-11-16T08:00:00.000Z');
+    const articleUrl = 'https://primary.example.com/revive-select';
+    const articleId = computeArticleId(articleUrl);
+    const mockFetch = makeFeedMockFetch([
+      {
+        slug: 'revive-select',
+        title: '本地绘图模型开始支持中文海报排版',
+        pubDate: 'Mon, 16 Nov 2026 07:10:00 GMT',
+        body: '新版本让本地绘图模型可以直接排出中文海报，创作者无需再把文字交给外部服务处理。',
+      },
+    ]);
+    const core = await createCore({ rootDir, fetchImpl: mockFetch, now: () => now });
+    try {
+      const runId = createRun(core.context, { itemCount: 1, trigger: 'manual-web' });
+      await executeRun(core.context, runId, { stageOverrides: STUB_RENDER_QA });
+      expect(core.context.repos.runs.getById(runId)?.status).toBe('awaiting_review');
+      await core.publish.markConsumed(runId);
+      expect(core.context.repos.articles.getById(articleId)?.status).toBe('consumed');
+      expect(
+        core.context.repos.history
+          .listRecent('2020-01-01T00:00:00.000Z')
+          .filter((record) => record.runId === runId),
+      ).toHaveLength(1);
+
+      await resumeRun(core.context, runId, {
+        fromStage: 'select',
+        stageOverrides: STUB_RENDER_QA,
+      });
+      expect(core.context.repos.runs.getById(runId)?.status).toBe('awaiting_review');
+      expect(core.context.repos.articles.getById(articleId)).toMatchObject({
+        status: 'reserved',
+        reservedByRun: runId,
+      });
+      expect(
+        core.context.repos.history
+          .listRecent('2020-01-01T00:00:00.000Z')
+          .filter((record) => record.runId === runId),
+      ).toHaveLength(0);
+      await core.publish.markConsumed(runId);
+      expect(core.context.repos.articles.getById(articleId)?.status).toBe('consumed');
+
+      const item = core.context.repos.runItems
+        .listByRun(runId)
+        .find((entry) => entry.status === 'passed');
+      expect(item?.id).toBeTruthy();
+      await retryRunItems(core.context, runId, [item?.id ?? ''], {
+        stageOverrides: STUB_RENDER_QA,
+      });
+      expect(core.context.repos.runs.getById(runId)?.status).toBe('awaiting_review');
+      expect(
+        core.context.repos.runEvents
+          .listAfter(runId, 0, 500)
+          .some((event) => event.type === 'run_revived'),
+      ).toBe(true);
+    } finally {
+      await core.close();
+    }
+  }, 180_000);
 });

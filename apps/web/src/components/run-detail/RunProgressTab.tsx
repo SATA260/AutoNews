@@ -40,6 +40,7 @@ export function RunProgressTab({
   const auditEvents = runEvents.filter(
     (ev) =>
       ev.type === 'retry_started' ||
+      ev.type === 'run_revived' ||
       ev.type === 'run_abandoned' ||
       ev.type === 'stage_failed' ||
       ev.type === 'run_interrupted' ||
@@ -86,6 +87,7 @@ export function RunProgressTab({
         runId={detail.id}
         retryOptions={retryOptions}
         retryDeadlineFormatted={retryDeadlineFormatted}
+        runStatus={detail.status}
       />
 
       <RunLiveLogPanel runId={detail.id} initialEvents={runEvents} isActive={isActive} />

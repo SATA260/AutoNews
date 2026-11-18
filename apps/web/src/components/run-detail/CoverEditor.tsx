@@ -143,7 +143,7 @@ export function CoverEditor({
             {pending ? '正在重新生成封面…' : '保存并重新生成封面'}
           </button>
           {!editable ? (
-            <p className="text-xs text-slate-500">只有待审核或投稿失败的任务可以修改封面。</p>
+            <p className="text-xs text-slate-500">只有待审核、投稿失败或已发布的任务可以修改封面。</p>
           ) : (
             <p className="text-xs text-slate-500">只重新生成封面图片，不会重新合成视频。</p>
           )}

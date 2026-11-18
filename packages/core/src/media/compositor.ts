@@ -595,6 +595,7 @@ export async function runRenderStage(opts: {
               : null,
           ),
           coverLipSync: dataObj.coverLipSync,
+          coverSubtitles: dataObj.coverSubtitles,
         };
       }
       if (secIdx >= timeline.sections.length - 1) {
@@ -610,6 +611,7 @@ export async function runRenderStage(opts: {
               : null,
           ),
           outroLipSync: dataObj.outroLipSync,
+          outroSubtitles: dataObj.outroSubtitles,
         };
       }
       return {

@@ -1,5 +1,6 @@
 /** 通知系统支持的事件类型 */
 export type NotifyEventType =
+  | 'awaiting_audio_review'
   | 'awaiting_review'
   | 'failed'
   | 'published'

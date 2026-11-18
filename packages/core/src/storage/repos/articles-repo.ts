@@ -277,6 +277,36 @@ export function createArticlesRepo(db: DatabaseSync) {
       return Number(res.changes);
     },
 
+    /**
+     * 把已经发布过的这一期关联文章退回可再次使用的状态。
+     * 只改无人占用或仍属于本期的文章，不会抢走其他期次正在使用的文章。
+     * release_to_new 退回待选；rereserve 重新标成由本期占用。
+     */
+    reviveArticlesForRun(
+      articleIds: string[],
+      runId: string,
+      mode: 'release_to_new' | 'rereserve',
+    ): number {
+      const uniqueIds = Array.from(new Set(articleIds.filter((id) => id.trim().length > 0)));
+      if (uniqueIds.length === 0) {
+        return 0;
+      }
+      return inTransaction(db, () => {
+        const placeholders = uniqueIds.map(() => '?').join(', ');
+        const nextStatus = mode === 'release_to_new' ? 'new' : 'reserved';
+        const nextOwner = mode === 'release_to_new' ? null : runId;
+        const res = db
+          .prepare(`
+            UPDATE articles
+            SET status = ?, reserved_by_run = ?
+            WHERE id IN (${placeholders})
+              AND (reserved_by_run IS NULL OR reserved_by_run = ?)
+          `)
+          .run(nextStatus, nextOwner, ...uniqueIds, runId);
+        return Number(res.changes);
+      });
+    },
+
     /** 在确认发布或人工标记已消费后，将对应文章正式标记为已播出，返回实际更新篇数 */
     markConsumed(articleIds: string[], runId: string): number {
       const uniqueIds = Array.from(new Set(articleIds));
@@ -356,6 +386,12 @@ export function createHistoryRepo(db: DatabaseSync) {
         articleUrls: JSON.parse(row.article_urls) as string[],
         publishedAt: row.published_at,
       }));
+    },
+
+    /** 删除某一期此前写入的已播记录，避免重新选题时被自己上一版结果排掉 */
+    deleteByRun(runId: string): number {
+      const res = db.prepare('DELETE FROM published_history WHERE run_id = ?').run(runId);
+      return Number(res.changes);
     },
 
     /** 按发布时间倒序查询历史已播事件列表（供后台历史页展示） */

@@ -75,8 +75,8 @@ export interface CoverTextPatch {
   subtitle?: string;
 }
 
-/** 允许修改封面的任务状态：待审核与投稿失败 */
-const COVER_EDITABLE_STATUSES = new Set(['awaiting_review', 'publish_failed']);
+/** 允许修改封面的任务状态：待审核、投稿失败，以及已经发布、需要重做封面的任务 */
+const COVER_EDITABLE_STATUSES = new Set(['awaiting_review', 'publish_failed', 'published']);
 
 /** 统计字符串的完整 Unicode 字符个数 */
 function countCodepoints(text: string): number {
@@ -459,7 +459,7 @@ export function createPublishService(
       }
       if (!COVER_EDITABLE_STATUSES.has(run.status)) {
         throw new Error(
-          `任务 ${runId} 当前状态为 ${run.status}，只有待审核或投稿失败的任务可以修改封面`,
+          `任务 ${runId} 当前状态为 ${run.status}，只有待审核、投稿失败或已发布的任务可以修改封面`,
         );
       }
       const current = await readCoverState(ctx, runId);

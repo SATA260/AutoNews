@@ -507,6 +507,7 @@ export function WorkflowSettingsForm({ settings }: { settings: Settings }) {
     retry: settings.retry,
     editorial: settings.editorial,
     ttsProvider: settings.tts.provider,
+    pauseAfterNarrate: settings.tts.pauseAfterNarrate,
     activeTemplate: settings.template.active,
     pagePaddingSec: settings.render.pagePaddingSec,
     bgmVolumeDb: settings.render.bgm.volumeDb,
@@ -654,6 +655,18 @@ export function WorkflowSettingsForm({ settings }: { settings: Settings }) {
           </label>
         </div>
 
+        <div className="flex items-end pb-1.5">
+          <label className="inline-flex items-center gap-2 text-xs font-medium text-slate-700">
+            <input
+              name="pauseAfterNarrate"
+              type="checkbox"
+              defaultChecked={settings.tts.pauseAfterNarrate}
+              value="true"
+              className="h-4 w-4 rounded border-slate-300"
+            />
+            配音完成后先停下来试听，确认后再合成视频
+          </label>
+        </div>
         <div>
           <label className="block text-xs font-medium text-slate-700">
             语音合成引擎

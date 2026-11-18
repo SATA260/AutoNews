@@ -293,6 +293,88 @@ async function invalidateStagesAndArchive(
   }
 }
 
+/** 收集这一期选题和成稿里关联过的文章编号 */
+function collectAssociatedArticleIds(ctx: CoreContext, runId: string): string[] {
+  const ids = new Set<string>();
+  for (const event of ctx.repos.events.listByRun(runId)) {
+    for (const articleId of event.articleIds) {
+      ids.add(articleId);
+    }
+  }
+  for (const item of ctx.repos.runItems.listByRun(runId)) {
+    for (const evidence of item.finalJson?.evidence ?? []) {
+      if (evidence.articleId) {
+        ids.add(evidence.articleId);
+      }
+    }
+  }
+  return Array.from(ids);
+}
+
+/**
+ * 已发布的任务要重新制作时，先记下原投稿编号，把投稿改回草稿，
+ * 清掉这一期的已播记录，并按重跑起点退回文章占用。
+ * 从抓取或选题重跑时文章回到待选；从后面的步骤重跑时重新标成本期占用。
+ */
+function revivePublishedRunIfNeeded(
+  ctx: CoreContext,
+  runId: string,
+  startStage: PipelineStage,
+): { revived: boolean; hadBvid: boolean } {
+  const run = ctx.repos.runs.getById(runId);
+  if (!run) {
+    return { revived: false, hadBvid: false };
+  }
+  const publish = ctx.repos.publish.getByRun(runId);
+  const publishStatus = publish?.status ?? null;
+  const shouldRevive =
+    run.status === 'published' ||
+    publishStatus === 'published' ||
+    publishStatus === 'consumed_only';
+  if (!shouldRevive) {
+    return { revived: false, hadBvid: false };
+  }
+  if (publishStatus === 'publishing' || publishStatus === 'uncertain') {
+    throw new Error('投稿正在上传或结果尚未确认，请先处理投稿状态后再重新制作');
+  }
+
+  const bvid = publish?.bvid?.trim() ? publish.bvid.trim() : null;
+  const articleIds = collectAssociatedArticleIds(ctx, runId);
+  const mode = startStage === 'collect' || startStage === 'select' ? 'release_to_new' : 'rereserve';
+  const nowIso = ctx.now().toISOString();
+  inTransaction(ctx.db, () => {
+    emitRunEvent(ctx, {
+      runId,
+      level: 'info',
+      stage: startStage,
+      type: 'run_revived',
+      message: bvid
+        ? `已重新打开本期任务。原投稿编号 ${bvid} 已记入日志，投稿改回可编辑草稿`
+        : '已重新打开本期任务，投稿改回可编辑草稿',
+      data: {
+        previousStatus: run.status,
+        previousPublishStatus: publishStatus,
+        bvid,
+        startStage,
+      },
+    });
+    ctx.repos.publish.resetForRevive(runId, nowIso);
+    ctx.repos.history.deleteByRun(runId);
+    ctx.repos.articles.reviveArticlesForRun(articleIds, runId, mode);
+  });
+  return { revived: true, hadBvid: Boolean(bvid) };
+}
+
+/** 这次重跑是否从一份已经在 B 站发布过的稿件重新开始。有编号时不能再静默投稿 */
+function revivedRunHasBvid(ctx: CoreContext, runId: string): boolean {
+  const event = ctx.repos.runEvents.latestByType(runId, 'run_revived');
+  if (!event?.data || typeof event.data !== 'object') {
+    return false;
+  }
+  const bvid = (event.data as { bvid?: unknown }).bvid;
+  return typeof bvid === 'string' && bvid.trim().length > 0;
+}
+
 /** 内部持锁后的主流程顺序执行器 */
 async function executePipelineStagesLocked(opts: {
   ctx: CoreContext;
@@ -312,9 +394,17 @@ async function executePipelineStagesLocked(opts: {
   const { ctx, runId, settings, startStage, stopAfterStage, stageOverrides, limitsOverride } = opts;
 
   const startIdx = PIPELINE_STAGES.indexOf(startStage);
+  const narrateIdx = PIPELINE_STAGES.indexOf('narrate');
+  // 配音后停下试听：没指定停止步骤，或明确停在配音步骤时，都进入试听而不是中断
+  const pauseAfterNarrate =
+    settings.tts.pauseAfterNarrate === true &&
+    startIdx <= narrateIdx &&
+    (stopAfterStage === undefined || stopAfterStage === 'narrate');
   const stopIdx = stopAfterStage
     ? PIPELINE_STAGES.indexOf(stopAfterStage)
-    : PIPELINE_STAGES.length - 1;
+    : pauseAfterNarrate
+      ? narrateIdx
+      : PIPELINE_STAGES.length - 1;
   if (stopIdx < startIdx) {
     throw new Error(`非法的步骤范围：起始 ${startStage} 晚于终止 ${stopAfterStage}`);
   }
@@ -487,7 +577,7 @@ async function executePipelineStagesLocked(opts: {
         runId,
         message: `第 ${runId} 期成片已完成，等待人工审核发布`,
       });
-      if (settings.publish.mode === 'auto') {
+      if (settings.publish.mode === 'auto' && !revivedRunHasBvid(ctx, runId)) {
         inPublishPhase = true;
         if (opts.onAwaitingReview) {
           await opts.onAwaitingReview({ ctx, runId, settings });
@@ -504,6 +594,25 @@ async function executePipelineStagesLocked(opts: {
           });
         }
       }
+    } else if (pauseAfterNarrate && lastStage === 'narrate') {
+      ctx.repos.runs.updateStatus(runId, 'awaiting_audio_review', {
+        currentStage: 'narrate',
+        pid: null,
+        finishedAt: finishedIso,
+        retryDeadlineAt: null,
+      });
+      emitRunEvent(ctx, {
+        runId,
+        level: 'info',
+        stage: 'narrate',
+        type: 'awaiting_audio_review',
+        message: '配音已完成，请试听。满意后再继续合成视频',
+      });
+      await ctx.notifier.notify({
+        type: 'awaiting_audio_review',
+        runId,
+        message: `第 ${runId} 期配音已完成，等待试听确认`,
+      });
     } else {
       ctx.repos.runs.updateStatus(runId, 'interrupted', {
         currentStage: lastStage ?? null,
@@ -709,8 +818,10 @@ export async function resumeRun(
       });
     }
 
+    const revival = revivePublishedRunIfNeeded(ctx, runId, startStage);
     const attempt = ctx.repos.runs.incrementAttempt(runId);
-    if (opts?.fromStage) {
+    const archivePreviousOutput = Boolean(opts?.fromStage) || revival.revived;
+    if (archivePreviousOutput) {
       await invalidateStagesAndArchive(ctx, runId, startStage, attempt);
     }
 
@@ -719,7 +830,7 @@ export async function resumeRun(
       level: 'info',
       stage: startStage,
       type: 'retry_started',
-      message: opts?.fromStage
+      message: archivePreviousOutput
         ? `开始第 ${attempt} 次尝试：从阶段 ${startStage} 重新执行（旧产物已归档）`
         : `开始第 ${attempt} 次尝试：从断点阶段 ${startStage} 继续执行`,
       data: {
@@ -727,6 +838,7 @@ export async function resumeRun(
         startStage,
         attempt,
         useLatestConfig: Boolean(opts?.useLatestConfig),
+        revived: revival.revived,
       },
     });
 
@@ -832,6 +944,7 @@ export async function retryRunItems(
     }
 
     const fromStep = opts?.fromStep ?? 'summarize';
+    revivePublishedRunIfNeeded(ctx, runId, 'edit');
     const attempt = ctx.repos.runs.incrementAttempt(runId);
     await invalidateStagesAndArchive(ctx, runId, 'package', attempt);
 

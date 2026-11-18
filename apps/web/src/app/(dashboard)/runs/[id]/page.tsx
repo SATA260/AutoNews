@@ -1,4 +1,5 @@
 import {
+  MEDIA_ADJUSTABLE_RUN_STATUSES,
   type QaReport,
   QaReportSchema,
   RETRYABLE_RUN_STATUSES,
@@ -12,6 +13,7 @@ import { PublishControls } from '@/components/PublishControls';
 import { RunCancelButton } from '@/components/RunCancelAndItemActions';
 import { CoverEditor } from '@/components/run-detail/CoverEditor';
 import { MediaAdjustments } from '@/components/run-detail/MediaAdjustments';
+import { NarrationSectionEditor } from '@/components/run-detail/NarrationSectionEditor';
 import { RunItemsTab } from '@/components/run-detail/RunItemsTab';
 import { RunLlmTab } from '@/components/run-detail/RunLlmTab';
 import { RunMediaTab } from '@/components/run-detail/RunMediaTab';
@@ -305,6 +307,13 @@ export default async function RunDetailPage({
               }
             }
 
+            const canAdjustMedia = MEDIA_ADJUSTABLE_RUN_STATUSES.includes(detail.status);
+            const narrationSections = canAdjustMedia
+              ? await core.tasks.getNarrationSections(detail.id).catch(() => [])
+              : [];
+            const renderStage = detail.stages.find((stage) => stage.stage === 'render');
+            const renderStale = renderStage?.status === 'stale';
+
             return (
               <div className="space-y-4">
                 {mediaWarnings.length > 0 ? (
@@ -314,7 +323,17 @@ export default async function RunDetailPage({
                     ))}
                   </div>
                 ) : null}
-                {detail.status === 'awaiting_review' ? (
+                {canAdjustMedia && narrationSections.length > 0 ? (
+                  <NarrationSectionEditor
+                    runId={detail.id}
+                    sections={narrationSections}
+                    providers={Object.keys(settings.tts.providers)}
+                    runStatus={detail.status}
+                    mediaDirty={detail.mediaDirty === true}
+                    renderStale={renderStale}
+                  />
+                ) : null}
+                {canAdjustMedia ? (
                   <MediaAdjustments
                     runId={detail.id}
                     items={detail.items
@@ -365,7 +384,9 @@ export default async function RunDetailPage({
                 <CoverEditor
                   runId={detail.id}
                   editable={
-                    detail.status === 'awaiting_review' || detail.status === 'publish_failed'
+                    detail.status === 'awaiting_review' ||
+                    detail.status === 'publish_failed' ||
+                    detail.status === 'published'
                   }
                   cover={
                     cover

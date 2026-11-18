@@ -478,6 +478,14 @@ export function createRunEventsRepo(db: DatabaseSync) {
       return Number(res.lastInsertRowid);
     },
 
+    /** 读取某一类事件里最新的一条，供后续步骤判断这次重跑是否曾经有过稿件编号 */
+    latestByType(runId: string, type: string): RunEvent | null {
+      const row = db
+        .prepare('SELECT * FROM run_events WHERE run_id = ? AND type = ? ORDER BY id DESC LIMIT 1')
+        .get(runId, type) as RunEventRow | undefined;
+      return row ? mapRunEvent(row) : null;
+    },
+
     /** 按自增游标增量拉取某个任务的新事件列表 */
     listAfter(runId: string, afterId = 0, limit = 200): RunEvent[] {
       const safeLimit = clampLimit(limit, 500);

@@ -17,6 +17,7 @@ const RUN_STATUS_LABELS: Record<string, string> = {
   failed: '已失败',
   cancelled: '已取消',
   interrupted: '已中断',
+  awaiting_audio_review: '待试听配音',
   awaiting_review: '待审核',
   rejected: '已驳回',
   publishing: '上传中',

@@ -218,6 +218,33 @@ function computeAlignedBoundaries(opts: {
   return boundaries;
 }
 
+/** 读取音频能量包络；文件缺失或不是标准语音文件时返回空，改用时长比例对齐 */
+async function readWavEnvelope(wavFile: string): Promise<WavEnvelope | null> {
+  try {
+    const wavBytes = await fs.readFile(wavFile);
+    return extractWavEnergyEnvelope(wavBytes);
+  } catch {
+    return null;
+  }
+}
+
+/** 按已算出的边界，把每句字幕文本写成单调递增的起止时间 */
+function timingsFromBoundaries(
+  texts: readonly string[],
+  boundaries: readonly number[],
+  totalDurationMs: number,
+): AlignedSentenceAudio[] {
+  return texts.map((text, idx) => {
+    const offsetMs = boundaries[idx] ?? 0;
+    const nextMs = boundaries[idx + 1] ?? Math.max(offsetMs + 1, totalDurationMs);
+    return {
+      text,
+      offsetMs,
+      durationMs: Math.max(1, nextMs - offsetMs),
+    };
+  });
+}
+
 /**
  * 为整段合成为同一音频文件的多句口播计算逐句字幕时间戳：
  * 结合中文字符、英文词汇与标点朗读权重预估位置，并在真实人声能量包络中自动吸附句间停顿低谷。
@@ -232,27 +259,37 @@ export async function alignSentencesToWav(
     return [];
   }
 
-  let envelope: WavEnvelope | null = null;
-  try {
-    const wavBytes = await fs.readFile(wavFile);
-    envelope = extractWavEnergyEnvelope(wavBytes);
-  } catch {
-    envelope = null;
-  }
-
   const boundaries = computeAlignedBoundaries({
     sentences: cleanSentences,
-    envelope,
+    envelope: await readWavEnvelope(wavFile),
     totalDurationMs,
   });
+  return timingsFromBoundaries(cleanSentences, boundaries, totalDurationMs);
+}
 
-  return cleanSentences.map((text, idx) => {
-    const offsetMs = boundaries[idx] ?? 0;
-    const nextMs = boundaries[idx + 1] ?? Math.max(offsetMs + 1, totalDurationMs);
-    return {
-      text,
-      offsetMs,
-      durationMs: Math.max(1, nextMs - offsetMs),
-    };
+/**
+ * 把画面字幕对齐到已经合成好的整段音频。
+ * 句数和语音分句一致时，时间按语音分句的朗读权重和停顿低谷计算，文字仍用画面字幕。
+ * 句数不一致时，按画面字幕自己的断句重新寻找停顿低谷。
+ */
+export async function alignDisplaySentencesToWav(
+  wavFile: string,
+  ttsSentences: readonly string[],
+  displaySentences: readonly string[],
+  totalDurationMs: number,
+): Promise<AlignedSentenceAudio[]> {
+  const spokenSentences = prepareNarrationSentences(ttsSentences);
+  const subtitleSentences = displaySentences.map((sentence) => sentence.trim()).filter(Boolean);
+  if (subtitleSentences.length === 0) {
+    return [];
+  }
+
+  const sameCount = spokenSentences.length === subtitleSentences.length;
+  const weightSentences = sameCount ? spokenSentences : subtitleSentences;
+  const boundaries = computeAlignedBoundaries({
+    sentences: weightSentences,
+    envelope: await readWavEnvelope(wavFile),
+    totalDurationMs,
   });
+  return timingsFromBoundaries(subtitleSentences, boundaries, totalDurationMs);
 }

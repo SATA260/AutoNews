@@ -8,7 +8,7 @@ import { createIndexTtsProvider } from './providers/indextts.js';
 import { createQwenLocalTtsProvider } from './providers/qwen-local.js';
 import { createSilentTtsProvider } from './providers/silent.js';
 import { buildNarrationParagraph } from './sanitize.js';
-import { alignSentencesToWav } from './subtitles.js';
+import { alignDisplaySentencesToWav, alignSentencesToWav } from './subtitles.js';
 import type { TtsProvider, TtsServiceOptions } from './types.js';
 
 export const TTS_VERSION = '0.1.0';
@@ -123,164 +123,185 @@ export class TtsService {
       seenKeys.add(section.key);
     }
 
-    const provider = this.getActiveProvider(effectiveSettings.provider);
-    const providerConfig = effectiveSettings.providers[provider.id] ?? {};
-    const cacheIdentity = await provider.cacheIdentity?.(providerConfig);
     const { sampleRate, trimSilence } = effectiveSettings.postprocess;
     const denoise = effectiveSettings.postprocess.denoise ?? true;
     const resolvedOutDir = path.resolve(outDir);
-
     await fs.mkdir(resolvedOutDir, { recursive: true });
-    await provider.start?.(providerConfig, signal);
 
-    let primaryError: unknown;
-    let stopError: unknown;
-    const results: SectionAudio[] = [];
-    try {
-      for (const section of sections) {
-        if (signal?.aborted) {
-          throw new DOMException('已取消', 'AbortError');
-        }
-
-        const paragraphText = buildNarrationParagraph(section.sentences);
-        if (!paragraphText) {
-          throw new Error('口播内容清理后为空');
-        }
-
-        const sectionDir = path.resolve(resolvedOutDir, section.key);
-        if (!sectionDir.startsWith(`${resolvedOutDir}${path.sep}`)) {
-          throw new Error(`段落目录越界: ${section.key}`);
-        }
-        const sectionFile = path.resolve(resolvedOutDir, `${section.key}.wav`);
-        if (!sectionFile.startsWith(`${resolvedOutDir}${path.sep}`)) {
-          throw new Error(`段落输出文件越界: ${section.key}`);
-        }
-
-        const isLocalClone = isLocalVoiceCloneProvider(provider.id);
-        const cacheKey = computeTtsCacheKey(
-          provider.id,
-          {
-            ...providerConfig,
-            cacheIdentity,
-            synthesisMode: 'whole-paragraph',
-            processingVersion: isLocalClone ? QWEN_AUDIO_PROCESSING_VERSION : 0,
-          },
-          {
-            sampleRate,
-            trimSilence,
-            ...(isLocalClone
-              ? {
-                  denoise,
-                  loudnessLUFS: effectiveSettings.postprocess.loudnessLUFS,
-                  fadeInMs: 5,
-                  tailPadMs: 80,
-                }
-              : {}),
-          },
-          paragraphText,
-        );
-
-        let durationMs: number | null = null;
-        const cacheHit = await tryRestoreFromCache(this.cacheDir, cacheKey, sectionFile);
-        if (cacheHit) {
-          try {
-            durationMs = await probeAudioDurationMs(sectionFile, this.ffprobeBin, signal);
-          } catch {
-            // 缓存文件损坏时删除失效缓存并回退到重新合成
-            await fs
-              .rm(path.join(this.cacheDir, `${cacheKey}.wav`), { force: true })
-              .catch(() => undefined);
-            await fs.rm(sectionFile, { force: true }).catch(() => undefined);
-          }
-        }
-
-        if (durationMs === null) {
-          await fs.mkdir(sectionDir, { recursive: true });
-          const rawFile = path.join(sectionDir, 'raw-section.wav');
-          try {
-            const charCount = Array.from(paragraphText.replace(/[\p{P}\p{S}\s]/gu, '')).length;
-            const maxAttempts = isLocalClone ? 3 : 1;
-            for (let attempt = 0; attempt < maxAttempts; attempt++) {
-              await provider.synthesize({
-                text: paragraphText,
-                outFile: rawFile,
-                sampleRate,
-                providerConfig,
-                signal,
-              });
-              await normalizeSegmentToWav({
-                inFile: rawFile,
-                outFile: sectionFile,
-                sampleRate,
-                trimSilence,
-                denoise,
-                isSilentProvider: provider.id === 'silent',
-                normalizeLoudness: isLocalClone,
-                loudnessLUFS: effectiveSettings.postprocess.loudnessLUFS,
-                ffmpegBin: this.ffmpegBin,
-                ffprobeBin: this.ffprobeBin,
-                signal,
-              });
-              await fs.rm(rawFile, { force: true }).catch(() => undefined);
-              const measured = await probeAudioDurationMs(sectionFile, this.ffprobeBin, signal);
-              if (
-                !isLocalClone ||
-                (measured >= Math.max(200, charCount * 60) &&
-                  measured <= Math.max(3000, charCount * 1300))
-              ) {
-                durationMs = measured;
-                break;
-              }
-            }
-            if (durationMs === null) {
-              durationMs = await probeAudioDurationMs(sectionFile, this.ffprobeBin, signal);
-              await onWarning?.(
-                `语音段落时长异常，重试 ${maxAttempts} 次后保留最后一次可播放结果：${section.key}`,
-              );
-            } else {
-              await saveToCache(this.cacheDir, cacheKey, sectionFile);
-            }
-          } finally {
-            await fs.rm(sectionDir, { recursive: true, force: true }).catch(() => undefined);
-          }
-        }
-
-        const alignedSentences = await alignSentencesToWav(
-          sectionFile,
-          section.sentences,
-          durationMs,
-        );
-        const sectionAudio: SectionAudio = {
-          key: section.key,
-          file: sectionFile,
-          speechMs: durationMs,
-          sentences:
-            alignedSentences.length > 0
-              ? alignedSentences
-              : [
-                  {
-                    text: paragraphText,
-                    offsetMs: 0,
-                    durationMs,
-                  },
-                ],
-        };
-        await onSectionDone?.(sectionAudio);
-        results.push(sectionAudio);
-      }
-    } catch (err) {
-      primaryError = err;
-      throw err;
-    } finally {
-      try {
-        await provider.stop?.();
-      } catch (err) {
-        stopError = err;
+    const groups: Array<{ providerId: string; sections: NarrationSection[] }> = [];
+    for (const section of sections) {
+      const providerId = section.provider ?? effectiveSettings.provider;
+      const current = groups[groups.length - 1];
+      if (current?.providerId === providerId) {
+        current.sections.push(section);
+      } else {
+        groups.push({ providerId, sections: [section] });
       }
     }
 
-    if (stopError !== undefined && primaryError === undefined) {
-      throw stopError;
+    const results: SectionAudio[] = [];
+    for (const group of groups) {
+      if (signal?.aborted) {
+        throw new DOMException('已取消', 'AbortError');
+      }
+      const provider = this.getActiveProvider(group.providerId);
+      const providerConfig = effectiveSettings.providers[provider.id] ?? {};
+      const cacheIdentity = await provider.cacheIdentity?.(providerConfig);
+      await provider.start?.(providerConfig, signal);
+      let groupError: unknown;
+      let stopError: unknown;
+      try {
+        for (const section of group.sections) {
+          if (signal?.aborted) {
+            throw new DOMException('已取消', 'AbortError');
+          }
+
+          const paragraphText = buildNarrationParagraph(section.sentences);
+          if (!paragraphText) {
+            throw new Error('口播内容清理后为空');
+          }
+
+          const sectionDir = path.resolve(resolvedOutDir, section.key);
+          if (!sectionDir.startsWith(`${resolvedOutDir}${path.sep}`)) {
+            throw new Error(`段落目录越界: ${section.key}`);
+          }
+          const sectionFile = path.resolve(resolvedOutDir, `${section.key}.wav`);
+          if (!sectionFile.startsWith(`${resolvedOutDir}${path.sep}`)) {
+            throw new Error(`段落输出文件越界: ${section.key}`);
+          }
+
+          const isLocalClone = isLocalVoiceCloneProvider(provider.id);
+          const cacheKey = computeTtsCacheKey(
+            provider.id,
+            {
+              ...providerConfig,
+              cacheIdentity,
+              synthesisMode: 'whole-paragraph',
+              processingVersion: isLocalClone ? QWEN_AUDIO_PROCESSING_VERSION : 0,
+            },
+            {
+              sampleRate,
+              trimSilence,
+              ...(isLocalClone
+                ? {
+                    denoise,
+                    loudnessLUFS: effectiveSettings.postprocess.loudnessLUFS,
+                    fadeInMs: 5,
+                    tailPadMs: 80,
+                  }
+                : {}),
+            },
+            paragraphText,
+          );
+
+          let durationMs: number | null = null;
+          const cacheHit = await tryRestoreFromCache(this.cacheDir, cacheKey, sectionFile);
+          if (cacheHit) {
+            try {
+              durationMs = await probeAudioDurationMs(sectionFile, this.ffprobeBin, signal);
+            } catch {
+              // 缓存文件损坏时删除失效缓存并回退到重新合成
+              await fs
+                .rm(path.join(this.cacheDir, `${cacheKey}.wav`), { force: true })
+                .catch(() => undefined);
+              await fs.rm(sectionFile, { force: true }).catch(() => undefined);
+            }
+          }
+
+          if (durationMs === null) {
+            await fs.mkdir(sectionDir, { recursive: true });
+            const rawFile = path.join(sectionDir, 'raw-section.wav');
+            try {
+              const charCount = Array.from(paragraphText.replace(/[\p{P}\p{S}\s]/gu, '')).length;
+              const maxAttempts = isLocalClone ? 3 : 1;
+              for (let attempt = 0; attempt < maxAttempts; attempt++) {
+                await provider.synthesize({
+                  text: paragraphText,
+                  outFile: rawFile,
+                  sampleRate,
+                  providerConfig,
+                  signal,
+                });
+                await normalizeSegmentToWav({
+                  inFile: rawFile,
+                  outFile: sectionFile,
+                  sampleRate,
+                  trimSilence,
+                  denoise,
+                  isSilentProvider: provider.id === 'silent',
+                  normalizeLoudness: isLocalClone,
+                  loudnessLUFS: effectiveSettings.postprocess.loudnessLUFS,
+                  ffmpegBin: this.ffmpegBin,
+                  ffprobeBin: this.ffprobeBin,
+                  signal,
+                });
+                await fs.rm(rawFile, { force: true }).catch(() => undefined);
+                const measured = await probeAudioDurationMs(sectionFile, this.ffprobeBin, signal);
+                if (
+                  !isLocalClone ||
+                  (measured >= Math.max(200, charCount * 60) &&
+                    measured <= Math.max(3000, charCount * 1300))
+                ) {
+                  durationMs = measured;
+                  break;
+                }
+              }
+              if (durationMs === null) {
+                durationMs = await probeAudioDurationMs(sectionFile, this.ffprobeBin, signal);
+                await onWarning?.(
+                  `语音段落时长异常，重试 ${maxAttempts} 次后保留最后一次可播放结果：${section.key}`,
+                );
+              } else {
+                await saveToCache(this.cacheDir, cacheKey, sectionFile);
+              }
+            } finally {
+              await fs.rm(sectionDir, { recursive: true, force: true }).catch(() => undefined);
+            }
+          }
+
+          const displaySentences = section.displaySentences?.filter((sentence) => sentence.trim());
+          const alignedSentences =
+            displaySentences && displaySentences.length > 0
+              ? await alignDisplaySentencesToWav(
+                  sectionFile,
+                  section.sentences,
+                  displaySentences,
+                  durationMs,
+                )
+              : await alignSentencesToWav(sectionFile, section.sentences, durationMs);
+          const sectionAudio: SectionAudio = {
+            key: section.key,
+            file: sectionFile,
+            speechMs: durationMs,
+            sentences:
+              alignedSentences.length > 0
+                ? alignedSentences
+                : [
+                    {
+                      text: paragraphText,
+                      offsetMs: 0,
+                      durationMs,
+                    },
+                  ],
+          };
+          await onSectionDone?.(sectionAudio);
+          results.push(sectionAudio);
+        }
+      } catch (err) {
+        groupError = err;
+      } finally {
+        try {
+          await provider.stop?.();
+        } catch (err) {
+          stopError = err;
+        }
+      }
+      if (groupError !== undefined) {
+        throw groupError;
+      }
+      if (stopError !== undefined) {
+        throw stopError;
+      }
     }
     return results;
   }
