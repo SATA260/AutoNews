@@ -8,7 +8,7 @@ import { chromium } from 'playwright';
 import { getModelRouteNames } from '../config/model-connections.js';
 import type { CoreContext } from '../context.js';
 import { resolveChromiumExecutablePath } from '../media/compositor.js';
-import { resolveBiliupExecutable } from '../publish/bilibili.js';
+import { resolveBiliCookieFile, resolveBiliupExecutable } from '../publish/bilibili.js';
 
 const MIN_DISK_FREE_BYTES = 1024 * 1024 * 1024;
 const DOCTOR_CACHE_TTL_MS = 10 * 60 * 1000;
@@ -94,12 +94,17 @@ function hashScopedFileContent(baseDir: string, relFile?: string): string | null
   if (!resolvedTarget.startsWith(`${resolvedBase}${path.sep}`)) {
     return null;
   }
+  return hashFileContent(resolvedTarget);
+}
+
+/** 读取指定绝对路径普通文件的内容摘要，文件不存在、不是普通文件或不可读时返回 null */
+function hashFileContent(absFile: string): string | null {
   try {
-    const stat = fsSync.lstatSync(resolvedTarget);
+    const stat = fsSync.lstatSync(absFile);
     if (!stat.isFile()) {
       return null;
     }
-    const content = fsSync.readFileSync(resolvedTarget);
+    const content = fsSync.readFileSync(absFile);
     return sha256Hex(content);
   } catch {
     return null;
@@ -127,9 +132,8 @@ function computeDoctorFingerprint(ctx: CoreContext): string {
   const biliCliCfg = Object.hasOwn(ctx.settings.clis, biliCliName)
     ? ctx.settings.clis[biliCliName]
     : undefined;
-  const cookieDigest = hashScopedFileContent(
-    ctx.paths.rootDir,
-    ctx.settings.publish.bilibili.cookieFile,
+  const cookieDigest = hashFileContent(
+    resolveBiliCookieFile(ctx.paths.rootDir, ctx.settings.publish.bilibili.cookieFile),
   );
 
   return sha256Hex(
@@ -275,17 +279,14 @@ async function executeDoctorChecks(ctx: CoreContext): Promise<DoctorReport> {
       : undefined;
     const biliBin = resolveBiliupExecutable(biliCliCfg?.bin ?? biliCliName);
     const biliProbe = await probeBinaryVersion(biliBin, ['--version']);
-    const resolvedRoot = path.resolve(ctx.paths.rootDir);
-    const cookiePath = path.resolve(resolvedRoot, ctx.settings.publish.bilibili.cookieFile);
-    const cookieInsideRoot = cookiePath.startsWith(`${resolvedRoot}${path.sep}`);
-    const hasCookie = cookieInsideRoot && fsSync.existsSync(cookiePath);
+    const cookieFile = ctx.settings.publish.bilibili.cookieFile;
+    const cookiePath = resolveBiliCookieFile(ctx.paths.rootDir, cookieFile);
+    const hasCookie = fsSync.existsSync(cookiePath);
     return {
       name: 'biliup',
       ok: biliProbe.ok,
       detail: biliProbe.ok
-        ? !cookieInsideRoot
-          ? `${biliProbe.detail}（警告：Cookie 路径超出项目根目录）`
-          : `${biliProbe.detail}（${hasCookie ? `凭据存在: ${ctx.settings.publish.bilibili.cookieFile}` : '尚未扫码登录，请运行 aidaily bili login'}）`
+        ? `${biliProbe.detail}（${hasCookie ? `凭据存在: ${cookiePath}` : `未找到登录凭据 ${cookiePath}，请运行 aidaily bili login 扫码登录`}）`
         : biliProbe.detail,
       required: false,
     };

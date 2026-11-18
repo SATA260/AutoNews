@@ -60,6 +60,26 @@ export function resolveBiliupExecutable(configuredBin: string): string {
   return trimmed;
 }
 
+/**
+ * 把配置里的 B 站登录凭据路径解析成绝对路径：
+ * 以 `~` 开头时指向当前用户家目录（便于直接复用在家目录执行 `biliup login` 生成的凭据），
+ * 绝对路径原样使用，其余相对路径按项目根目录解析。
+ */
+export function resolveBiliCookieFile(
+  rootDir: string,
+  cookieFile: string,
+  homeDir: string = os.homedir(),
+): string {
+  const trimmed = cookieFile.trim();
+  if (trimmed === '~') {
+    return path.resolve(homeDir);
+  }
+  if (trimmed.startsWith('~/')) {
+    return path.resolve(homeDir, trimmed.slice(2));
+  }
+  return path.resolve(rootDir, trimmed);
+}
+
 /** 构造用于后台进程继承标准输入输出的 B 站扫码登录命令 */
 export function buildBiliLoginCommand(
   ctx: CoreContext,
@@ -68,7 +88,7 @@ export function buildBiliLoginCommand(
   const bilibili = settings.publish.bilibili;
   const cliCfg = settings.clis[bilibili.cli];
   const bin = resolveBiliupExecutable(cliCfg?.bin ?? bilibili.cli);
-  const cookieFile = path.resolve(ctx.paths.rootDir, bilibili.cookieFile);
+  const cookieFile = resolveBiliCookieFile(ctx.paths.rootDir, bilibili.cookieFile);
   return {
     bin,
     args: [...(cliCfg?.extraArgs ?? []), '-u', cookieFile, 'login'],
@@ -182,7 +202,7 @@ export async function assertReadyToUpload(opts: {
 
   const videoFile = path.resolve(ctx.paths.rootDir, draft.videoPath);
   const coverFile = path.resolve(ctx.paths.rootDir, draft.coverPath);
-  const cookieFile = path.resolve(ctx.paths.rootDir, settings.publish.bilibili.cookieFile);
+  const cookieFile = resolveBiliCookieFile(ctx.paths.rootDir, settings.publish.bilibili.cookieFile);
 
   await fs.access(videoFile);
   await fs.access(coverFile);

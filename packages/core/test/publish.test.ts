@@ -18,6 +18,7 @@ import {
   type PipelineError,
   parseBvidFromOutput,
   recoverStaleRuns,
+  resolveBiliCookieFile,
   updateSettingsFile,
   writeJsonAtomic,
 } from '../src/index.js';
@@ -270,6 +271,18 @@ async function seedCompletedRunReadyForReview(
 }
 
 describe('Bilibili publishing, AI declaration, consumption, and uncertain recovery', () => {
+  it('解析登录凭据路径：~ 指向家目录，绝对路径原样使用，相对路径按项目根目录', () => {
+    expect(resolveBiliCookieFile('/proj', '~/cookies.json', '/home/u')).toBe(
+      '/home/u/cookies.json',
+    );
+    expect(resolveBiliCookieFile('/proj', '  ~/a/b.json ', '/home/u')).toBe('/home/u/a/b.json');
+    expect(resolveBiliCookieFile('/proj', '/abs/c.json', '/home/u')).toBe('/abs/c.json');
+    expect(resolveBiliCookieFile('/proj', 'storage/secrets/c.json', '/home/u')).toBe(
+      '/proj/storage/secrets/c.json',
+    );
+    expect(resolveBiliCookieFile('/proj', '~other/c.json', '/home/u')).toBe('/proj/~other/c.json');
+  });
+
   it('builds Bilibili descriptions with chapters, preserves AI disclaimer on truncation, and parses BV ids', () => {
     expect(normalizeBvid('BV1NM411P7a9')).toBe('BV1NM411P7a9');
     expect(() => normalizeBvid('invalid-id')).toThrow();

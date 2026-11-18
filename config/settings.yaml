@@ -149,7 +149,7 @@ publish:
   mode: manual-review # manual-review | auto（auto 只在 qa 通过时自动发布）
   bilibili:
     cli: biliup
-    cookieFile: storage/secrets/bilibili-cookies.json
+    cookieFile: ~/cookies.json # 直接复用在家目录执行 biliup login 生成的登录凭据
     tid: 231 # 科技·计算机技术（M7 已实测 biliup 0.2.4 支持自由设置分区 ID）
     copyright: 1
     titleMax: 80
