@@ -8,6 +8,7 @@ import {
   RETRYABLE_RUN_STATUSES,
   RunStatusSchema,
   ScheduleTimeSchema,
+  SelectionResultSchema,
   SettingsSchema,
   SourcesFileSchema,
   TimelineSchema,
@@ -70,6 +71,19 @@ describe('@aidaily/contracts', () => {
     expect(serialized).not.toContain('maxLength');
     expect(serialized).not.toContain('maxItems');
     expect(serialized).not.toContain('additionalProperties');
+  });
+
+  it('keeps selection scores and article ids representable when building a model schema', () => {
+    const jsonSchema = zodToJsonSchema(SelectionResultSchema);
+    const events = (
+      jsonSchema.properties as {
+        events: { type: string; items: { properties: Record<string, { type?: string }> } };
+      }
+    ).events;
+    expect(events.type).toBe('array');
+    expect(events.items.properties.score?.type).toBe('number');
+    expect(events.items.properties.publicAppeal?.type).toBe('number');
+    expect(events.items.properties.articleIds?.type).toBe('array');
   });
 
   it('accepts separate speech and subtitle text and does not regenerate audio unless asked', () => {

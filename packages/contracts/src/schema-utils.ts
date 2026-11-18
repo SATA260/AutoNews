@@ -40,10 +40,13 @@ function sanitizeJsonSchemaNode(node: unknown): unknown {
 }
 
 /**
- * 将 Zod Schema 转换为仅含基础结构关键字（type / properties / required / enum / items）的 Draft-07 JSON Schema，
- * 字数与范围约束统一交由本地 Zod 与规则检查兜底。
+ * 将 Zod Schema 转换为仅含基础结构关键字（type / properties / required / enum / items）的 Draft-07 JSON Schema。
+ * 字数与范围约束交给本地校验。分数折算、单个文章编号收成数组这类保存前整理，按模型应输出的原始类型描述。
  */
 export function zodToJsonSchema(schema: z.ZodType): Record<string, unknown> {
-  const raw = z.toJSONSchema(schema, { target: 'draft-07' }) as Record<string, unknown>;
+  const raw = z.toJSONSchema(schema, { target: 'draft-07', io: 'input' }) as Record<
+    string,
+    unknown
+  >;
   return sanitizeJsonSchemaNode(raw) as Record<string, unknown>;
 }
