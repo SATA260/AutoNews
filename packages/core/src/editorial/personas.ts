@@ -3,11 +3,16 @@ import path from 'node:path';
 import {
   type EventRecord,
   type HostMascotId,
+  type MascotMood,
   type PersonaProfile,
   PersonasFileSchema,
 } from '@aidaily/contracts';
 import { parse } from 'yaml';
 import type { CoreContext } from '../context.js';
+
+const UNCONFIRMED_RUMOR_PATTERN = /(猜测|传闻|未获官方确认|尚未确认|尚未证实|流传|爆料|疑似)/i;
+const NEGATIVE_NEWS_PATTERN =
+  /(限流|故障|致歉|差评|起诉|调查|裁撤|裁员|涨价|不能支付|受限|报错|困境|宕机)/i;
 
 /** 加载并校验主播配置；旧项目没有配置时保留原有行为。 */
 export async function loadPersonas(ctx: CoreContext): Promise<PersonaProfile[]> {
@@ -72,11 +77,12 @@ export async function getRunPersona(
   return (await loadPersonas(ctx)).find((persona) => persona.id === row.host_id) ?? null;
 }
 
-/** 判断新闻主体与本期主播属于同一家、其他主播阵营或第三方。 */
+/** 判断新闻主体与本期主播属于自家（含好消息/负面争议/未证实传闻）、友商或第三方，返回自然人设语气引导。 */
 export async function describePersonaRelation(
   ctx: CoreContext,
   runId: string,
   itemId: string,
+  extraText?: string,
 ): Promise<string> {
   const persona = await getRunPersona(ctx, runId);
   const item = ctx.repos.runItems.getById(itemId);
@@ -84,14 +90,69 @@ export async function describePersonaRelation(
     ? ctx.repos.events.listByRun(runId).find((entry) => entry.id === item.eventId)
     : undefined;
   if (!persona || !event) return '未指定主播或新闻主体';
-  const subject = `${event.entity ?? ''} ${event.title}`.toLowerCase();
-  const matched = (await loadPersonas(ctx)).filter((profile) =>
+  const subject = `${event.entity ?? ''} ${event.title} ${extraText ?? ''}`.toLowerCase();
+  const personas = await loadPersonas(ctx);
+  const matched = personas.filter((profile) =>
     profile.campKeywords.some((keyword) => subject.includes(keyword.toLowerCase())),
   );
-  const relation = matched.some((profile) => profile.id === persona.id)
-    ? '自家'
-    : matched.length
-      ? '友商'
-      : '第三方';
-  return `主播：${persona.displayName}；新闻主体：${event.entity ?? event.title}；关系：${relation}。`;
+  const isOwnCamp = matched.some((profile) => profile.id === persona.id);
+  const isRivalCamp = !isOwnCamp && matched.length > 0;
+  const fullText = `${event.title} ${extraText ?? ''}`;
+
+  let relationLabel = '第三方行业动态';
+  let reactionHint = persona.topicKeywords.some((keyword) =>
+    `${subject} ${event.category ?? ''}`.toLowerCase().includes(keyword.toLowerCase()),
+  )
+    ? '该话题是你平时很感兴趣的领域，可按自身说话习惯利落播报，最多顺带半句极短反应，不强行加戏。'
+    : '保持你日常干脆自然的真人口语把核心事实交代清楚即止，不要强行自报家门或硬加感慨。';
+
+  if (isOwnCamp) {
+    if (UNCONFIRMED_RUMOR_PATTERN.test(fullText)) {
+      relationLabel = '自家相关未证实传闻';
+      reactionHint = `你心里清楚这和${persona.affiliation}相关，但目前官方尚未确认；保持清醒客观播报传闻线索，并顺口自然点明官方还没确认，不替官方认领。`;
+    } else if (NEGATIVE_NEWS_PATTERN.test(fullText)) {
+      relationLabel = '自家受限或争议动态';
+      reactionHint = persona.ownFlawReaction;
+    } else {
+      relationLabel = '自家好消息或新进展';
+      reactionHint = persona.ownGoodReaction;
+    }
+  } else if (isRivalCamp) {
+    relationLabel = '友商动态';
+    reactionHint = persona.rivalReaction;
+  }
+
+  return [
+    `主播自称：${persona.selfName}（内部身份认知归属：${persona.affiliation}）；新闻主体：${event.entity ?? event.title}；关系判定：${relationLabel}。`,
+    `具体反应指引：${reactionHint}`,
+    '约束提醒：通过自然口吻和态度流露角色感即可，不要生硬说出“我是某公司的”，且一切情绪反应必须严格建立在原文已核实事实之上，绝不脑补原文未提及的功能。',
+  ].join('\n');
+}
+
+/** 根据新闻主体与当期主播的阵营归属及新闻正负向/技术议题属性，推导看板娘对应的表情状态 */
+export function deriveMascotMood(
+  hostId: HostMascotId | null | undefined,
+  subjectText: string,
+  personas: readonly PersonaProfile[],
+): MascotMood {
+  const lower = subjectText.toLowerCase();
+  if (hostId && personas.length > 0) {
+    const matched = personas.filter((profile) =>
+      profile.campKeywords.some((keyword) => lower.includes(keyword.toLowerCase())),
+    );
+    if (matched.some((profile) => profile.id === hostId)) {
+      if (NEGATIVE_NEWS_PATTERN.test(subjectText)) {
+        return 'thinking';
+      }
+      return 'proud';
+    }
+    if (matched.length > 0) {
+      return 'surprised';
+    }
+  }
+
+  if (/(架构|推理|论文|评测|基准|代码|开源|benchmark|reasoning|agent)/i.test(subjectText)) {
+    return 'thinking';
+  }
+  return 'neutral';
 }

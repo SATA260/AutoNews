@@ -6,7 +6,7 @@ issue:
   reserveFactor: 2 # 兼容旧任务配置
   minScore: 7.5 # 只播报达到重要性门槛的新闻
   freshnessHours: 48 # 候选新闻的默认时效
-  itemConcurrency: 3 # 同时处理的条目数
+  itemConcurrency: 6 # 同时处理的条目数
   refill:
     maxRounds: 3
     useBackupSources: true
@@ -29,17 +29,18 @@ contentLimits:
   leadSummary: 84
   title: 48
   shortTitle: 16
+  progressLabel: 10
   category: 8
   summary: 90
   keyPointsMax: 3
   keyPoint: 28
   detail: 200
   hostComment: 46
-  narrationSentence: 40
+  narrationSentence: 48
 
 ai:
   # cli 填 clis 或 ai.providers 中的调用名称，可在网页设置中逐阶段切换。
-  maxConcurrentCalls: 3
+  maxConcurrentCalls: 8
   providers:
     {
       deepseek官key:
@@ -70,13 +71,22 @@ clis:
     bin: biliup
 
 tts:
-  provider: qwen-local # 使用 BaoCut 安装的本地 Qwen3-TTS 模型
+  provider: indextts # 默认使用项目内 IndexTTS2.5 本地语音克隆模型
   providers:
     silent: { charsPerSecond: 4.5 }
+    indextts:
+      backend: metal
+      bin: assets/tts/bin/audiocpp_server
+      model: assets/tts/models/IndexTTS2.5-GGUF/index-tts2_5-q8_0.gguf
+      voices:
+        deepseek: { audio: 'assets/voice/deepseek娘（白露）/白露_qwentts_clean.wav', text: 'assets/voice/deepseek娘（白露）/白露_qwentts_clean.txt' }
+        gpt: { audio: 'assets/voice/gpt娘（阮梅）/阮梅_qwentts_clean.wav', text: 'assets/voice/gpt娘（阮梅）/阮梅_qwentts_clean.txt' }
+        gemini: { audio: 'assets/voice/gemini娘（花火）/花火_qwentts_clean.wav', text: 'assets/voice/gemini娘（花火）/花火_qwentts_clean.txt' }
+        claude: { audio: 'assets/voice/claude娘（布洛妮娅）/布洛妮娅_qwentts_clean.wav', text: 'assets/voice/claude娘（布洛妮娅）/布洛妮娅_qwentts_clean.txt' }
     qwen-local:
       backend: metal
-      bin: ~/Applications/BaoCut.app/Contents/Resources/bin/audiocpp/audiocpp_server
-      model: ~/.baocut/models/audio-cpp/audio.cpp-gguf-qwen3-tts-1.7b-base/Qwen3-TTS-12Hz-1.7B-Base-GGUF/qwen3-tts-12hz-1.7b-base-q8_0_v2.gguf
+      bin: assets/tts/bin/audiocpp_server
+      model: assets/tts/models/Qwen3-TTS-12Hz-1.7B-Base-GGUF/qwen3-tts-12hz-1.7b-base-q8_0_v2.gguf
       voices:
         deepseek: { audio: 'assets/voice/deepseek娘（白露）/白露_qwentts_clean.wav', text: 'assets/voice/deepseek娘（白露）/白露_qwentts_clean.txt' }
         gpt: { audio: 'assets/voice/gpt娘（阮梅）/阮梅_qwentts_clean.wav', text: 'assets/voice/gpt娘（阮梅）/阮梅_qwentts_clean.txt' }
@@ -100,7 +110,7 @@ render:
   height: 1080
   fps: 30
   pagePaddingSec: 0.6 # 每页语音播完后的停留时间
-  bgm: { file: "", volumeDb: -18, duckDb: -8 }
+  bgm: { file: "", volumeDb: -9, duckDb: -5 }
 
 publish:
   mode: manual-review # manual-review | auto（auto 只在 qa 通过时自动发布）

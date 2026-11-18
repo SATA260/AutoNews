@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import type { IssuePackage, PolishedItem } from './editorial.js';
+import type { IssuePackage, MascotMood, PolishedItem } from './editorial.js';
 import type { Timeline } from './media.js';
 import type { HostMascotId } from './persona.js';
 
@@ -9,6 +9,7 @@ export const ContentLimitsSchema = z.object({
   leadSummary: z.number().int().positive(),
   title: z.number().int().positive(),
   shortTitle: z.number().int().positive(),
+  progressLabel: z.number().int().positive().default(10),
   category: z.number().int().positive(),
   summary: z.number().int().positive(),
   keyPointsMax: z.number().int().positive(),
@@ -32,12 +33,20 @@ export interface RenderableNewsItem extends PolishedItem {
   publishedAt: string;
   imagePath?: string;
   impact: ImpactLevel;
+  mascotMood?: MascotMood;
 }
 
 /** 传递给前端视频模板的整期结构化渲染数据 */
 export interface RenderableIssue {
   hostId?: HostMascotId;
+  hostDisplayName?: string;
   hostMascotPath?: string;
+  hostLive2dModelUrl?: string;
+  bgmAudioUrl?: string;
+  bgmVolumeDb?: number;
+  pagePaddingSec?: number;
+  fps?: number;
+  lipSyncBySectionKey?: Record<string, number[]>;
   date: string;
   issueNumber: string;
   headline: string;
@@ -54,6 +63,20 @@ export interface PagePlan {
   durationMs: number;
 }
 
+/** 单个动态视频章节的逐帧渲染计划与输出路径 */
+export interface SectionRenderPlan {
+  index: number;
+  sectionKey: string;
+  startFrame: number;
+  frameCount: number;
+  startMs: number;
+  durationMs: number;
+  speechMs: number;
+  mood?: MascotMood;
+  outMp4Path: string;
+  outPngPath: string;
+}
+
 /**
  * 浏览器页面操作最小接口（与 Playwright 的 Page 结构一致），
  * 使共享类型包不直接绑定浏览器引擎实现。
@@ -66,19 +89,32 @@ export interface BrowserPageLike {
     url: string,
     options?: { waitUntil?: 'load' | 'domcontentloaded' | 'networkidle'; timeout?: number },
   ): Promise<unknown>;
-  /** 在网页上下文中执行脚本（例如注入日报 JSON 数据和翻页） */
+  /** 在网页上下文中执行脚本（例如注入日报 JSON 数据和推进虚拟时间） */
   evaluate<R, Arg = unknown>(pageFunction: (arg: Arg) => R | Promise<R>, arg: Arg): Promise<R>;
   /** 等待指定毫秒数 */
   waitForTimeout(timeout: number): Promise<void>;
-  /** 将当前画面截取为图像文件 */
+  /** 将当前画面截取为图像文件或内存字节流 */
   screenshot(options?: {
     path?: string;
     type?: 'png' | 'jpeg';
+    quality?: number;
     fullPage?: boolean;
   }): Promise<Buffer>;
 }
 
-/** 前端视频模板适配器接口，用于把通用日报数据转为具体模板画面截图 */
+/** 动态模板按虚拟时间逐帧渲染章节视频时的执行参数 */
+export interface RenderSectionsOptions {
+  page: BrowserPageLike;
+  data: unknown;
+  sections: SectionRenderPlan[];
+  width: number;
+  height: number;
+  fps: number;
+  ffmpegBin?: string;
+  signal?: AbortSignal;
+}
+
+/** 前端视频模板适配器接口，用于把通用日报数据转为静态画面截图或动态章节视频 */
 export interface TemplateAdapter {
   id: string;
   contentLimits?: Partial<ContentLimits>;
@@ -90,6 +126,8 @@ export interface TemplateAdapter {
   prepare(opts: {
     dir: string;
     runDir: string;
+    rootDir?: string;
+    signal?: AbortSignal;
   }): Promise<{ baseUrl: string; close(): Promise<void> }>;
   /** 打开浏览器逐页加载数据并截取全部 PNG 画面文件 */
   capture(
@@ -98,4 +136,13 @@ export interface TemplateAdapter {
     plan: PagePlan[],
     outDir: string,
   ): Promise<string[]>;
+  /** 计算模板构建产物与角色模型文件的指纹摘要，用于判断分片缓存是否有效 */
+  getAssetFingerprint?(opts: {
+    templateDir: string;
+    rootDir: string;
+    issue: RenderableIssue;
+    signal?: AbortSignal;
+  }): Promise<string>;
+  /** 按虚拟时钟逐帧步进渲染指定的动态章节视频分片与代表帧截图 */
+  renderSections?(opts: RenderSectionsOptions): Promise<void>;
 }

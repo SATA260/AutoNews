@@ -2,28 +2,36 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import type { CliBridge } from '@aidaily/cli-bridge';
 import type { NarrationSection, SectionAudio, TtsSettings } from '@aidaily/contracts';
-import { concatSentenceWavs, normalizeSegmentToWav, probeAudioDurationMs } from './audio.js';
+import { normalizeSegmentToWav, probeAudioDurationMs } from './audio.js';
 import { computeTtsCacheKey, saveToCache, tryRestoreFromCache } from './cache.js';
+import { createIndexTtsProvider } from './providers/indextts.js';
 import { createQwenLocalTtsProvider } from './providers/qwen-local.js';
 import { createSilentTtsProvider } from './providers/silent.js';
-import { sanitizeNarrationSentence } from './sanitize.js';
+import { buildNarrationParagraph } from './sanitize.js';
+import { alignSentencesToWav } from './subtitles.js';
 import type { TtsProvider, TtsServiceOptions } from './types.js';
 
 export const TTS_VERSION = '0.1.0';
 /** 本地语音处理方式变化时递增，用于使旧音频缓存失效。 */
-export const QWEN_AUDIO_PROCESSING_VERSION = 2;
+export const QWEN_AUDIO_PROCESSING_VERSION = 7;
+
+/** 判断指定引擎标识是否属于需要主播音色参考与统一响度后处理的本地语音克隆引擎 */
+export function isLocalVoiceCloneProvider(providerId: string): boolean {
+  return providerId === 'qwen-local' || providerId === 'indextts';
+}
 
 export * from './audio.js';
 export * from './cache.js';
 export * from './providers/qwen-local.js';
 export * from './providers/silent.js';
 export * from './sanitize.js';
+export * from './subtitles.js';
 export * from './types.js';
 
 const SAFE_SECTION_KEY_PATTERN = /^[a-zA-Z0-9_-]+$/;
 
 /**
- * 语音合成统一调度服务：管理多种语音引擎的注册与切换、单句缓存、音频标准化与句间拼接。
+ * 语音合成统一调度服务：管理多种语音引擎的注册与切换、整段缓存、音频标准化与时长探测。
  */
 export class TtsService {
   readonly bridge?: CliBridge;
@@ -40,13 +48,10 @@ export class TtsService {
     this.ffmpegBin = opts.ffmpegBin ?? 'ffmpeg';
     this.ffprobeBin = opts.ffprobeBin ?? 'ffprobe';
 
+    const rootDir = opts.rootDir ?? process.cwd();
     this.register(createSilentTtsProvider(this.settings, this.ffmpegBin));
-    this.register(
-      createQwenLocalTtsProvider(
-        opts.rootDir ?? process.cwd(),
-        this.settings.providers['qwen-local'] ?? {},
-      ),
-    );
+    this.register(createIndexTtsProvider(rootDir, this.settings.providers.indextts ?? {}));
+    this.register(createQwenLocalTtsProvider(rootDir, this.settings.providers['qwen-local'] ?? {}));
   }
 
   /** 注册或替换一个语音合成引擎实例 */
@@ -83,7 +88,7 @@ export class TtsService {
   }
 
   /**
-   * 批量合成多个口播段落：逐句检查缓存、标准化格式、拼接段落并产出精确到毫秒的时间轴信息。
+   * 批量合成多个口播段落：先清理各句内部多余空格并以单个空格逐句分隔合段，再检查整段缓存、一次性调用引擎生成并标准化输出音频。
    */
   async synthesizeSections(
     sections: NarrationSection[],
@@ -120,7 +125,7 @@ export class TtsService {
     const provider = this.getActiveProvider(effectiveSettings.provider);
     const providerConfig = effectiveSettings.providers[provider.id] ?? {};
     const cacheIdentity = await provider.cacheIdentity?.(providerConfig);
-    const { sampleRate, trimSilence, sentenceGapMs } = effectiveSettings.postprocess;
+    const { sampleRate, trimSilence } = effectiveSettings.postprocess;
     const resolvedOutDir = path.resolve(outDir);
 
     await fs.mkdir(resolvedOutDir, { recursive: true });
@@ -135,64 +140,67 @@ export class TtsService {
           throw new DOMException('已取消', 'AbortError');
         }
 
+        const paragraphText = buildNarrationParagraph(section.sentences);
+        if (!paragraphText) {
+          throw new Error('口播内容清理后为空');
+        }
+
         const sectionDir = path.resolve(resolvedOutDir, section.key);
         if (!sectionDir.startsWith(`${resolvedOutDir}${path.sep}`)) {
           throw new Error(`段落目录越界: ${section.key}`);
         }
-        await fs.mkdir(sectionDir, { recursive: true });
+        const sectionFile = path.resolve(resolvedOutDir, `${section.key}.wav`);
+        if (!sectionFile.startsWith(`${resolvedOutDir}${path.sep}`)) {
+          throw new Error(`段落输出文件越界: ${section.key}`);
+        }
 
-        const segmentFiles: string[] = [];
-        const sentenceDurationsMs: number[] = [];
+        const isLocalClone = isLocalVoiceCloneProvider(provider.id);
+        const cacheKey = computeTtsCacheKey(
+          provider.id,
+          {
+            ...providerConfig,
+            cacheIdentity,
+            synthesisMode: 'whole-paragraph',
+            processingVersion: isLocalClone ? QWEN_AUDIO_PROCESSING_VERSION : 0,
+          },
+          {
+            sampleRate,
+            trimSilence,
+            ...(isLocalClone
+              ? {
+                  loudnessLUFS: effectiveSettings.postprocess.loudnessLUFS,
+                  fadeInMs: 15,
+                  fadeOutMs: 80,
+                  tailPadMs: 160,
+                }
+              : {}),
+          },
+          paragraphText,
+        );
 
-        for (let i = 0; i < section.sentences.length; i++) {
-          const originalText = section.sentences[i] ?? '';
-          const text =
-            provider.id === 'qwen-local' ? sanitizeNarrationSentence(originalText) : originalText;
-          if (!text) throw new Error('口播内容清理后为空');
-          const idxLabel = String(i + 1).padStart(2, '0');
-          const normFile = path.join(sectionDir, `seg-${idxLabel}.wav`);
-          const rawFile = path.join(sectionDir, `raw-${idxLabel}.wav`);
-          const cacheKey = computeTtsCacheKey(
-            provider.id,
-            {
-              ...providerConfig,
-              cacheIdentity,
-              processingVersion: provider.id === 'qwen-local' ? QWEN_AUDIO_PROCESSING_VERSION : 0,
-            },
-            {
-              sampleRate,
-              trimSilence,
-              ...(provider.id === 'qwen-local'
-                ? {
-                    loudnessLUFS: effectiveSettings.postprocess.loudnessLUFS,
-                    fadeInMs: 15,
-                    fadeOutMs: 20,
-                  }
-                : {}),
-            },
-            text,
-          );
-
-          let durationMs: number | null = null;
-          const cacheHit = await tryRestoreFromCache(this.cacheDir, cacheKey, normFile);
-          if (cacheHit) {
-            try {
-              durationMs = await probeAudioDurationMs(normFile, this.ffprobeBin, signal);
-            } catch {
-              // 缓存文件损坏时删除失效缓存并回退到重新合成
-              await fs
-                .rm(path.join(this.cacheDir, `${cacheKey}.wav`), { force: true })
-                .catch(() => undefined);
-              await fs.rm(normFile, { force: true }).catch(() => undefined);
-            }
+        let durationMs: number | null = null;
+        const cacheHit = await tryRestoreFromCache(this.cacheDir, cacheKey, sectionFile);
+        if (cacheHit) {
+          try {
+            durationMs = await probeAudioDurationMs(sectionFile, this.ffprobeBin, signal);
+          } catch {
+            // 缓存文件损坏时删除失效缓存并回退到重新合成
+            await fs
+              .rm(path.join(this.cacheDir, `${cacheKey}.wav`), { force: true })
+              .catch(() => undefined);
+            await fs.rm(sectionFile, { force: true }).catch(() => undefined);
           }
+        }
 
-          if (durationMs === null) {
-            const charCount = Array.from(text.replace(/[\p{P}\p{S}\s]/gu, '')).length;
-            const maxAttempts = provider.id === 'qwen-local' ? 3 : 1;
+        if (durationMs === null) {
+          await fs.mkdir(sectionDir, { recursive: true });
+          const rawFile = path.join(sectionDir, 'raw-section.wav');
+          try {
+            const charCount = Array.from(paragraphText.replace(/[\p{P}\p{S}\s]/gu, '')).length;
+            const maxAttempts = isLocalClone ? 3 : 1;
             for (let attempt = 0; attempt < maxAttempts; attempt++) {
               await provider.synthesize({
-                text,
+                text: paragraphText,
                 outFile: rawFile,
                 sampleRate,
                 providerConfig,
@@ -200,20 +208,20 @@ export class TtsService {
               });
               await normalizeSegmentToWav({
                 inFile: rawFile,
-                outFile: normFile,
+                outFile: sectionFile,
                 sampleRate,
                 trimSilence,
                 isSilentProvider: provider.id === 'silent',
-                normalizeLoudness: provider.id === 'qwen-local',
+                normalizeLoudness: isLocalClone,
                 loudnessLUFS: effectiveSettings.postprocess.loudnessLUFS,
                 ffmpegBin: this.ffmpegBin,
                 ffprobeBin: this.ffprobeBin,
                 signal,
               });
               await fs.rm(rawFile, { force: true }).catch(() => undefined);
-              const measured = await probeAudioDurationMs(normFile, this.ffprobeBin, signal);
+              const measured = await probeAudioDurationMs(sectionFile, this.ffprobeBin, signal);
               if (
-                provider.id !== 'qwen-local' ||
+                !isLocalClone ||
                 (measured >= Math.max(200, charCount * 60) &&
                   measured <= Math.max(3000, charCount * 1300))
               ) {
@@ -222,49 +230,37 @@ export class TtsService {
               }
             }
             if (durationMs === null) {
-              durationMs = await probeAudioDurationMs(normFile, this.ffprobeBin, signal);
+              durationMs = await probeAudioDurationMs(sectionFile, this.ffprobeBin, signal);
               await onWarning?.(
-                `语音片段时长异常，重试 ${maxAttempts} 次后保留最后一次可播放结果：${section.key} 第 ${i + 1} 句`,
+                `语音段落时长异常，重试 ${maxAttempts} 次后保留最后一次可播放结果：${section.key}`,
               );
             } else {
-              await saveToCache(this.cacheDir, cacheKey, normFile);
+              await saveToCache(this.cacheDir, cacheKey, sectionFile);
             }
+          } finally {
+            await fs.rm(sectionDir, { recursive: true, force: true }).catch(() => undefined);
           }
-
-          segmentFiles.push(normFile);
-          sentenceDurationsMs.push(durationMs);
         }
 
-        const sectionFile = path.resolve(resolvedOutDir, `${section.key}.wav`);
-        const concatResult = await concatSentenceWavs({
-          segmentFiles,
-          sentenceDurationsMs,
-          sentenceGapMs,
-          sampleRate,
-          outFile: sectionFile,
-          ffmpegBin: this.ffmpegBin,
-          ffprobeBin: this.ffprobeBin,
-          signal,
-        });
-
+        const alignedSentences = await alignSentencesToWav(
+          sectionFile,
+          section.sentences,
+          durationMs,
+        );
         const sectionAudio: SectionAudio = {
           key: section.key,
           file: sectionFile,
-          speechMs: concatResult.speechMs,
-          sentences: section.sentences.map((text, idx) => {
-            const rawOffset = concatResult.offsetsMs[idx] ?? 0;
-            const clampedOffset = Math.min(rawOffset, concatResult.speechMs);
-            const rawDuration = sentenceDurationsMs[idx] ?? 0;
-            const clampedDuration = Math.max(
-              0,
-              Math.min(rawDuration, concatResult.speechMs - clampedOffset),
-            );
-            return {
-              text,
-              offsetMs: clampedOffset,
-              durationMs: clampedDuration,
-            };
-          }),
+          speechMs: durationMs,
+          sentences:
+            alignedSentences.length > 0
+              ? alignedSentences
+              : [
+                  {
+                    text: paragraphText,
+                    offsetMs: 0,
+                    durationMs,
+                  },
+                ],
         };
         await onSectionDone?.(sectionAudio);
         results.push(sectionAudio);
@@ -288,6 +284,10 @@ export class TtsService {
 
   /** 用当前配置的语音引擎合成一段试听音频文件 */
   async test(text: string, outFile: string): Promise<void> {
+    const cleanedText = buildNarrationParagraph([text]);
+    if (!cleanedText) {
+      throw new Error('口播内容清理后为空');
+    }
     const provider = this.getActiveProvider();
     await fs.mkdir(path.dirname(outFile), { recursive: true });
     const rawFile = path.join(path.dirname(outFile), `raw-${path.basename(outFile)}`);
@@ -297,7 +297,7 @@ export class TtsService {
     let stopError: unknown;
     try {
       await provider.synthesize({
-        text,
+        text: cleanedText,
         outFile: rawFile,
         providerConfig: this.settings.providers[provider.id] ?? {},
       });
@@ -307,6 +307,8 @@ export class TtsService {
         sampleRate: this.settings.postprocess.sampleRate,
         trimSilence: this.settings.postprocess.trimSilence,
         isSilentProvider: provider.id === 'silent',
+        normalizeLoudness: isLocalVoiceCloneProvider(provider.id),
+        loudnessLUFS: this.settings.postprocess.loudnessLUFS,
         ffmpegBin: this.ffmpegBin,
         ffprobeBin: this.ffprobeBin,
       });

@@ -4,21 +4,27 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import type {
+  HostMascotId,
   ImpactLevel,
   IssuePackage,
+  MascotMood,
   PagePlan,
   RenderableIssue,
   RenderableNewsItem,
   RunItemRecord,
+  SectionRenderPlan,
   Settings,
   TemplateAdapter,
   Timeline,
 } from '@aidaily/contracts';
 import { HostMascotIdSchema } from '@aidaily/contracts';
+import { isLocalVoiceCloneProvider } from '@aidaily/tts';
 import { TZDate } from '@date-fns/tz';
 import { format } from 'date-fns';
+import { execa } from 'execa';
 import { chromium } from 'playwright';
 import type { CoreContext } from '../context.js';
+import { deriveMascotMood, loadPersonas } from '../editorial/personas.js';
 import { PipelineError } from '../errors.js';
 import { readJsonOrNull, writeFileAtomic, writeJsonAtomic } from '../storage/files.js';
 import {
@@ -26,7 +32,14 @@ import {
   resolveActiveTemplate,
   type TemplateRegistry,
 } from '../templates/registry.js';
-import { buildMasterAudioWav, composeSlidesVideoMp4, renderCoverJpg } from './ffmpeg.js';
+import {
+  buildMasterAudioWav,
+  composeSectionVideosMp4,
+  composeSlidesVideoMp4,
+  renderCoverJpg,
+} from './ffmpeg.js';
+import { extractWavLipSyncFrames } from './lipsync.js';
+import { quantizeTimelineToFps } from './timeline.js';
 
 /** 成片渲染阶段完成后写入检查点的产物摘要 */
 export interface RenderCheckpoint {
@@ -40,11 +53,27 @@ export interface RenderCheckpoint {
   totalMs: number;
 }
 
+/** 静态整页截图模板的进度与摘要缓存记录 */
 interface FramesProgressRecord {
   digest: string;
   width: number;
   height: number;
   template: string;
+}
+
+/** 动态视频单个章节分片的摘要与编码规格缓存记录 */
+interface SectionCacheRecord {
+  sectionDigest: string;
+  width: number;
+  height: number;
+  fps: number;
+  frameCount: number;
+}
+
+/** 动态视频整期各章节分片缓存索引文件结构 */
+interface SectionsProgressFile {
+  template: string;
+  sections: Record<string, SectionCacheRecord>;
 }
 
 const PNG_HEADER = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
@@ -73,6 +102,122 @@ async function isValidPngFile(filePath: string, minBytes = 1024): Promise<boolea
     }
   } catch {
     return false;
+  }
+}
+
+/** 根据给定的 ffmpeg 可执行文件路径推断同目录下的 ffprobe 路径，不存在时回退全局命令名 */
+function resolveFfprobeFromFfmpeg(ffmpegBin?: string): string {
+  if (!ffmpegBin || !path.isAbsolute(ffmpegBin)) {
+    return 'ffprobe';
+  }
+  const candidate = path.join(path.dirname(ffmpegBin), 'ffprobe');
+  return fsSync.existsSync(candidate) ? candidate : 'ffprobe';
+}
+
+/**
+ * 校验章节视频 MP4 分片是否完整可读，并通过 ffprobe 核对编码格式、分辨率及实际时长误差不超过一帧。
+ */
+async function isValidMp4Segment(opts: {
+  filePath: string;
+  expectedDurationMs: number;
+  width: number;
+  height: number;
+  fps: number;
+  ffprobeBin: string;
+}): Promise<boolean> {
+  try {
+    const st = await fs.stat(opts.filePath);
+    if (!st.isFile() || st.size < 1024) {
+      return false;
+    }
+    const res = await execa(
+      opts.ffprobeBin,
+      [
+        '-v',
+        'error',
+        '-select_streams',
+        'v:0',
+        '-show_entries',
+        'stream=codec_name,width,height:format=duration',
+        '-of',
+        'json',
+        opts.filePath,
+      ],
+      { timeout: 15_000, reject: false },
+    );
+    if (res.exitCode !== 0 || !res.stdout) {
+      return false;
+    }
+    const parsed = JSON.parse(res.stdout) as {
+      streams?: Array<{ codec_name?: string; width?: number; height?: number }>;
+      format?: { duration?: string | number };
+    };
+    const vStream = parsed.streams?.[0];
+    if (
+      vStream?.codec_name !== 'h264' ||
+      Number(vStream.width) !== opts.width ||
+      Number(vStream.height) !== opts.height
+    ) {
+      return false;
+    }
+    const actualDurationMs = Number(parsed.format?.duration) * 1000;
+    if (!Number.isFinite(actualDurationMs) || actualDurationMs <= 0) {
+      return false;
+    }
+    const toleranceMs = Math.ceil(1000 / Math.max(1, opts.fps)) + 25;
+    return Math.abs(actualDurationMs - opts.expectedDurationMs) <= toleranceMs;
+  } catch {
+    return false;
+  }
+}
+
+/** 安全关闭无头浏览器实例；若优雅关闭超时则按唯一启动标识强制终止底层浏览器进程树防止残留 */
+async function closeBrowserSafely(
+  browser: Awaited<ReturnType<typeof chromium.launch>> | null,
+  launchToken?: string,
+): Promise<void> {
+  if (!browser) {
+    return;
+  }
+  const maybeProcessGetter = (browser as unknown as { process?: () => { pid?: number } | null })
+    .process;
+  const browserProc =
+    typeof maybeProcessGetter === 'function' ? maybeProcessGetter.call(browser) : null;
+  let closedInTime = false;
+  let timeoutTimer: ReturnType<typeof setTimeout> | null = null;
+  try {
+    await Promise.race([
+      browser
+        .close()
+        .then(() => {
+          closedInTime = true;
+        })
+        .catch(() => {
+          closedInTime = true;
+        }),
+      new Promise<void>((resolve) => {
+        timeoutTimer = setTimeout(resolve, 5000);
+      }),
+    ]);
+  } finally {
+    if (timeoutTimer !== null) {
+      clearTimeout(timeoutTimer);
+    }
+  }
+  if (!closedInTime) {
+    if (browserProc?.pid) {
+      try {
+        process.kill(browserProc.pid, 'SIGKILL');
+      } catch {
+        // 底层子进程已退出时忽略
+      }
+    }
+    if (launchToken && /^[a-z0-9-]+$/i.test(launchToken)) {
+      await execa('pkill', ['-9', '-f', `--aidaily-browser-token=${launchToken}`], {
+        timeout: 3_000,
+        reject: false,
+      }).catch(() => undefined);
+    }
   }
 }
 
@@ -187,14 +332,76 @@ async function stageArticleAssetIntoRunDir(opts: {
   }
 }
 
-/** 将整期编排结果、新闻条目定稿和原始文章信息组装为供模板消费的标准 RenderableIssue */
+const ALLOWED_AUDIO_EXTENSIONS = new Set(['.mp3', '.wav', '.flac', '.m4a', '.ogg']);
+
+/** 安全地将已配置的背景音乐复制到本期任务素材目录中，供前端实时有声预览播放 */
+async function stageBgmAssetIntoRunDir(opts: {
+  rootDir: string;
+  runDir: string;
+  bgmSpecFile: string;
+}): Promise<string | undefined> {
+  const raw = opts.bgmSpecFile.trim();
+  if (!raw || raw.includes('\0')) {
+    return undefined;
+  }
+  const resolvedRoot = path.resolve(opts.rootDir);
+  const candidate = path.isAbsolute(raw) ? path.resolve(raw) : path.resolve(resolvedRoot, raw);
+  const ext = path.extname(candidate).toLowerCase();
+  if (!ALLOWED_AUDIO_EXTENSIONS.has(ext)) {
+    return undefined;
+  }
+  try {
+    const st = await fs.stat(candidate);
+    if (!st.isFile() || st.size === 0) {
+      return undefined;
+    }
+    const relDest = path.posix.join('assets', `bgm${ext}`);
+    const absDest = path.join(opts.runDir, relDest);
+    const buf = await fs.readFile(candidate);
+    await writeFileAtomic(absDest, buf);
+    return `/__run_assets__/${relDest}`;
+  } catch {
+    return undefined;
+  }
+}
+
+/** 自动扫描指定角色的 Live2D 模型包目录，返回首个 `.model3.json` 对应的只读服务路径 */
+async function resolveHostLive2dModelUrl(
+  rootDir: string,
+  hostId: HostMascotId,
+  templateDir?: string,
+): Promise<string | undefined> {
+  const candidateRoots = [path.join(rootDir, 'assets', 'mascots')];
+  if (templateDir) {
+    candidateRoots.push(path.resolve(templateDir, '..', '..', 'assets', 'mascots'));
+  }
+  for (const mascotBase of candidateRoots) {
+    const hostDir = path.join(mascotBase, hostId);
+    try {
+      const entries = await fs.readdir(hostDir, { withFileTypes: true });
+      const modelEntry = entries
+        .filter((e) => e.isFile() && e.name.toLowerCase().endsWith('.model3.json'))
+        .sort((a, b) => a.name.localeCompare(b.name))[0];
+      if (modelEntry) {
+        return `/__mascot_assets__/${hostId}/${modelEntry.name}`;
+      }
+    } catch {
+      // 当前候选目录不存在对应模型时继续尝试回退目录
+    }
+  }
+  return undefined;
+}
+
+/** 将整期编排结果、新闻条目定稿、角色模型与口型序列组装为供模板消费的标准 RenderableIssue */
 export async function buildRenderableIssue(opts: {
   ctx: CoreContext;
   runId: string;
   settings: Settings;
   packageData: IssuePackage;
+  timeline?: Timeline;
+  templateDir?: string;
 }): Promise<RenderableIssue> {
-  const { ctx, runId, settings, packageData } = opts;
+  const { ctx, runId, settings, packageData, timeline, templateDir } = opts;
   const run = ctx.repos.runs.getById(runId);
   if (!run) {
     throw new Error(`未找到任务记录: ${runId}`);
@@ -208,6 +415,15 @@ export async function buildRenderableIssue(opts: {
   );
   const dateStr = format(tzDate, 'yyyy-MM-dd');
   const issueNumber = `VOL.${format(tzDate, 'yyyy.MM.dd')}`;
+
+  const hostRow = ctx.db.prepare('SELECT host_id FROM runs WHERE id = ?').get(runId) as
+    | { host_id: string | null }
+    | undefined;
+  const host = HostMascotIdSchema.safeParse(hostRow?.host_id);
+  const activeHostId: HostMascotId = host.success ? host.data : 'gemini';
+
+  const personas = await loadPersonas(ctx).catch(() => []);
+  const activePersona = personas.find((p) => p.id === activeHostId);
 
   const items = ctx.repos.runItems.listByRun(runId);
   const itemById = new Map<string, RunItemRecord>(items.map((i) => [i.id, i]));
@@ -249,6 +465,12 @@ export async function buildRenderableIssue(opts: {
       ? (sourceNameById.get(primaryArticle.sourceId) ?? primaryArticle.sourceId)
       : 'AI 每日报整理';
 
+    const mascotMood = deriveMascotMood(
+      activeHostId,
+      `${item.finalJson.entity} ${item.finalJson.title} ${item.finalJson.category}`,
+      personas,
+    );
+
     renderItems.push({
       ...item.finalJson,
       ...(item.imageMode === 'custom' && item.customImageCaption
@@ -261,24 +483,63 @@ export async function buildRenderableIssue(opts: {
       publishedAt: primaryArticle?.publishedAt ?? run.createdAt,
       imagePath: stagedImageRel,
       impact: mapScoreToImpact(ev?.score ?? 5),
+      mascotMood,
     });
   }
 
-  const hostRow = ctx.db.prepare('SELECT host_id FROM runs WHERE id = ?').get(runId) as
-    | { host_id: string | null }
+  const hostMascotPath = await stageArticleAssetIntoRunDir({
+    ctx,
+    runDir,
+    relImagePath: path.join('assets', 'mascots', `${activeHostId}.png`),
+    itemIndex: 999,
+  });
+
+  const hostLive2dModelUrl = await resolveHostLive2dModelUrl(
+    ctx.paths.rootDir,
+    activeHostId,
+    templateDir,
+  );
+
+  const musicRow = ctx.db.prepare('SELECT bgm_file FROM runs WHERE id = ?').get(runId) as
+    | { bgm_file: string | null }
     | undefined;
-  const host = HostMascotIdSchema.safeParse(hostRow?.host_id);
-  const hostMascotPath = host.success
-    ? await stageArticleAssetIntoRunDir({
-        ctx,
+  const customBgmName = musicRow?.bgm_file;
+  const resolvedBgmSpec =
+    customBgmName &&
+    path.basename(customBgmName) === customBgmName &&
+    /\.(mp3|wav|flac|m4a)$/i.test(customBgmName)
+      ? path.join('assets', 'bgm', customBgmName)
+      : settings.render.bgm.file;
+  const bgmAudioUrl = resolvedBgmSpec
+    ? await stageBgmAssetIntoRunDir({
+        rootDir: ctx.paths.rootDir,
         runDir,
-        relImagePath: path.join('assets', 'mascots', `${host.data}.png`),
-        itemIndex: 999,
+        bgmSpecFile: resolvedBgmSpec,
       })
     : undefined;
+
+  let lipSyncBySectionKey: Record<string, number[]> | undefined;
+  if (timeline) {
+    lipSyncBySectionKey = {};
+    for (const sec of timeline.sections) {
+      const absWav = path.join(runDir, sec.audioFile);
+      lipSyncBySectionKey[sec.key] = await extractWavLipSyncFrames(absWav, {
+        fps: settings.render.fps,
+        totalDurationMs: sec.speechMs,
+      });
+    }
+  }
+
   return {
     ...(hostMascotPath ? { hostMascotPath } : {}),
-    ...(host.success ? { hostId: host.data } : {}),
+    hostId: activeHostId,
+    ...(activePersona?.displayName ? { hostDisplayName: activePersona.displayName } : {}),
+    ...(hostLive2dModelUrl ? { hostLive2dModelUrl } : {}),
+    ...(bgmAudioUrl ? { bgmAudioUrl } : {}),
+    bgmVolumeDb: settings.render.bgm.volumeDb,
+    pagePaddingSec: settings.render.pagePaddingSec,
+    fps: settings.render.fps,
+    ...(lipSyncBySectionKey ? { lipSyncBySectionKey } : {}),
     date: dateStr,
     issueNumber,
     headline: packageData.headline,
@@ -291,9 +552,9 @@ export async function buildRenderableIssue(opts: {
 
 /**
  * 执行视频渲染与音画合成阶段：
- * 1) 组装画面数据并校验帧摘要，断点重跑时自动跳过已完整落盘的页面截图；
- * 2) 启动模板本地服务与 Playwright 无头浏览器截取缺失页面（退出前确保关闭浏览器和服务）；
- * 3) 生成封面图、校准全片主音轨（含响度平衡及可选背景音乐侧链压缩）并封装标准 MP4。
+ * 1) 组装画面数据并校验帧摘要，断点重跑时自动跳过已完整落盘的页面截图或章节视频分片；
+ * 2) 启动模板本地服务与 Playwright 无头浏览器渲染缺失页面或分片（退出前确保安全关闭浏览器与服务）；
+ * 3) 生成封面图、按统一量化时间轴校准全片主音轨（含响度限制与背景音乐侧链闪避）并封装标准 MP4。
  */
 export async function runRenderStage(opts: {
   ctx: CoreContext;
@@ -319,6 +580,7 @@ export async function runRenderStage(opts: {
   const outputDir = path.join(runDir, 'output');
   const videoFile = path.join(outputDir, 'video.mp4');
   const coverFile = path.join(outputDir, 'cover.jpg');
+  const ffprobeBin = resolveFfprobeFromFfmpeg(ffmpegBin);
 
   const resolvedTemplate = resolveActiveTemplate(
     ctx,
@@ -327,7 +589,14 @@ export async function runRenderStage(opts: {
   );
   const adapter: TemplateAdapter = resolvedTemplate.adapter;
 
-  const issue = await buildRenderableIssue({ ctx, runId, settings, packageData });
+  const issue = await buildRenderableIssue({
+    ctx,
+    runId,
+    settings,
+    packageData,
+    timeline,
+    templateDir: resolvedTemplate.dir,
+  });
   const templateData = adapter.buildData(issue, timeline);
   const plan: PagePlan[] = adapter.planPages(issue, timeline);
   if (plan.length === 0) {
@@ -336,126 +605,514 @@ export async function runRenderStage(opts: {
 
   await writeJsonAtomic(templateDataFile, templateData);
 
-  const digest = crypto
-    .createHash('sha1')
-    .update(
-      JSON.stringify({
-        template: resolvedTemplate.name,
-        adapter: adapter.id,
-        width: settings.render.width,
-        height: settings.render.height,
-        templateData,
-        plan,
-      }),
-      'utf8',
-    )
-    .digest('hex');
-
-  const prevProgress = await readJsonOrNull<FramesProgressRecord>(progressFile);
-  const digestMatched =
-    prevProgress?.digest === digest &&
-    prevProgress.width === settings.render.width &&
-    prevProgress.height === settings.render.height;
-
-  if (!digestMatched) {
-    // 模板数据或尺寸变更时彻底清理旧帧目录，禁止吞掉权限错误导致新旧截屏混用
-    await fs.rm(framesDir, { recursive: true, force: true });
-  }
-  await fs.mkdir(framesDir, { recursive: true });
-  await writeJsonAtomic(progressFile, {
-    digest,
-    width: settings.render.width,
-    height: settings.render.height,
-    template: resolvedTemplate.name,
-  });
-
-  const frameFilesByIdx = new Map<number, string>();
-  const pendingPlan: PagePlan[] = [];
-  for (const p of plan) {
-    const file = path.join(framesDir, `page-${String(p.index).padStart(2, '0')}.png`);
-    frameFilesByIdx.set(p.index, file);
-    if (digestMatched && (await isValidPngFile(file))) {
-      continue;
-    }
-    await fs.rm(file, { force: true }).catch(() => undefined);
-    pendingPlan.push(p);
-  }
-
-  if (pendingPlan.length > 0) {
-    if (signal?.aborted) {
-      throw new DOMException('已取消', 'AbortError');
-    }
-
-    const exePath = await resolveChromiumExecutablePath();
-    const server = await adapter.prepare({ dir: resolvedTemplate.dir, runDir });
-    let browser: Awaited<ReturnType<typeof chromium.launch>> | null = null;
-    const onAbort = () => {
-      void browser?.close().catch(() => undefined);
-      void server.close().catch(() => undefined);
-    };
-    signal?.addEventListener('abort', onAbort, { once: true });
-
-    try {
-      if (signal?.aborted) {
-        throw new DOMException('已取消', 'AbortError');
-      }
-      browser = await chromium.launch({
-        headless: true,
-        handleSIGINT: false,
-        handleSIGTERM: false,
-        handleSIGHUP: false,
-        ...(exePath ? { executablePath: exePath } : {}),
-      });
-      const browserCtx = await browser.newContext({
-        viewport: { width: settings.render.width, height: settings.render.height },
-        deviceScaleFactor: 1,
-      });
-      const page = await browserCtx.newPage();
-      await page.setViewportSize({
-        width: settings.render.width,
-        height: settings.render.height,
-      });
-      await page.goto(`${server.baseUrl}/?clean=1&transition=none&motion=static`, {
-        waitUntil: 'load',
-        timeout: 30_000,
-      });
-      await adapter.capture(page, templateData, pendingPlan, framesDir);
-      if (signal?.aborted) {
-        throw new DOMException('已取消', 'AbortError');
-      }
-    } catch (err) {
-      if (signal?.aborted || (err instanceof Error && err.name === 'AbortError')) {
-        throw new DOMException('已取消', 'AbortError');
-      }
-      throw new PipelineError(
-        'render_failed',
-        `浏览器截图渲染失败: ${err instanceof Error ? err.message : String(err)}`,
-        { cause: err },
-      );
-    } finally {
-      signal?.removeEventListener('abort', onAbort);
-      try {
-        if (browser) {
-          await Promise.race([
-            browser.close().catch(() => undefined),
-            new Promise<void>((r) => setTimeout(r, 5000)),
-          ]);
-        }
-      } finally {
-        await server.close().catch(() => undefined);
-      }
-    }
-  }
-
   const orderedFrames: string[] = [];
   const orderedDurations: number[] = [];
-  for (const p of plan) {
-    const file = frameFilesByIdx.get(p.index);
-    if (!file || !(await isValidPngFile(file))) {
-      throw new PipelineError('render_failed', `缺少或损坏的渲染帧截图: ${file ?? p.sectionKey}`);
+  const orderedSectionMp4s: string[] = [];
+  let capturedCount = 0;
+  const renderSectionsFn = adapter.renderSections?.bind(adapter);
+  const useDynamicSections = typeof renderSectionsFn === 'function';
+  const quantized = useDynamicSections
+    ? quantizeTimelineToFps(timeline, settings.render.fps)
+    : null;
+
+  if (renderSectionsFn && quantized) {
+    await fs.mkdir(framesDir, { recursive: true });
+    const sectionsProgressFile = path.join(framesDir, 'sections-progress.json');
+    const prevSectionsProgress = (await readJsonOrNull<SectionsProgressFile>(
+      sectionsProgressFile,
+    )) ?? {
+      template: resolvedTemplate.name,
+      sections: {},
+    };
+
+    // 收集重跑归档目录中的历史章节缓存，使从渲染阶段重跑（如替换单张配图或背景音乐）也能复用未改动的章节分片
+    const archivedFramesSources: Array<{
+      framesDir: string;
+      progress: SectionsProgressFile;
+    }> = [];
+    const archiveRoot = path.join(runDir, 'archive');
+    try {
+      const archiveDirs = await fs.readdir(archiveRoot, { withFileTypes: true });
+      const renderArchives = archiveDirs
+        .filter((d) => d.isDirectory())
+        .map((d) => d.name)
+        .sort((a, b) => b.localeCompare(a, undefined, { numeric: true }));
+      for (const dirName of renderArchives) {
+        const archFrames = path.join(archiveRoot, dirName, 'frames');
+        const archProg = await readJsonOrNull<SectionsProgressFile>(
+          path.join(archFrames, 'sections-progress.json'),
+        );
+        if (archProg && archProg.template === resolvedTemplate.name) {
+          archivedFramesSources.push({ framesDir: archFrames, progress: archProg });
+        }
+      }
+    } catch {
+      // 尚未产生归档目录时忽略
     }
-    orderedFrames.push(file);
-    orderedDurations.push(p.durationMs);
+
+    const hashRunRelFile = async (relPath: string | undefined): Promise<string | null> => {
+      if (!relPath) {
+        return null;
+      }
+      try {
+        const buf = await fs.readFile(path.join(runDir, relPath));
+        return crypto.createHash('sha1').update(buf).digest('hex');
+      } catch {
+        return null;
+      }
+    };
+
+    const hostMascotFileHash = await hashRunRelFile(issue.hostMascotPath);
+    const itemImageFileHashes = await Promise.all(
+      issue.items.map((it) => hashRunRelFile(it.imagePath)),
+    );
+
+    const assetFingerprint = adapter.getAssetFingerprint
+      ? await adapter.getAssetFingerprint({
+          templateDir: resolvedTemplate.dir,
+          rootDir: ctx.paths.rootDir,
+          issue,
+          signal,
+        })
+      : resolvedTemplate.name;
+
+    const dataObj =
+      templateData && typeof templateData === 'object'
+        ? (templateData as Record<string, unknown>)
+        : {};
+    const dataItems = Array.isArray(dataObj.items) ? dataObj.items : [];
+    const chapterLabelsSummary = dataItems.map((it) =>
+      it && typeof it === 'object'
+        ? ((it as Record<string, unknown>).progressLabel ??
+          (it as Record<string, unknown>).shortTitle)
+        : '',
+    );
+
+    const getSlideVisualPayload = (secIdx: number): unknown => {
+      if (secIdx === 0) {
+        return {
+          headline: dataObj.headline,
+          items: dataItems.map((it) =>
+            it && typeof it === 'object'
+              ? {
+                  shortTitle: (it as Record<string, unknown>).shortTitle,
+                  category: (it as Record<string, unknown>).category,
+                  source: (it as Record<string, unknown>).source,
+                }
+              : null,
+          ),
+          coverLipSync: dataObj.coverLipSync,
+        };
+      }
+      if (secIdx >= timeline.sections.length - 1) {
+        return {
+          footerCta: dataObj.footerCta,
+          items: dataItems.map((it) =>
+            it && typeof it === 'object'
+              ? {
+                  shortTitle: (it as Record<string, unknown>).shortTitle,
+                  summary: (it as Record<string, unknown>).summary,
+                  source: (it as Record<string, unknown>).source,
+                }
+              : null,
+          ),
+          outroLipSync: dataObj.outroLipSync,
+        };
+      }
+      return {
+        item: dataItems[secIdx - 1] ?? null,
+        imageHash: itemImageFileHashes[secIdx - 1] ?? null,
+      };
+    };
+
+    const getSectionMood = (secIdx: number): MascotMood => {
+      if (secIdx === 0) {
+        return 'neutral';
+      }
+      if (secIdx >= timeline.sections.length - 1) {
+        return 'proud';
+      }
+      return issue.items[secIdx - 1]?.mascotMood ?? 'neutral';
+    };
+
+    const nextSectionsMap: Record<string, SectionCacheRecord> = {};
+    const allSectionPlans: SectionRenderPlan[] = [];
+    const pendingSections: SectionRenderPlan[] = [];
+
+    for (let i = 0; i < quantized.sections.length; i++) {
+      const qSec = quantized.sections[i];
+      if (!qSec) {
+        continue;
+      }
+      const mp4FileName = `section-${String(i).padStart(2, '0')}.mp4`;
+      const pngFileName = `page-${String(i).padStart(2, '0')}.png`;
+      const outMp4Path = path.join(framesDir, mp4FileName);
+      const outPngPath = path.join(framesDir, pngFileName);
+      const sectionMood = getSectionMood(i);
+
+      const secPlan: SectionRenderPlan = {
+        index: i,
+        sectionKey: qSec.sectionKey,
+        startFrame: qSec.startFrame,
+        frameCount: qSec.frameCount,
+        startMs: qSec.quantizedStartMs,
+        durationMs: qSec.quantizedDurationMs,
+        speechMs: qSec.speechMs,
+        mood: sectionMood,
+        outMp4Path,
+        outPngPath,
+      };
+      allSectionPlans.push(secPlan);
+
+      const sectionDigest = crypto
+        .createHash('sha1')
+        .update(
+          JSON.stringify({
+            template: resolvedTemplate.name,
+            adapter: adapter.id,
+            assetFingerprint,
+            width: settings.render.width,
+            height: settings.render.height,
+            fps: settings.render.fps,
+            crf: 18,
+            preset: 'veryfast',
+            jpegQuality: 90,
+            totalFrames: quantized.totalFrames,
+            // 每帧顶部刊头常驻可见的所有全局标识与章节摘要
+            issueTitle: dataObj.issueTitle,
+            date: dataObj.date,
+            issueNumber: dataObj.issueNumber,
+            hostMascotId: dataObj.hostMascotId,
+            hostDisplayName: dataObj.hostDisplayName,
+            hostMascotUrl: dataObj.hostMascotUrl,
+            hostMascotFileHash,
+            hostLive2dUrl: dataObj.hostLive2dUrl,
+            mascotMode: dataObj.mascotMode,
+            chapterLabelsSummary,
+            index: i,
+            startFrame: qSec.startFrame,
+            frameCount: qSec.frameCount,
+            speechMs: qSec.speechMs,
+            mood: sectionMood,
+            currSlide: getSlideVisualPayload(i),
+            prevSlide: i > 0 ? getSlideVisualPayload(i - 1) : null,
+          }),
+          'utf8',
+        )
+        .digest('hex');
+
+      const cacheKey = `${String(i).padStart(2, '0')}:${qSec.sectionKey}`;
+      nextSectionsMap[cacheKey] = {
+        sectionDigest,
+        width: settings.render.width,
+        height: settings.render.height,
+        fps: settings.render.fps,
+        frameCount: qSec.frameCount,
+      };
+
+      const prevEntry =
+        prevSectionsProgress.template === resolvedTemplate.name
+          ? prevSectionsProgress.sections[cacheKey]
+          : undefined;
+      let canReuse =
+        prevEntry?.sectionDigest === sectionDigest &&
+        prevEntry.width === settings.render.width &&
+        prevEntry.height === settings.render.height &&
+        prevEntry.fps === settings.render.fps &&
+        prevEntry.frameCount === qSec.frameCount &&
+        (await isValidMp4Segment({
+          filePath: outMp4Path,
+          expectedDurationMs: qSec.quantizedDurationMs,
+          width: settings.render.width,
+          height: settings.render.height,
+          fps: settings.render.fps,
+          ffprobeBin,
+        })) &&
+        (await isValidPngFile(outPngPath));
+
+      if (!canReuse) {
+        for (const arch of archivedFramesSources) {
+          const archEntry = arch.progress.sections[cacheKey];
+          if (
+            archEntry?.sectionDigest === sectionDigest &&
+            archEntry.width === settings.render.width &&
+            archEntry.height === settings.render.height &&
+            archEntry.fps === settings.render.fps &&
+            archEntry.frameCount === qSec.frameCount
+          ) {
+            const archMp4 = path.join(arch.framesDir, mp4FileName);
+            const archPng = path.join(arch.framesDir, pngFileName);
+            if (
+              (await isValidMp4Segment({
+                filePath: archMp4,
+                expectedDurationMs: qSec.quantizedDurationMs,
+                width: settings.render.width,
+                height: settings.render.height,
+                fps: settings.render.fps,
+                ffprobeBin,
+              })) &&
+              (await isValidPngFile(archPng))
+            ) {
+              const [mp4Buf, pngBuf] = await Promise.all([
+                fs.readFile(archMp4),
+                fs.readFile(archPng),
+              ]);
+              await Promise.all([
+                writeFileAtomic(outMp4Path, mp4Buf),
+                writeFileAtomic(outPngPath, pngBuf),
+              ]);
+              canReuse = true;
+              break;
+            }
+          }
+        }
+      }
+
+      if (!canReuse) {
+        await fs.rm(outMp4Path, { force: true }).catch(() => undefined);
+        await fs.rm(outPngPath, { force: true }).catch(() => undefined);
+        pendingSections.push(secPlan);
+      }
+    }
+
+    capturedCount = pendingSections.length;
+
+    if (pendingSections.length > 0) {
+      if (signal?.aborted) {
+        throw new DOMException('已取消', 'AbortError');
+      }
+
+      const exePath = await resolveChromiumExecutablePath();
+      const server = await adapter.prepare({
+        dir: resolvedTemplate.dir,
+        runDir,
+        rootDir: ctx.paths.rootDir,
+        signal,
+      });
+      const browserToken = crypto.randomUUID();
+      let browser: Awaited<ReturnType<typeof chromium.launch>> | null = null;
+      const onAbort = () => {
+        void closeBrowserSafely(browser, browserToken);
+        void server.close().catch(() => undefined);
+      };
+      signal?.addEventListener('abort', onAbort, { once: true });
+
+      try {
+        if (signal?.aborted) {
+          throw new DOMException('已取消', 'AbortError');
+        }
+        browser = await chromium.launch({
+          headless: true,
+          handleSIGINT: false,
+          handleSIGTERM: false,
+          handleSIGHUP: false,
+          args: [
+            '--use-gl=angle',
+            '--enable-webgl',
+            '--ignore-gpu-blocklist',
+            `--aidaily-browser-token=${browserToken}`,
+          ],
+          ...(exePath ? { executablePath: exePath } : {}),
+        });
+        const browserCtx = await browser.newContext({
+          viewport: { width: settings.render.width, height: settings.render.height },
+          deviceScaleFactor: 1,
+        });
+        const page = await browserCtx.newPage();
+        await page.setViewportSize({
+          width: settings.render.width,
+          height: settings.render.height,
+        });
+        await page.goto(`${server.baseUrl}/?clean=1&clock=manual`, {
+          waitUntil: 'load',
+          timeout: 30_000,
+        });
+        await renderSectionsFn({
+          page,
+          data: templateData,
+          sections: pendingSections,
+          width: settings.render.width,
+          height: settings.render.height,
+          fps: settings.render.fps,
+          ffmpegBin,
+          signal,
+        });
+        if (signal?.aborted) {
+          throw new DOMException('已取消', 'AbortError');
+        }
+      } catch (err) {
+        if (signal?.aborted || (err instanceof Error && err.name === 'AbortError')) {
+          throw new DOMException('已取消', 'AbortError');
+        }
+        throw new PipelineError(
+          'render_failed',
+          `动态章节流式渲染失败: ${err instanceof Error ? err.message : String(err)}`,
+          { cause: err },
+        );
+      } finally {
+        signal?.removeEventListener('abort', onAbort);
+        try {
+          await closeBrowserSafely(browser, browserToken);
+        } finally {
+          await server.close().catch(() => undefined);
+        }
+      }
+    }
+
+    for (const secPlan of allSectionPlans) {
+      if (
+        !(await isValidMp4Segment({
+          filePath: secPlan.outMp4Path,
+          expectedDurationMs: secPlan.durationMs,
+          width: settings.render.width,
+          height: settings.render.height,
+          fps: settings.render.fps,
+          ffprobeBin,
+        }))
+      ) {
+        await fs.rm(secPlan.outMp4Path, { force: true }).catch(() => undefined);
+        throw new PipelineError('render_failed', `缺少或损坏的章节视频分片: ${secPlan.outMp4Path}`);
+      }
+      if (!(await isValidPngFile(secPlan.outPngPath))) {
+        await fs.rm(secPlan.outPngPath, { force: true }).catch(() => undefined);
+        throw new PipelineError(
+          'render_failed',
+          `缺少或损坏的章节代表帧截图: ${secPlan.outPngPath}`,
+        );
+      }
+      orderedSectionMp4s.push(secPlan.outMp4Path);
+      orderedFrames.push(secPlan.outPngPath);
+      orderedDurations.push(secPlan.durationMs);
+    }
+
+    await writeJsonAtomic(sectionsProgressFile, {
+      template: resolvedTemplate.name,
+      sections: nextSectionsMap,
+    } satisfies SectionsProgressFile);
+  } else {
+    const digest = crypto
+      .createHash('sha1')
+      .update(
+        JSON.stringify({
+          template: resolvedTemplate.name,
+          adapter: adapter.id,
+          width: settings.render.width,
+          height: settings.render.height,
+          templateData,
+          plan,
+        }),
+        'utf8',
+      )
+      .digest('hex');
+
+    const prevProgress = await readJsonOrNull<FramesProgressRecord>(progressFile);
+    const digestMatched =
+      prevProgress?.digest === digest &&
+      prevProgress.width === settings.render.width &&
+      prevProgress.height === settings.render.height;
+
+    if (!digestMatched) {
+      // 模板数据或尺寸变更时彻底清理旧帧目录，禁止吞掉权限错误导致新旧截屏混用
+      await fs.rm(framesDir, { recursive: true, force: true });
+    }
+    await fs.mkdir(framesDir, { recursive: true });
+    await writeJsonAtomic(progressFile, {
+      digest,
+      width: settings.render.width,
+      height: settings.render.height,
+      template: resolvedTemplate.name,
+    });
+
+    const frameFilesByIdx = new Map<number, string>();
+    const pendingPlan: PagePlan[] = [];
+    for (const p of plan) {
+      const file = path.join(framesDir, `page-${String(p.index).padStart(2, '0')}.png`);
+      frameFilesByIdx.set(p.index, file);
+      if (digestMatched && (await isValidPngFile(file))) {
+        continue;
+      }
+      await fs.rm(file, { force: true }).catch(() => undefined);
+      pendingPlan.push(p);
+    }
+
+    capturedCount = pendingPlan.length;
+
+    if (pendingPlan.length > 0) {
+      if (signal?.aborted) {
+        throw new DOMException('已取消', 'AbortError');
+      }
+
+      const exePath = await resolveChromiumExecutablePath();
+      const server = await adapter.prepare({
+        dir: resolvedTemplate.dir,
+        runDir,
+        rootDir: ctx.paths.rootDir,
+        signal,
+      });
+      const browserToken = crypto.randomUUID();
+      let browser: Awaited<ReturnType<typeof chromium.launch>> | null = null;
+      const onAbort = () => {
+        void closeBrowserSafely(browser, browserToken);
+        void server.close().catch(() => undefined);
+      };
+      signal?.addEventListener('abort', onAbort, { once: true });
+
+      try {
+        if (signal?.aborted) {
+          throw new DOMException('已取消', 'AbortError');
+        }
+        browser = await chromium.launch({
+          headless: true,
+          handleSIGINT: false,
+          handleSIGTERM: false,
+          handleSIGHUP: false,
+          args: [`--aidaily-browser-token=${browserToken}`],
+          ...(exePath ? { executablePath: exePath } : {}),
+        });
+        const browserCtx = await browser.newContext({
+          viewport: { width: settings.render.width, height: settings.render.height },
+          deviceScaleFactor: 1,
+        });
+        const page = await browserCtx.newPage();
+        await page.setViewportSize({
+          width: settings.render.width,
+          height: settings.render.height,
+        });
+        await page.goto(`${server.baseUrl}/?clean=1&transition=none&motion=static`, {
+          waitUntil: 'load',
+          timeout: 30_000,
+        });
+        await adapter.capture(page, templateData, pendingPlan, framesDir);
+        if (signal?.aborted) {
+          throw new DOMException('已取消', 'AbortError');
+        }
+      } catch (err) {
+        if (signal?.aborted || (err instanceof Error && err.name === 'AbortError')) {
+          throw new DOMException('已取消', 'AbortError');
+        }
+        throw new PipelineError(
+          'render_failed',
+          `浏览器截图渲染失败: ${err instanceof Error ? err.message : String(err)}`,
+          { cause: err },
+        );
+      } finally {
+        signal?.removeEventListener('abort', onAbort);
+        try {
+          await closeBrowserSafely(browser, browserToken);
+        } finally {
+          await server.close().catch(() => undefined);
+        }
+      }
+    }
+
+    for (const p of plan) {
+      const file = frameFilesByIdx.get(p.index);
+      if (!file || !(await isValidPngFile(file))) {
+        throw new PipelineError('render_failed', `缺少或损坏的渲染帧截图: ${file ?? p.sectionKey}`);
+      }
+      orderedFrames.push(file);
+      orderedDurations.push(p.durationMs);
+    }
   }
 
   const firstFrame = orderedFrames[0];
@@ -478,12 +1135,15 @@ export async function runRenderStage(opts: {
     if (bgmName && (path.basename(bgmName) !== bgmName || !/\.(mp3|wav|flac|m4a)$/i.test(bgmName)))
       throw new Error('背景音乐文件名不合法');
     await buildMasterAudioWav({
-      timeline,
+      timeline: quantized ? quantized.audioTimeline : timeline,
       runDir,
       outWav: masterWavFile,
       sampleRate: settings.tts.postprocess.sampleRate,
       loudnessLUFS: settings.tts.postprocess.loudnessLUFS,
       isSilentProvider: settings.tts.provider === 'silent',
+      // 本地克隆引擎已在段落合成后完成两遍响度与尾音淡出处理，主轨不再重复执行动态均衡
+      levelVoice:
+        settings.tts.provider !== 'silent' && !isLocalVoiceCloneProvider(settings.tts.provider),
       bgm: bgmName
         ? { ...settings.render.bgm, file: path.join('assets', 'bgm', bgmName) }
         : settings.render.bgm,
@@ -492,19 +1152,33 @@ export async function runRenderStage(opts: {
       signal,
     });
 
-    await composeSlidesVideoMp4({
-      frameFiles: orderedFrames,
-      pageDurationsMs: orderedDurations,
-      totalMs: timeline.totalMs,
-      masterWav: masterWavFile,
-      outMp4: videoFile,
-      width: settings.render.width,
-      height: settings.render.height,
-      fps: settings.render.fps,
-      sampleRate: settings.tts.postprocess.sampleRate,
-      ffmpegBin,
-      signal,
-    });
+    if (useDynamicSections && quantized) {
+      await composeSectionVideosMp4({
+        sectionMp4Files: orderedSectionMp4s,
+        totalMs: quantized.audioTimeline.totalMs,
+        totalFrames: quantized.totalFrames,
+        fps: settings.render.fps,
+        masterWav: masterWavFile,
+        outMp4: videoFile,
+        sampleRate: settings.tts.postprocess.sampleRate,
+        ffmpegBin,
+        signal,
+      });
+    } else {
+      await composeSlidesVideoMp4({
+        frameFiles: orderedFrames,
+        pageDurationsMs: orderedDurations,
+        totalMs: timeline.totalMs,
+        masterWav: masterWavFile,
+        outMp4: videoFile,
+        width: settings.render.width,
+        height: settings.render.height,
+        fps: settings.render.fps,
+        sampleRate: settings.tts.postprocess.sampleRate,
+        ffmpegBin,
+        signal,
+      });
+    }
   } catch (err) {
     if (err instanceof Error && err.name === 'AbortError') {
       throw err;
@@ -525,8 +1199,8 @@ export async function runRenderStage(opts: {
     masterAudioPath: path.relative(ctx.paths.rootDir, masterWavFile),
     template: resolvedTemplate.name,
     frameCount: orderedFrames.length,
-    capturedFrameCount: pendingPlan.length,
-    reusedFrameCount: orderedFrames.length - pendingPlan.length,
+    capturedFrameCount: capturedCount,
+    reusedFrameCount: orderedFrames.length - capturedCount,
     totalMs: timeline.totalMs,
   };
 }

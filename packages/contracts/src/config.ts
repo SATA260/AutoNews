@@ -129,7 +129,7 @@ const SettingsFieldsSchema = z.object({
     reserveFactor: z.number().int().min(1).max(5),
     minScore: z.number().min(1).max(10).optional(),
     freshnessHours: z.number().int().positive(),
-    itemConcurrency: z.number().int().min(1).max(10),
+    itemConcurrency: z.number().int().min(1).max(20),
     refill: z.object({
       maxRounds: z.number().int().min(0).max(10),
       useBackupSources: z.boolean(),
@@ -149,7 +149,7 @@ const SettingsFieldsSchema = z.object({
   }),
   contentLimits: ContentLimitsSchema,
   ai: z.object({
-    maxConcurrentCalls: z.number().int().min(1).max(10),
+    maxConcurrentCalls: z.number().int().min(1).max(20),
     providers: z.record(z.string().min(1), ModelApiProviderSchema).optional(),
     stages: z.object({
       select: StageAiConfigSchema,

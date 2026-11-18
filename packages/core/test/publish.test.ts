@@ -171,6 +171,7 @@ async function seedCompletedRunReadyForReview(
       finalJson: {
         title: 'OpenAI 发布全新推理架构',
         shortTitle: 'OpenAI 新推理架构',
+        progressLabel: 'OpenAI新架构',
         category: '大模型',
         entity: 'OpenAI',
         summary: '今天官方上线了推理优化版本，适合日常开发场景。',
@@ -320,6 +321,7 @@ describe('Bilibili publishing, AI declaration, consumption, and uncertain recove
           finalJson: {
             title: 'Full',
             shortTitle: '测试新闻条目',
+            progressLabel: '测试新闻条目',
             category: 'AI',
             entity: 'OpenAI',
             summary: 'S',

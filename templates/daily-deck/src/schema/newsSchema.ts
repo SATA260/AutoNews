@@ -4,6 +4,8 @@ import { z } from 'zod';
 export type PresetMascotId = 'deepseek' | 'gpt' | 'claude' | 'gemini' | 'grok' | 'none';
 /** 右下角形象的切换方式：随每条新闻切换，或整期固定同一位 */
 export type MascotMode = 'per-item' | 'fixed-host';
+/** 看板娘随新闻阵营或话题呈现的微表情状态 */
+export type MascotMood = 'neutral' | 'proud' | 'surprised' | 'thinking';
 
 /** 数据清洗过程中记录的单条提示或自动修正明细 */
 export interface ValidationWarning {
@@ -18,13 +20,58 @@ export interface SanitizedMetric {
   value: string;
 }
 
+/** 信息卡片网格支持的语义图标名称 */
+export type CardIconName =
+  | 'rocket'
+  | 'cpu'
+  | 'trending-down'
+  | 'zap'
+  | 'grid'
+  | 'gift'
+  | 'clipboard-check'
+  | 'users'
+  | 'code'
+  | 'shield'
+  | 'globe'
+  | 'sparkles';
+
+/** 外部传入的单张新闻信息卡片输入结构 */
+export interface NewsCardInput {
+  icon?: CardIconName | string;
+  title: string;
+  body: string;
+}
+
+/** 经安全清洗后的单张新闻信息卡片展示结构 */
+export interface SanitizedInfoCard {
+  icon: CardIconName;
+  title: string;
+  body: string;
+}
+
+/** 外部传入的单条同步口播字幕输入结构 */
+export interface SubtitleCueInput {
+  text: string;
+  startSec: number;
+  endSec: number;
+}
+
+/** 经安全清洗与边界校验后的单条口播字幕结构 */
+export interface SanitizedSubtitleCue {
+  text: string;
+  startSec: number;
+  endSec: number;
+}
+
 /** 外部传入的单条新闻原始输入结构 */
 export interface NewsItemInput {
   id?: string;
   category?: string;
   shortTitle?: string;
+  progressLabel?: string;
   title: string;
   summary: string;
+  cards?: NewsCardInput[];
   keyPoints?: string[];
   imageUrl?: string | null;
   secondaryImageUrl?: string | null;
@@ -39,7 +86,13 @@ export interface NewsItemInput {
   publishedAt?: string | null;
   mascotId?: PresetMascotId | string;
   customMascotUrl?: string | null;
+  mascotMood?: MascotMood | string;
+  frameCount?: number | null;
   durationSec?: number;
+  speechDurationSec?: number;
+  audioUrl?: string | null;
+  lipSyncFrames?: number[];
+  subtitles?: SubtitleCueInput[];
 }
 
 /** 外部传入的整期日报原始输入结构 */
@@ -49,11 +102,27 @@ export interface DailyIssueInput {
   date?: string;
   headline?: string;
   footerCta?: string;
+  fps?: number;
   hostMascotId?: PresetMascotId | string;
+  hostDisplayName?: string;
   hostMascotUrl?: string | null;
+  hostLive2dUrl?: string | null;
   mascotMode?: MascotMode | string;
+  bgmAudioUrl?: string | null;
+  bgmVolumeDb?: number;
+  pagePaddingSec?: number;
+  coverFrameCount?: number | null;
   coverDurationSec?: number;
+  coverSpeechSec?: number;
+  coverAudioUrl?: string | null;
+  coverLipSync?: number[];
+  coverSubtitles?: SubtitleCueInput[];
+  outroFrameCount?: number | null;
   outroDurationSec?: number;
+  outroSpeechSec?: number;
+  outroAudioUrl?: string | null;
+  outroLipSync?: number[];
+  outroSubtitles?: SubtitleCueInput[];
   items: NewsItemInput[];
 }
 
@@ -63,8 +132,10 @@ export interface SanitizedNewsItem {
   indexLabel: string;
   category: string;
   shortTitle: string;
+  progressLabel: string;
   title: string;
   summary: string;
+  cards: SanitizedInfoCard[];
   keyPoints: string[];
   imageUrl: string | null;
   secondaryImageUrl: string | null;
@@ -76,7 +147,13 @@ export interface SanitizedNewsItem {
   publishedAt: string;
   mascotId: PresetMascotId;
   customMascotUrl: string | null;
+  mascotMood: MascotMood;
+  frameCount: number | null;
   durationSec: number;
+  speechDurationSec: number;
+  audioUrl: string | null;
+  lipSyncFrames: number[];
+  subtitles: SanitizedSubtitleCue[];
 }
 
 /** 经安全清洗与上限裁剪后的整期日报渲染数据 */
@@ -86,11 +163,27 @@ export interface SanitizedDailyIssue {
   date: string;
   headline: string;
   footerCta: string;
+  fps: number;
   hostMascotId: PresetMascotId;
+  hostDisplayName: string;
   hostMascotUrl: string | null;
+  hostLive2dUrl: string | null;
   mascotMode: MascotMode;
+  bgmAudioUrl: string | null;
+  bgmVolumeDb: number;
+  pagePaddingSec: number;
+  coverFrameCount: number | null;
   coverDurationSec: number;
+  coverSpeechSec: number;
+  coverAudioUrl: string | null;
+  coverLipSync: number[];
+  coverSubtitles: SanitizedSubtitleCue[];
+  outroFrameCount: number | null;
   outroDurationSec: number;
+  outroSpeechSec: number;
+  outroAudioUrl: string | null;
+  outroLipSync: number[];
+  outroSubtitles: SanitizedSubtitleCue[];
   items: SanitizedNewsItem[];
 }
 
@@ -110,10 +203,15 @@ export const HARD_LIMITS = {
   date: 20,
   headline: 48,
   footerCta: 56,
+  hostDisplayName: 16,
   category: 10,
   shortTitle: 30,
+  progressLabel: 12,
   title: 48,
   summary: 100,
+  cardsMaxCount: 8,
+  cardTitle: 16,
+  cardBody: 80,
   keyPointsCount: 3,
   keyPoint: 32,
   imageCaption: 44,
@@ -130,6 +228,9 @@ export const HARD_LIMITS = {
   defaultItemDurationSec: 8,
   defaultCoverDurationSec: 5,
   defaultOutroDurationSec: 6,
+  maxLipSyncFrames: 12000,
+  subtitleText: 80,
+  subtitlesMaxCount: 24,
 } as const;
 
 const PRESET_MASCOTS: readonly PresetMascotId[] = [
@@ -141,9 +242,155 @@ const PRESET_MASCOTS: readonly PresetMascotId[] = [
   'none',
 ] as const;
 
+const MASCOT_DEFAULT_NAMES: Record<PresetMascotId, string> = {
+  deepseek: '聪明的大肥鱼',
+  gpt: 'gpt',
+  claude: '小克',
+  gemini: '哈基米',
+  grok: 'Grok',
+  none: '',
+};
+
 const MASCOT_MODES: readonly MascotMode[] = ['per-item', 'fixed-host'] as const;
+const MASCOT_MOODS: readonly MascotMood[] = ['neutral', 'proud', 'surprised', 'thinking'] as const;
 
 const LooseRecordSchema = z.record(z.unknown());
+
+const VALID_CARD_ICONS: readonly CardIconName[] = [
+  'rocket',
+  'cpu',
+  'trending-down',
+  'zap',
+  'grid',
+  'gift',
+  'clipboard-check',
+  'users',
+  'code',
+  'shield',
+  'globe',
+  'sparkles',
+] as const;
+
+const FALLBACK_CARD_ICON_ORDER: readonly CardIconName[] = [
+  'rocket',
+  'cpu',
+  'trending-down',
+  'grid',
+  'gift',
+  'clipboard-check',
+  'users',
+  'code',
+] as const;
+
+/** 根据标题与正文关键词匹配语义化卡片图标，未命中时按索引循环回退 */
+function inferCardIcon(title: string, body: string, idx: number): CardIconName {
+  const sample = `${title} ${body}`.toLowerCase();
+  if (/参数|规格|架构|芯片|上下文|tokens|吞吐|延迟/.test(sample)) return 'cpu';
+  if (/降价|成本|价格|收费|美元|万元|元|定价/.test(sample)) return 'trending-down';
+  if (/多平台|平台|接入|客户端|上线|集成|生态/.test(sample)) return 'grid';
+  if (/免费|折扣|限时|福利|配额|优惠/.test(sample)) return 'gift';
+  if (/自评|评测|表现|基准|对比|准确|解决率|测试/.test(sample)) return 'clipboard-check';
+  if (/盲测|用户|大众|开发者|团队|满意度/.test(sample)) return 'users';
+  if (/开源|代码|协议|api|schema|json|重构/.test(sample)) return 'code';
+  if (/限制|范围|边界|合规|安全|收费会员/.test(sample)) return 'shield';
+  if (/检索|实时|网页|联网|全球/.test(sample)) return 'globe';
+  if (/发布|推出|新品|亮相/.test(sample)) return 'rocket';
+  if (/响应|提速|加速|高效|性能/.test(sample)) return 'zap';
+  return FALLBACK_CARD_ICON_ORDER[idx % FALLBACK_CARD_ICON_ORDER.length]!;
+}
+
+/** 校验单张卡片图标标识，未传或非法时结合文案自动选择匹配图标 */
+function sanitizeCardIcon(
+  rawIcon: unknown,
+  title: string,
+  body: string,
+  idx: number,
+): CardIconName {
+  const cleaned = normalizeText(rawIcon).toLowerCase();
+  if ((VALID_CARD_ICONS as readonly string[]).includes(cleaned)) {
+    return cleaned as CardIconName;
+  }
+  return inferCardIcon(title, body, idx);
+}
+
+/** 清洗结构化信息卡片数组；当旧版输入未提供 cards 时，从核心结论与要点自动拆解生成安全卡片 */
+function sanitizeItemCards(
+  rawCards: unknown,
+  summary: string,
+  keyPoints: readonly string[],
+  officialQuote: string,
+  basePath: string,
+  warnings: ValidationWarning[],
+): SanitizedInfoCard[] {
+  if (Array.isArray(rawCards) && rawCards.length > 0) {
+    if (rawCards.length > HARD_LIMITS.cardsMaxCount) {
+      warnings.push({
+        path: `${basePath}.cards`,
+        code: 'clamped',
+        message: `${basePath}.cards 超过 ${HARD_LIMITS.cardsMaxCount} 张，已保留前 ${HARD_LIMITS.cardsMaxCount} 张`,
+      });
+    }
+    const cleanedCards = rawCards
+      .slice(0, HARD_LIMITS.cardsMaxCount)
+      .map((entry, cIdx): SanitizedInfoCard | null => {
+        const rec = LooseRecordSchema.safeParse(entry);
+        if (!rec.success) {
+          return null;
+        }
+        const title = cleanAndTruncate(
+          rec.data.title,
+          HARD_LIMITS.cardTitle,
+          '',
+          `${basePath}.cards[${cIdx}].title`,
+          warnings,
+        );
+        const body = cleanAndTruncate(
+          rec.data.body,
+          HARD_LIMITS.cardBody,
+          '',
+          `${basePath}.cards[${cIdx}].body`,
+          warnings,
+        );
+        if (!title || !body) {
+          return null;
+        }
+        return {
+          icon: sanitizeCardIcon(rec.data.icon, title, body, cIdx),
+          title,
+          body,
+        };
+      })
+      .filter((card): card is SanitizedInfoCard => card !== null);
+
+    if (cleanedCards.length > 0) {
+      return cleanedCards;
+    }
+  }
+
+  // 兼容旧版未传入 cards 的数据，仅基于摘要、要点及正文引语补全网格卡片
+  const fallbackCards: SanitizedInfoCard[] = [
+    {
+      icon: 'rocket',
+      title: '核心进展',
+      body: truncateCodepoints(summary, HARD_LIMITS.cardBody).text,
+    },
+  ];
+  keyPoints.forEach((kp, idx) => {
+    fallbackCards.push({
+      icon: inferCardIcon('', kp, idx + 1),
+      title: `关键要点 ${String(idx + 1).padStart(2, '0')}`,
+      body: truncateCodepoints(kp, HARD_LIMITS.cardBody).text,
+    });
+  });
+  if (keyPoints.length === 0 && officialQuote) {
+    fallbackCards.push({
+      icon: 'clipboard-check',
+      title: '官方披露',
+      body: truncateCodepoints(officialQuote, HARD_LIMITS.cardBody).text,
+    });
+  }
+  return fallbackCards.slice(0, HARD_LIMITS.cardsMaxCount);
+}
 
 /** 去除文本中的不可见控制字符并合并多余空白 */
 function normalizeText(value: unknown): string {
@@ -214,7 +461,7 @@ export function cleanAndTruncate(
   return text;
 }
 
-/** 校验媒体链接，仅允许安全的网址、本地相对路径或合法图片编码数据 */
+/** 校验图片或模型链接，仅允许安全的网址、本地相对路径或合法图片数据编码 */
 export function sanitizeMediaUrl(
   rawUrl: unknown,
   path: string,
@@ -244,13 +491,118 @@ export function sanitizeMediaUrl(
   return null;
 }
 
+/** 校验口播与背景音频链接，允许本地静态路径、标准网址、Blob 或音频数据编码 */
+export function sanitizeAudioUrl(
+  rawUrl: unknown,
+  path: string,
+  warnings: ValidationWarning[],
+): string | null {
+  const cleaned = normalizeText(rawUrl);
+  if (!cleaned) {
+    return null;
+  }
+
+  const lower = cleaned.toLowerCase();
+  if (
+    lower.startsWith('http://') ||
+    lower.startsWith('https://') ||
+    lower.startsWith('blob:') ||
+    cleaned.startsWith('/') ||
+    cleaned.startsWith('./') ||
+    /^data:audio\/(wav|x-wav|mpeg|mp3|mp4|ogg|flac);/i.test(cleaned)
+  ) {
+    return cleaned;
+  }
+
+  warnings.push({
+    path,
+    code: 'invalid_url',
+    message: `${path} 不是受支持的音频链接，已安全忽略`,
+  });
+  return null;
+}
+
+/** 清洗预计算的口型振幅序列，将数值钳制在 [0, 1] 范围内 */
+function sanitizeLipSyncArray(raw: unknown): number[] {
+  if (!Array.isArray(raw) || raw.length === 0) {
+    return [];
+  }
+  const limit = Math.min(raw.length, HARD_LIMITS.maxLipSyncFrames);
+  const result: number[] = new Array<number>(limit);
+  for (let i = 0; i < limit; i++) {
+    const num = Number(raw[i]);
+    result[i] = Number.isFinite(num) ? Math.min(1, Math.max(0, num)) : 0;
+  }
+  return result;
+}
+
+/** 清洗同步口播字幕列表，限制文字长度并保证起止秒数合法且位于章节总时长之内 */
+function sanitizeSubtitleArray(raw: unknown, maxDurationSec: number): SanitizedSubtitleCue[] {
+  if (!Array.isArray(raw) || raw.length === 0 || maxDurationSec <= 0) {
+    return [];
+  }
+  const cues: SanitizedSubtitleCue[] = [];
+  let prevEndSec = 0;
+  for (const entry of raw.slice(0, HARD_LIMITS.subtitlesMaxCount)) {
+    const rec = LooseRecordSchema.safeParse(entry);
+    if (!rec.success) {
+      continue;
+    }
+    const rawText = normalizeText(rec.data.text).replace(/。+$/, '').trim();
+    if (!rawText) {
+      continue;
+    }
+    const text = truncateCodepoints(rawText, HARD_LIMITS.subtitleText).text;
+    const rawStart = Number(rec.data.startSec);
+    const rawEnd = Number(rec.data.endSec);
+    if (!Number.isFinite(rawStart) || !Number.isFinite(rawEnd)) {
+      continue;
+    }
+    if (prevEndSec >= maxDurationSec - 0.02) {
+      break;
+    }
+    const startSec = Math.max(
+      prevEndSec,
+      Math.min(maxDurationSec - 0.02, Math.round(rawStart * 1000) / 1000),
+    );
+    if (startSec >= maxDurationSec - 0.02) {
+      continue;
+    }
+    const endSec = Math.max(
+      startSec + 0.02,
+      Math.min(maxDurationSec, Math.round(rawEnd * 1000) / 1000),
+    );
+    prevEndSec = endSec;
+    cues.push({ text, startSec, endSec });
+  }
+  return cues;
+}
+
+/** 校验可选的章节精确帧数配置，仅接受合理正整数 */
+function sanitizeOptionalFrameCount(raw: unknown, maxFrames: number): number | null {
+  if (raw === undefined || raw === null || raw === '') {
+    return null;
+  }
+  const num = typeof raw === 'number' ? raw : Number(raw);
+  if (!Number.isFinite(num) || num < 1) {
+    return null;
+  }
+  return Math.min(maxFrames, Math.max(1, Math.round(num)));
+}
+
+/** 校验并钳制页面停留秒数，保留毫秒级精度并在传入精确帧数时严格使用帧网格时长 */
 function clampDuration(
   raw: unknown,
+  frameCount: number | null,
+  fps: number,
   fallback: number,
   maxSec: number,
   path: string,
   warnings: ValidationWarning[],
 ): number {
+  if (frameCount !== null && fps > 0) {
+    return Math.min(maxSec, Math.max(1 / fps, frameCount / fps));
+  }
   if (raw === undefined || raw === null || raw === '') {
     return fallback;
   }
@@ -263,8 +615,7 @@ function clampDuration(
     });
     return fallback;
   }
-  // Preserve 0.1s precision for exact TTS audio alignment
-  const rounded = Math.round(num * 10) / 10;
+  const rounded = Math.round(num * 1000) / 1000;
   if (rounded < HARD_LIMITS.minDurationSec || rounded > maxSec) {
     const clamped = Math.min(maxSec, Math.max(HARD_LIMITS.minDurationSec, rounded));
     warnings.push({
@@ -277,6 +628,19 @@ function clampDuration(
   return rounded;
 }
 
+/** 校验并归一化章节纯人声播报秒数，确保不超过当前页面总停留时长 */
+function sanitizeSpeechSec(raw: unknown, pageDurationSec: number): number {
+  if (raw === undefined || raw === null || raw === '') {
+    return pageDurationSec;
+  }
+  const num = typeof raw === 'number' ? raw : Number(raw);
+  if (!Number.isFinite(num) || num < 0) {
+    return pageDurationSec;
+  }
+  return Math.min(pageDurationSec, Math.round(num * 1000) / 1000);
+}
+
+/** 校验右下角角色标识，遇到未知标识时记录提示并回退默认角色 */
 function sanitizeMascotId(
   raw: unknown,
   defaultId: PresetMascotId,
@@ -298,6 +662,7 @@ function sanitizeMascotId(
   return defaultId;
 }
 
+/** 校验角色展示切换模式，非法输入自动回退按条目切换 */
 function sanitizeMascotMode(raw: unknown, path: string, warnings: ValidationWarning[]): MascotMode {
   const normalized = normalizeText(raw).toLowerCase();
   if (!normalized) {
@@ -314,10 +679,21 @@ function sanitizeMascotMode(raw: unknown, path: string, warnings: ValidationWarn
   return 'per-item';
 }
 
+/** 校验看板娘表情状态，未知值统一回退自然状态 */
+function sanitizeMascotMood(raw: unknown): MascotMood {
+  const normalized = normalizeText(raw).toLowerCase();
+  if ((MASCOT_MOODS as readonly string[]).includes(normalized)) {
+    return normalized as MascotMood;
+  }
+  return 'neutral';
+}
+
+/** 清洗并补全单条新闻的全部文本、配图、音频与口型字段 */
 function sanitizeSingleNewsItem(
   rawItem: unknown,
   index: number,
   hostMascotId: PresetMascotId,
+  fps: number,
   warnings: ValidationWarning[],
 ): SanitizedNewsItem {
   const basePath = `items[${index}]`;
@@ -348,7 +724,7 @@ function sanitizeSingleNewsItem(
     true,
   );
 
-  // Derive shortTitle cleanly from title when omitted without generating a warning
+  // 未显式传入短标题时从主标题安全截取，不产生额外告警
   const rawShortTitle = normalizeText(obj.shortTitle);
   const shortTitle = rawShortTitle
     ? cleanAndTruncate(
@@ -359,6 +735,18 @@ function sanitizeSingleNewsItem(
         warnings,
       )
     : truncateCodepoints(title, HARD_LIMITS.shortTitle).text;
+
+  // 未显式传入进度条极简总结时从短标题安全截取，兼容旧版手写预览数据
+  const rawProgressLabel = normalizeText(obj.progressLabel);
+  const progressLabel = rawProgressLabel
+    ? cleanAndTruncate(
+        rawProgressLabel,
+        HARD_LIMITS.progressLabel,
+        shortTitle,
+        `${basePath}.progressLabel`,
+        warnings,
+      )
+    : truncateCodepoints(shortTitle, HARD_LIMITS.progressLabel).text;
 
   const rawSummary = normalizeText(obj.summary);
   const summary = cleanAndTruncate(
@@ -469,14 +857,27 @@ function sanitizeSingleNewsItem(
     `${basePath}.customMascotUrl`,
     warnings,
   );
+  const mascotMood = sanitizeMascotMood(obj.mascotMood);
 
+  const cards = sanitizeItemCards(obj.cards, summary, keyPoints, officialQuote, basePath, warnings);
+
+  const frameCount = sanitizeOptionalFrameCount(
+    obj.frameCount,
+    HARD_LIMITS.maxItemDurationSec * fps,
+  );
   const durationSec = clampDuration(
     obj.durationSec,
+    frameCount,
+    fps,
     HARD_LIMITS.defaultItemDurationSec,
     HARD_LIMITS.maxItemDurationSec,
     `${basePath}.durationSec`,
     warnings,
   );
+  const speechDurationSec = sanitizeSpeechSec(obj.speechDurationSec, durationSec);
+  const audioUrl = sanitizeAudioUrl(obj.audioUrl, `${basePath}.audioUrl`, warnings);
+  const lipSyncFrames = sanitizeLipSyncArray(obj.lipSyncFrames);
+  const subtitles = sanitizeSubtitleArray(obj.subtitles, durationSec);
 
   const id = normalizeText(obj.id) || `news-${indexLabel}`;
 
@@ -485,8 +886,10 @@ function sanitizeSingleNewsItem(
     indexLabel,
     category,
     shortTitle,
+    progressLabel,
     title,
     summary,
+    cards,
     keyPoints,
     imageUrl,
     secondaryImageUrl,
@@ -498,18 +901,48 @@ function sanitizeSingleNewsItem(
     publishedAt,
     mascotId,
     customMascotUrl,
+    mascotMood,
+    frameCount,
     durationSec,
+    speechDurationSec,
+    audioUrl,
+    lipSyncFrames,
+    subtitles,
   };
 }
 
+/** 生成极端空输入或异常对象时的安全示范日报数据 */
 function createEmergencyFallbackIssue(): SanitizedDailyIssue {
   const item = sanitizeSingleNewsItem(
     {
       id: 'fallback-01',
       category: '模板就绪',
       shortTitle: '等待导入本期 AI 日报数据',
+      progressLabel: '等待导入日报',
       title: '等待导入本期 AI 日报数据',
       summary: '当前输入数据为空或结构不完整，已自动启用安全示范页，保证视频画面零报错。',
+      cards: [
+        {
+          icon: 'rocket',
+          title: '多卡片事实网格',
+          body: '画布采用多张结构化信息卡片呈现核心事实，适合高密度呈现新闻细节。',
+        },
+        {
+          icon: 'grid',
+          title: '图文双模自适应',
+          body: '提供完整卡片矩阵与图文并排两种版式，坏图时无感切回全幅面板。',
+        },
+        {
+          icon: 'shield',
+          title: '五层零报错守卫',
+          body: '所有超长文案、异常数据与非标准链接均自动截断清理并兜底渲染。',
+        },
+        {
+          icon: 'code',
+          title: '快速导入与预览',
+          body: '按 E 键打开编辑抽屉导入 JSON，或通过脚本控制接口实时注入各期数据。',
+        },
+      ],
       keyPoints: [
         '左侧展示精炼新闻梗概',
         '右侧引用官方图片或披露要点',
@@ -526,6 +959,7 @@ function createEmergencyFallbackIssue(): SanitizedDailyIssue {
     },
     0,
     'deepseek',
+    30,
     [],
   );
 
@@ -535,11 +969,27 @@ function createEmergencyFallbackIssue(): SanitizedDailyIssue {
     date: '今日速递',
     headline: '等待导入本期精选 AI 动态',
     footerCta: '感谢收看 · 各条新闻原始信源链接已附于视频简介',
+    fps: 30,
     hostMascotId: 'deepseek',
+    hostDisplayName: '聪明的大肥鱼',
     hostMascotUrl: null,
+    hostLive2dUrl: null,
     mascotMode: 'per-item',
+    bgmAudioUrl: null,
+    bgmVolumeDb: -18,
+    pagePaddingSec: 0.6,
+    coverFrameCount: null,
     coverDurationSec: HARD_LIMITS.defaultCoverDurationSec,
+    coverSpeechSec: HARD_LIMITS.defaultCoverDurationSec,
+    coverAudioUrl: null,
+    coverLipSync: [],
+    coverSubtitles: [],
+    outroFrameCount: null,
     outroDurationSec: HARD_LIMITS.defaultOutroDurationSec,
+    outroSpeechSec: HARD_LIMITS.defaultOutroDurationSec,
+    outroAudioUrl: null,
+    outroLipSync: [],
+    outroSubtitles: [],
     items: [item],
   };
 }
@@ -564,6 +1014,9 @@ export function sanitizeDailyIssue(raw: unknown): SanitizedIssueResult {
     }
 
     const root = parsed.data;
+    const rawFps = Number(root.fps);
+    const fps = Number.isFinite(rawFps) && rawFps >= 1 && rawFps <= 120 ? Math.round(rawFps) : 30;
+
     const hostMascotId = sanitizeMascotId(root.hostMascotId, 'deepseek', 'hostMascotId', warnings);
     const mascotMode = sanitizeMascotMode(root.mascotMode, 'mascotMode', warnings);
     const rawItems = Array.isArray(root.items) ? root.items : [];
@@ -586,7 +1039,7 @@ export function sanitizeDailyIssue(raw: unknown): SanitizedIssueResult {
       rawItems.length > 0
         ? rawItems
             .slice(0, HARD_LIMITS.maxItems)
-            .map((entry, idx) => sanitizeSingleNewsItem(entry, idx, hostMascotId, warnings))
+            .map((entry, idx) => sanitizeSingleNewsItem(entry, idx, hostMascotId, fps, warnings))
         : createEmergencyFallbackIssue().items;
 
     const firstItem = sanitizedItems[0]!;
@@ -620,20 +1073,51 @@ export function sanitizeDailyIssue(raw: unknown): SanitizedIssueResult {
       warnings,
     );
 
+    const rawHostDisplayName = normalizeText(root.hostDisplayName);
+    const hostDisplayName = rawHostDisplayName
+      ? cleanAndTruncate(
+          rawHostDisplayName,
+          HARD_LIMITS.hostDisplayName,
+          MASCOT_DEFAULT_NAMES[hostMascotId],
+          'hostDisplayName',
+          warnings,
+        )
+      : MASCOT_DEFAULT_NAMES[hostMascotId];
+
+    const coverFrameCount = sanitizeOptionalFrameCount(
+      root.coverFrameCount,
+      HARD_LIMITS.maxCoverOutroDurationSec * fps,
+    );
     const coverDurationSec = clampDuration(
       root.coverDurationSec,
+      coverFrameCount,
+      fps,
       HARD_LIMITS.defaultCoverDurationSec,
       HARD_LIMITS.maxCoverOutroDurationSec,
       'coverDurationSec',
       warnings,
     );
+
+    const outroFrameCount = sanitizeOptionalFrameCount(
+      root.outroFrameCount,
+      HARD_LIMITS.maxCoverOutroDurationSec * fps,
+    );
     const outroDurationSec = clampDuration(
       root.outroDurationSec,
+      outroFrameCount,
+      fps,
       HARD_LIMITS.defaultOutroDurationSec,
       HARD_LIMITS.maxCoverOutroDurationSec,
       'outroDurationSec',
       warnings,
     );
+
+    const rawBgmVol = Number(root.bgmVolumeDb);
+    const bgmVolumeDb = Number.isFinite(rawBgmVol) ? Math.max(-60, Math.min(0, rawBgmVol)) : -18;
+
+    const rawPadSec = Number(root.pagePaddingSec);
+    const pagePaddingSec =
+      Number.isFinite(rawPadSec) && rawPadSec >= 0 ? Math.min(10, rawPadSec) : 0.6;
 
     return {
       issue: {
@@ -642,11 +1126,27 @@ export function sanitizeDailyIssue(raw: unknown): SanitizedIssueResult {
         date,
         headline,
         footerCta,
+        fps,
         hostMascotId,
+        hostDisplayName,
         hostMascotUrl: sanitizeMediaUrl(root.hostMascotUrl, 'hostMascotUrl', warnings),
+        hostLive2dUrl: sanitizeMediaUrl(root.hostLive2dUrl, 'hostLive2dUrl', warnings),
         mascotMode,
+        bgmAudioUrl: sanitizeAudioUrl(root.bgmAudioUrl, 'bgmAudioUrl', warnings),
+        bgmVolumeDb,
+        pagePaddingSec,
+        coverFrameCount,
         coverDurationSec,
+        coverSpeechSec: sanitizeSpeechSec(root.coverSpeechSec, coverDurationSec),
+        coverAudioUrl: sanitizeAudioUrl(root.coverAudioUrl, 'coverAudioUrl', warnings),
+        coverLipSync: sanitizeLipSyncArray(root.coverLipSync),
+        coverSubtitles: sanitizeSubtitleArray(root.coverSubtitles, coverDurationSec),
+        outroFrameCount,
         outroDurationSec,
+        outroSpeechSec: sanitizeSpeechSec(root.outroSpeechSec, outroDurationSec),
+        outroAudioUrl: sanitizeAudioUrl(root.outroAudioUrl, 'outroAudioUrl', warnings),
+        outroLipSync: sanitizeLipSyncArray(root.outroLipSync),
+        outroSubtitles: sanitizeSubtitleArray(root.outroSubtitles, outroDurationSec),
         items: sanitizedItems,
       },
       warnings,

@@ -21,6 +21,7 @@ import {
   recoverStaleRuns,
   resumeRun,
   retryRunItem,
+  retryRunItems,
   updateSettingsFile,
   updateSourcesFile,
 } from '../src/index.js';
@@ -940,7 +941,11 @@ describe('editorial workflow, TTS timeline, interruption recovery, and retry eng
       const { rootDir } = await setupWorkflowWorkspace();
       await fs.cp(path.join(REPO_ROOT, 'assets'), path.join(rootDir, 'assets'), {
         recursive: true,
+        filter: (src) => !src.startsWith(path.join(REPO_ROOT, 'assets', 'tts')),
       });
+      await fs
+        .symlink(path.join(REPO_ROOT, 'assets', 'tts'), path.join(rootDir, 'assets', 'tts'))
+        .catch(() => undefined);
       await fs.copyFile(
         path.join(REPO_ROOT, 'config', 'personas.yaml'),
         path.join(rootDir, 'config', 'personas.yaml'),
@@ -987,4 +992,361 @@ describe('editorial workflow, TTS timeline, interruption recovery, and retry eng
     },
     240_000,
   );
+
+  it('supports concurrent multi-item revision, decoupled precheck repairs, evidence recovery, and batch retryItems', async () => {
+    const { rootDir } = await setupWorkflowWorkspace({
+      maxRevisions: 1,
+      itemConcurrency: 3,
+    });
+    const now = new Date('2026-11-18T08:00:00.000Z');
+
+    const articles = [
+      {
+        slug: 'item-1',
+        title: '第一条：GPT\u20116 推出 440 亿美元规模计划',
+        pubDate: 'Wed, 18 Nov 2026 07:00:00 GMT',
+        body: 'OpenAI introduced GPT\u20116 across six countries with a $44 billion enterprise plan.',
+      },
+      {
+        slug: 'item-2',
+        title: '第二条：测试集覆盖 18.5 万真实样本',
+        pubDate: 'Wed, 18 Nov 2026 06:30:00 GMT',
+        body: 'Anthropic evaluated 185,000 developer tasks with 12 million context tokens.',
+      },
+      {
+        slug: 'item-3',
+        title: '第三条：团队公布 8.2B 参数轻量模型',
+        pubDate: 'Wed, 18 Nov 2026 06:00:00 GMT',
+        body: 'Google published an $8.2B cloud partnership spanning twenty-four regions.',
+      },
+    ];
+    const feedFetch = makeFeedMockFetch(articles);
+    const idBySlug = new Map(
+      articles.map((a) => [a.slug, computeArticleId(`https://primary.example.com/${a.slug}`)]),
+    );
+
+    const metrics = {
+      activeRevise: 0,
+      peakRevise: 0,
+      activeRetryPolish: 0,
+      peakRetryPolish: 0,
+      summarizeCount: 0,
+      packageCount: 0,
+      factcheckSawPriorContext: false,
+      factcheckLeakedAvailabilityNote: false,
+    };
+    const itemRoundState = new Map<string, { precheckFix: number; fcRound: number }>();
+    let phase: 'initial' | 'batchRetry' = 'initial';
+
+    const core = await createCore({
+      rootDir,
+      now: () => now,
+      fetchImpl: async (input, init) => {
+        const url = typeof input === 'string' ? input : input.toString();
+        if (!url.includes('mock-ai.test')) {
+          return feedFetch(input, init);
+        }
+        if (url.endsWith('/models')) {
+          return Response.json({ data: [{ id: 'mock-model' }] });
+        }
+        const body = JSON.parse(String(init?.body ?? '{}')) as {
+          messages?: Array<{ role: string; content: string }>;
+        };
+        const prompt = (body.messages ?? []).map((m) => m.content).join('\n');
+        const stageMatch = /<!--stage:([a-zA-Z0-9_-]+)-->/.exec(prompt);
+        const stage = stageMatch?.[1] ?? 'unknown';
+
+        const emitJson = (obj: unknown) =>
+          Response.json({
+            id: `resp-${Date.now()}`,
+            choices: [{ finish_reason: 'stop', message: { content: JSON.stringify(obj) } }],
+          });
+
+        if (stage === 'select') {
+          return emitJson({
+            events: articles.map((a, idx) => ({
+              title: a.title,
+              articleIds: [idBySlug.get(a.slug) ?? ''],
+              category: '大模型',
+              entity: 'OpenAI',
+              score: 9.5 - idx * 0.2,
+              publicAppeal: 9,
+              reason: '测试并发微调与预检解耦',
+              duplicateOfHistory: false,
+            })),
+          });
+        }
+
+        if (stage === 'summarize') {
+          metrics.summarizeCount += 1;
+          const matchedArt =
+            articles.find((a) => prompt.includes(idBySlug.get(a.slug) ?? '__missing__')) ??
+            articles[0];
+          if (!matchedArt) {
+            throw new Error('测试文章列表为空');
+          }
+          const artId = idBySlug.get(matchedArt.slug) ?? '';
+          const isFirst = matchedArt.slug === 'item-1';
+          return emitJson({
+            facts: [`原文说明：${matchedArt.title}`],
+            relevance: '与产业应用密切相关。',
+            availability: 'available_now',
+            availabilityNote: '仅限特定区域接入，尚未面向全部用户免费开放。',
+            evidence: [
+              {
+                claim: '核心事实出处',
+                articleId: artId,
+                // 第 1 条在总结故意产出一个损坏引文，验证本地预检与微调可顺利替换为原文合法引文而不陷入死循环
+                quote: isFirst ? 'broken-nonexistent-quote-from-summary' : matchedArt.body,
+              },
+            ],
+          });
+        }
+
+        const matchedArt =
+          articles.find((a) => prompt.includes(idBySlug.get(a.slug) ?? '__missing__')) ??
+          articles[0];
+        if (!matchedArt) {
+          throw new Error('测试文章列表为空');
+        }
+        const artId = idBySlug.get(matchedArt.slug) ?? '';
+
+        if (stage === 'polish') {
+          if (phase === 'batchRetry') {
+            metrics.activeRetryPolish += 1;
+            metrics.peakRetryPolish = Math.max(metrics.peakRetryPolish, metrics.activeRetryPolish);
+            await new Promise((r) => setTimeout(r, 60));
+            metrics.activeRetryPolish -= 1;
+          }
+          const shortTitle =
+            matchedArt.slug === 'item-1'
+              ? 'GPT-6规模计划'
+              : matchedArt.slug === 'item-2'
+                ? '18.5万样本评估'
+                : '8.2B合作项目';
+          return emitJson({
+            title: matchedArt.title,
+            shortTitle,
+            progressLabel: '并发微调测试',
+            category: '大模型',
+            entity: 'OpenAI',
+            summary:
+              matchedArt.slug === 'item-1'
+                ? 'GPT-6 推出 440 亿美元规模计划并覆盖 6 个国家。'
+                : matchedArt.slug === 'item-2'
+                  ? '评估测试集覆盖 18.5 万任务与 1200 万上下文词元。'
+                  : '新合作项目资金规模达到 82 亿美元，覆盖 24 个地区。',
+            keyPoints: ['信息已与原文对照', '数字换算符合规范'],
+            detail: '本文主要报道相关团队发布的最新进度与覆盖规模说明。',
+            hostComment: '这项进展的数据尺度值得关注。',
+            narration: ['今天来看这条重要人工智能消息。', '具体细节请以官方原文披露为准。'],
+            evidence: [
+              {
+                claim: '原文依据',
+                articleId: artId,
+                quote:
+                  phase === 'initial' && matchedArt.slug === 'item-1'
+                    ? 'still-broken-quote-from-polish'
+                    : matchedArt.body,
+              },
+            ],
+          });
+        }
+
+        if (stage === 'revise') {
+          metrics.activeRevise += 1;
+          metrics.peakRevise = Math.max(metrics.peakRevise, metrics.activeRevise);
+          await new Promise((r) => setTimeout(r, 60));
+          metrics.activeRevise -= 1;
+
+          const state = itemRoundState.get(matchedArt.slug) ?? { precheckFix: 0, fcRound: 0 };
+          state.precheckFix += 1;
+          itemRoundState.set(matchedArt.slug, state);
+          const shortTitle =
+            matchedArt.slug === 'item-1'
+              ? 'GPT-6规模计划'
+              : matchedArt.slug === 'item-2'
+                ? '18.5万样本评估'
+                : '8.2B合作项目';
+          return emitJson({
+            title: matchedArt.title,
+            shortTitle,
+            progressLabel: '修订完成进展',
+            category: '大模型',
+            entity: 'OpenAI',
+            summary:
+              matchedArt.slug === 'item-1'
+                ? 'GPT-6 推出 440 亿美元企业计划并覆盖 6 个国家。'
+                : matchedArt.slug === 'item-2'
+                  ? '评估测试集覆盖 18.5 万任务与 1200 万上下文词元。'
+                  : '新合作项目资金规模达到 82 亿美元，覆盖 24 个地区。',
+            keyPoints: ['修正后完全吻合原文', '数字换算无误'],
+            detail: '已根据修改建议核准描述并修正了引文依据。',
+            hostComment: '修正后的表述清晰准确。',
+            narration: ['经过对照原文核对调整。', '相关数字与开放范围均与原文一致。'],
+            evidence: [{ claim: '修正后真实引文', articleId: artId, quote: matchedArt.body }],
+          });
+        }
+
+        if (stage === 'factcheck') {
+          if (prompt.includes('availabilityNote')) {
+            metrics.factcheckLeakedAvailabilityNote = true;
+          }
+          if (prompt.includes('上一轮复核关注清单')) {
+            metrics.factcheckSawPriorContext = true;
+          }
+          const state = itemRoundState.get(matchedArt.slug) ?? { precheckFix: 0, fcRound: 0 };
+          state.fcRound += 1;
+          itemRoundState.set(matchedArt.slug, state);
+
+          if (phase === 'initial' && state.fcRound === 1) {
+            return emitJson({
+              verdict: 'revise',
+              claims: [
+                {
+                  text: '首轮核查需要确认限定范围',
+                  status: 'unsupported',
+                  severity: 'major',
+                  note: '请核准限定条件',
+                },
+              ],
+              revisionNotes: ['请确认限定范围并与原文一致'],
+            });
+          }
+          // 二轮验证：哪怕核查员输出了 minor 问题且 verdict 写了 revise，也能收敛放行且不触发 exceeded_revisions
+          return emitJson({
+            verdict: 'revise',
+            claims: [
+              {
+                text: '核心数字与范围准确',
+                status: 'supported',
+                severity: 'major',
+                note: '准确',
+              },
+              {
+                text: '卡片短句措辞略简洁',
+                status: 'unsupported',
+                severity: 'minor',
+                note: '仅属细微措辞风格差异',
+              },
+            ],
+            revisionNotes: ['建议小幅润色语气'],
+          });
+        }
+
+        if (stage === 'package') {
+          metrics.packageCount += 1;
+          const idxMarker = prompt.indexOf('## 本期已过审新闻列表（JSON）\n');
+          const rest =
+            idxMarker >= 0
+              ? prompt.slice(idxMarker + '## 本期已过审新闻列表（JSON）\n'.length)
+              : '[]';
+          const endIdx = rest.search(/\n## /);
+          const list = JSON.parse((endIdx >= 0 ? rest.slice(0, endIdx) : rest).trim()) as Array<{
+            itemId: string;
+          }>;
+          const order = list.map((x) => x.itemId);
+          return emitJson({
+            order,
+            headlineItemId: order[0] ?? 'item-1',
+            headline: '本期聚焦：大模型企业级规模扩展',
+            leadSummary: '今天为你并发核查并整理三条大模型工程新动态。',
+            intro: { narration: ['欢迎收看今天的节目。'], hostComment: '三条资讯都很实在。' },
+            outro: {
+              narration: ['本期内容就到这里。'],
+              hostComment: '感谢大家关注。',
+              cta: '欢迎点赞评论交流。',
+            },
+            publish: {
+              title: 'AI每日报｜企业大模型规模与评测新进展',
+              descriptionIntro: '盘点近期三大重点行业更新。',
+              tags: ['人工智能', '大模型'],
+            },
+          });
+        }
+
+        return emitJson({ ok: true });
+      },
+    });
+
+    try {
+      await fs.writeFile(path.join(core.context.paths.secretsDir, 'mock-key'), 'secret-mock-key', {
+        mode: 0o600,
+      });
+      await core.config.updateSettings({
+        ai: {
+          maxConcurrentCalls: 6,
+          providers: {
+            mockapi: {
+              adapter: 'openai-compatible',
+              protocol: 'chat-completions',
+              baseUrl: 'https://mock-ai.test/v1',
+              apiKeyFile: 'mock-key',
+            },
+          },
+          stages: {
+            select: { cli: 'mockapi', model: 'mock-model', timeoutSec: 30, retries: 0 },
+            summarize: { cli: 'mockapi', model: 'mock-model', timeoutSec: 30, retries: 0 },
+            polish: { cli: 'mockapi', model: 'mock-model', timeoutSec: 30, retries: 0 },
+            factcheck: { cli: 'mockapi', model: 'mock-model', timeoutSec: 30, retries: 0 },
+            package: { cli: 'mockapi', model: 'mock-model', timeoutSec: 30, retries: 0 },
+          },
+        },
+      });
+
+      const runId = createRun(core.context, { itemCount: 3, trigger: 'manual-cli' });
+      await executeRun(core.context, runId, { stageOverrides: STUB_RENDER_QA });
+
+      expect(core.context.repos.runs.getById(runId)?.status).toBe('awaiting_review');
+      const itemsAfterRun = core.context.repos.runItems.listByRun(runId);
+      expect(itemsAfterRun.filter((i) => i.status === 'passed')).toHaveLength(3);
+      // 验证 3 条新闻确系并发进入 revise 微调，且第 1 条本地预检修引文未挤占 maxRevisions=1 名额
+      expect(metrics.peakRevise).toBeGreaterThanOrEqual(2);
+      expect(metrics.factcheckSawPriorContext).toBe(true);
+      expect(metrics.factcheckLeakedAvailabilityNote).toBe(false);
+      expect(metrics.packageCount).toBe(1);
+      const recordedCalls = await core.tasks.getLlmCalls(runId);
+      expect(recordedCalls.filter((c) => c.stage === 'revise').length).toBeGreaterThanOrEqual(3);
+      const recordedEvents = await core.tasks.events(runId, 0, 500);
+      expect(recordedEvents.some((e) => e.type === 'item_revising')).toBe(true);
+
+      // 批量并发重做 2 条新闻（从 polish 起步）：两条同时并发 polish，summarize 不重复执行，package 仅重跑一次
+      phase = 'batchRetry';
+      const summarizeBeforeRetry = metrics.summarizeCount;
+      const packageBeforeRetry = metrics.packageCount;
+      const targetIds = itemsAfterRun.slice(0, 2).map((i) => i.id);
+      await retryRunItems(core.context, runId, targetIds, {
+        fromStep: 'polish',
+        stageOverrides: STUB_RENDER_QA,
+      });
+
+      expect(metrics.peakRetryPolish).toBeGreaterThanOrEqual(2);
+      expect(metrics.summarizeCount).toBe(summarizeBeforeRetry);
+      expect(metrics.packageCount).toBe(packageBeforeRetry + 1);
+      expect(core.context.repos.runs.getById(runId)?.status).toBe('awaiting_review');
+
+      // 验证外部修改 settings.yaml 后，未重启且未手动 reloadConfig 的既有 Core 启动新任务会自动加载最新并发配置
+      await updateSettingsFile(path.join(rootDir, 'config', 'settings.yaml'), {
+        issue: { itemConcurrency: 9 },
+      });
+      let reloadedRunId = '';
+      await expect(
+        core.tasks.start({
+          itemCount: 1,
+          trigger: 'manual-web',
+          onCreated: (createdId) => {
+            reloadedRunId = createdId;
+            cancelRun(core.context, createdId);
+          },
+        }),
+      ).rejects.toThrow();
+      const reloadedSnapshot = JSON.parse(
+        core.context.repos.runs.getById(reloadedRunId)?.configSnapshotJson ?? '{}',
+      ) as { issue?: { itemConcurrency?: number } };
+      expect(reloadedSnapshot.issue?.itemConcurrency).toBe(9);
+      abandonRun(core.context, reloadedRunId);
+    } finally {
+      await core.close();
+    }
+  }, 30_000);
 });

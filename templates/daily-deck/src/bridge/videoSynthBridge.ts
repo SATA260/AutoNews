@@ -1,10 +1,13 @@
-import type { ValidationWarning } from '../schema/newsSchema';
+import type { MascotMood, ValidationWarning } from '../schema/newsSchema';
 
 /** 页面在整期新闻中的角色类型 */
 export type DeckPageType = 'cover' | 'news' | 'outro';
 
 /** 翻页过渡动画样式：纸张滑移、轻柔翻页、平滑叠化、无动效 */
 export type DeckTransitionStyle = 'glide' | 'flip' | 'fade' | 'none';
+
+/** 时间轴驱动模式：浏览器实时播放模式或无头渲染手动步进模式 */
+export type DeckClockMode = 'realtime' | 'manual';
 
 /** 外部脚本或控制台查询的当前播放状态 */
 export interface DeckBridgeState {
@@ -16,6 +19,12 @@ export interface DeckBridgeState {
   cleanMode: boolean;
   theme: 'light' | 'dark';
   transition: DeckTransitionStyle;
+  clockMode: DeckClockMode;
+  globalTimeMs: number;
+  totalDurationMs: number;
+  sectionProgress: number;
+  mouthOpen: number;
+  live2dReady: boolean;
 }
 
 /** 注入新闻数据后返回的安全校验结果 */
@@ -35,6 +44,16 @@ export interface DeckHealthReport {
   runtimeErrors: string[];
 }
 
+/** 将虚拟时钟定位到指定毫秒后返回的同步帧状态快照 */
+export interface SeekToResult {
+  currentPage: number;
+  exitingPage: number | null;
+  transitionProgress: number;
+  sectionProgress: number;
+  mouthOpen: number;
+  live2dReady: boolean;
+}
+
 /** 挂载在浏览器窗口上的自动化视频合成控制接口 */
 export interface NewsDeckBridgeAPI {
   getState: () => DeckBridgeState;
@@ -45,6 +64,14 @@ export interface NewsDeckBridgeAPI {
   prevPage: () => Promise<boolean>;
   setNewsData: (raw: unknown) => SetNewsDataResult;
   getHealthReport: () => DeckHealthReport;
+  waitUntilReady: (timeoutMs?: number) => Promise<{ ok: boolean; live2dReady: boolean }>;
+  warmupPhysics: (
+    atTimeMs: number,
+    steps?: number,
+    mood?: MascotMood,
+    stepMs?: number,
+  ) => Promise<void>;
+  seekTo: (globalTimeMs: number, dtMs?: number) => Promise<SeekToResult>;
 }
 
 declare global {

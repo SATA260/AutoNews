@@ -90,6 +90,40 @@ function mapEvent(row: EventRow): EventRecord {
   };
 }
 
+/** 为历史版本或旧数据库记录补齐缺省的顶部进度条短标题，保障旧任务详情正常反序列化 */
+export function normalizeStoredPolishedItem(raw: unknown): PolishedItem | null {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+    return null;
+  }
+  const obj = raw as Record<string, unknown>;
+  if (typeof obj.progressLabel === 'string' && obj.progressLabel.trim().length > 0) {
+    return raw as PolishedItem;
+  }
+  const rawBase =
+    typeof obj.shortTitle === 'string' && obj.shortTitle.trim().length > 0
+      ? obj.shortTitle
+      : typeof obj.title === 'string' && obj.title.trim().length > 0
+        ? obj.title
+        : 'AI资讯速览';
+  const chars = Array.from(rawBase.trim());
+  let sliced = chars.slice(0, 10).join('');
+  if (chars.length > 10 && /\d/.test(chars[9] ?? '') && /\d/.test(chars[10] ?? '')) {
+    sliced = sliced.replace(/\d+$/, '');
+  }
+  let label = sliced.trim();
+  if (Array.from(label).length < 4) {
+    label = label ? `${label}速览` : 'AI资讯速览';
+  }
+  label = Array.from(label).slice(0, 10).join('').trim();
+  if (Array.from(label).length < 4) {
+    label = 'AI资讯速览';
+  }
+  return {
+    ...(obj as unknown as PolishedItem),
+    progressLabel: label,
+  };
+}
+
 /** 将新闻条目数据库行转换为业务对象 */
 function mapRunItem(row: RunItemRow): RunItemRecord {
   return {
@@ -100,7 +134,7 @@ function mapRunItem(row: RunItemRow): RunItemRecord {
     status: row.status,
     revision: row.revision,
     dropReason: row.drop_reason,
-    finalJson: row.final_json ? (JSON.parse(row.final_json) as PolishedItem) : null,
+    finalJson: row.final_json ? normalizeStoredPolishedItem(JSON.parse(row.final_json)) : null,
     imageMode: row.image_mode,
     customImagePath: row.custom_image_path,
     customImageCaption: row.custom_image_caption,

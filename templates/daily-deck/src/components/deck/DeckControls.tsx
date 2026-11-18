@@ -10,6 +10,8 @@ import {
   Pause,
   Play,
   Sun,
+  Volume2,
+  VolumeX,
 } from 'lucide-react';
 import type React from 'react';
 import type { DeckTransitionStyle } from '../../bridge/videoSynthBridge';
@@ -19,6 +21,8 @@ export interface DeckControlsProps {
   currentPage: number;
   totalPages: number;
   isAutoPlaying: boolean;
+  isMuted: boolean;
+  hasAudioSource: boolean;
   theme: 'light' | 'dark';
   cleanMode: boolean;
   transitionStyle: DeckTransitionStyle;
@@ -27,6 +31,7 @@ export interface DeckControlsProps {
   onPrev: () => void;
   onNext: () => void;
   onToggleAutoPlay: () => void;
+  onToggleMute: () => void;
   onToggleTheme: () => void;
   onCycleTransition: () => void;
   onToggleCleanMode: () => void;
@@ -40,11 +45,13 @@ const TRANSITION_LABELS: Record<DeckTransitionStyle, string> = {
   none: '无动效 (T)',
 };
 
-/** 预览控制台：提供翻页、自动轮播、动效切换、深浅主题、数据编辑及纯净模式开关 */
+/** 预览控制台：提供翻页、有声自动播报、静音开关、动效切换、深浅主题、数据编辑及纯净模式开关 */
 export const DeckControls: React.FC<DeckControlsProps> = ({
   currentPage,
   totalPages,
   isAutoPlaying,
+  isMuted,
+  hasAudioSource,
   theme,
   cleanMode,
   transitionStyle,
@@ -53,6 +60,7 @@ export const DeckControls: React.FC<DeckControlsProps> = ({
   onPrev,
   onNext,
   onToggleAutoPlay,
+  onToggleMute,
   onToggleTheme,
   onCycleTransition,
   onToggleCleanMode,
@@ -103,11 +111,24 @@ export const DeckControls: React.FC<DeckControlsProps> = ({
           type="button"
           className={`ctrl-btn ${isAutoPlaying ? 'is-primary' : ''}`}
           onClick={onToggleAutoPlay}
-          title="自动翻页播放 (P)"
+          title="自动语音播报与翻页 (P)"
         >
           {isAutoPlaying ? <Pause size={16} /> : <Play size={16} />}
-          <span>{isAutoPlaying ? '暂停轮播' : '自动播放'}</span>
+          <span>{isAutoPlaying ? '暂停播报' : '自动播放'}</span>
         </button>
+
+        {hasAudioSource && (
+          <button
+            type="button"
+            className="ctrl-btn"
+            onClick={onToggleMute}
+            aria-label={isMuted ? '取消静音' : '静音'}
+            title="切换预览声音开关 (M)"
+          >
+            {isMuted ? <VolumeX size={16} /> : <Volume2 size={16} />}
+            <span>{isMuted ? '已静音' : '有声预览'}</span>
+          </button>
+        )}
 
         <button
           type="button"

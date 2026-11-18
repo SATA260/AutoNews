@@ -5,6 +5,7 @@ import {
   IssuePackageSchema,
   type Settings,
 } from '@aidaily/contracts';
+import { buildNarrationParagraph } from '@aidaily/tts';
 import { TZDate } from '@date-fns/tz';
 import { format } from 'date-fns';
 import type { CoreContext } from '../context.js';
@@ -64,6 +65,8 @@ export async function runPackageStage(
   const tzNow = new TZDate(ctx.now().getTime(), settings.timezone);
   const dateStr = format(tzNow, 'yyyy-MM-dd');
   const issueNumber = `VOL.${format(tzNow, 'yyyy.MM.dd')}`;
+  const weekdays = ['周日', '周一', '周二', '周三', '周四', '周五', '周六'] as const;
+  const dateDisplay = `${tzNow.getMonth() + 1}月${tzNow.getDate()}日${weekdays[tzNow.getDay()] ?? ''}`;
 
   const itemsPayload = passedItems.map((item) => {
     const ev = eventById.get(item.eventId);
@@ -74,6 +77,9 @@ export async function runPackageStage(
       category: item.finalJson?.category ?? ev?.category ?? '',
       entity: item.finalJson?.entity ?? ev?.entity ?? '',
       summary: item.finalJson?.summary ?? '',
+      highlight: item.finalJson?.highlight ?? '',
+      keyPoints: item.finalJson?.keyPoints ?? [],
+      narration: item.finalJson?.narration ?? [],
       score: ev?.score ?? 5,
       publicAppeal: ev?.publicAppeal ?? 5,
     };
@@ -92,6 +98,7 @@ export async function runPackageStage(
   const basePrompt = await renderPromptTemplate('s6-package.md', {
     personaJson: persona ? JSON.stringify(persona, null, 2) : '无特定角色',
     date: dateStr,
+    dateDisplay,
     issueNumber,
     passedItemsJson: JSON.stringify(itemsPayload, null, 2),
     contentLimitsJson: JSON.stringify(limits, null, 2),
@@ -123,6 +130,9 @@ export async function runPackageStage(
       limits,
       publishConfig: settings.publish.bilibili,
       metaTextBlacklist: settings.editorial.metaTextBlacklist,
+      compact: settings.issue.minScore !== undefined,
+      forbiddenTokens: persona?.forbiddenTokens,
+      hostSelfName: persona?.selfName,
     });
 
     if (check.passed) {
@@ -143,14 +153,16 @@ export async function runPackageStage(
 
       await lockRunBgm(ctx, runId);
       const itemById = new Map(passedItems.map((item) => [item.id, item]));
-      const lines = [
-        ...res.data.intro.narration,
-        ...res.data.order.flatMap((id) => itemById.get(id)?.finalJson?.narration ?? []),
-        ...res.data.outro.narration,
-      ];
+      const paragraphs = [
+        buildNarrationParagraph(res.data.intro.narration),
+        ...res.data.order.map((id) =>
+          buildNarrationParagraph(itemById.get(id)?.finalJson?.narration ?? []),
+        ),
+        buildNarrationParagraph(res.data.outro.narration),
+      ].filter((text) => text.length > 0);
       await writeFileAtomic(
         path.join(ctx.paths.runDir(runId), 'narration.txt'),
-        `${lines.join('\n')}\n`,
+        paragraphs.length > 0 ? `${paragraphs.join('\n\n')}\n` : '\n',
       );
       return {
         issueNumber,

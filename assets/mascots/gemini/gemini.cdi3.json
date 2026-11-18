@@ -1,0 +1,97 @@
+{
+  "Version": 3,
+  "Parameters": [
+    {
+      "Id": "ParamAngleX",
+      "GroupId": "GroupHead",
+      "Name": "Angle X"
+    },
+    {
+      "Id": "ParamAngleY",
+      "GroupId": "GroupHead",
+      "Name": "Angle Y"
+    },
+    {
+      "Id": "ParamAngleZ",
+      "GroupId": "GroupHead",
+      "Name": "Angle Z"
+    },
+    {
+      "Id": "ParamBreath",
+      "GroupId": "GroupBody",
+      "Name": "Breath"
+    },
+    {
+      "Id": "ParamHairSwing",
+      "GroupId": "GroupBody",
+      "Name": "HairSwing"
+    },
+    {
+      "Id": "ParamEyeLOpen",
+      "GroupId": "GroupFace",
+      "Name": "Eye Open L"
+    },
+    {
+      "Id": "ParamEyeROpen",
+      "GroupId": "GroupFace",
+      "Name": "Eye Open R"
+    },
+    {
+      "Id": "ParamMouthOpenY",
+      "GroupId": "GroupFace",
+      "Name": "Mouth Open"
+    },
+    {
+      "Id": "ParamMouthForm",
+      "GroupId": "GroupFace",
+      "Name": "Mouth Form"
+    }
+  ],
+  "ParameterGroups": [
+    {
+      "Id": "GroupHead",
+      "GroupId": "",
+      "Name": "Head"
+    },
+    {
+      "Id": "GroupFace",
+      "GroupId": "",
+      "Name": "Face"
+    },
+    {
+      "Id": "GroupBody",
+      "GroupId": "",
+      "Name": "Body"
+    }
+  ],
+  "Parts": [
+    {
+      "Id": "Character",
+      "Name": "Character"
+    },
+    {
+      "Id": "OpenLashLeft",
+      "Name": "OpenLashLeft"
+    },
+    {
+      "Id": "OpenLashRight",
+      "Name": "OpenLashRight"
+    },
+    {
+      "Id": "ClosedLashLeft",
+      "Name": "ClosedLashLeft"
+    },
+    {
+      "Id": "ClosedLashRight",
+      "Name": "ClosedLashRight"
+    },
+    {
+      "Id": "RestMouth",
+      "Name": "RestMouth"
+    },
+    {
+      "Id": "AltMouth",
+      "Name": "AltMouth"
+    }
+  ]
+}

@@ -1,0 +1,56 @@
+{
+  "Version": 3,
+  "FileReferences": {
+    "Moc": "gpt.moc3",
+    "Textures": ["textures/texture_00.png"],
+    "Physics": "gpt.physics3.json",
+    "DisplayInfo": "gpt.cdi3.json",
+    "Expressions": [
+      {
+        "Name": "neutral",
+        "File": "expressions/neutral.exp3.json"
+      },
+      {
+        "Name": "proud",
+        "File": "expressions/proud.exp3.json"
+      },
+      {
+        "Name": "surprised",
+        "File": "expressions/surprised.exp3.json"
+      },
+      {
+        "Name": "thinking",
+        "File": "expressions/thinking.exp3.json"
+      }
+    ],
+    "Motions": {
+      "Idle": [
+        {
+          "File": "motions/idle.motion3.json",
+          "FadeInTime": 0.18,
+          "FadeOutTime": 0.18
+        }
+      ],
+      "Talk": [
+        {
+          "File": "motions/talk.motion3.json",
+          "FadeInTime": 0.18,
+          "FadeOutTime": 0.18
+        }
+      ]
+    }
+  },
+  "Groups": [
+    {
+      "Target": "Parameter",
+      "Name": "EyeBlink",
+      "Ids": ["ParamEyeLOpen", "ParamEyeROpen"]
+    },
+    {
+      "Target": "Parameter",
+      "Name": "LipSync",
+      "Ids": ["ParamMouthOpenY"]
+    }
+  ],
+  "HitAreas": []
+}

@@ -6,7 +6,7 @@ import { createCore } from '../index.js';
 import { inTransaction } from '../storage/db.js';
 import { emitRunEvent } from '../workflow/events.js';
 import { LockBusyError, PIPELINE_LOCK_NAME, releasePipelineLock } from '../workflow/lock.js';
-import { executeRun, resumeRun, retryRunItem } from '../workflow/runner.js';
+import { executeRun, resumeRun, retryRunItems } from '../workflow/runner.js';
 import { reportRetryStartup, waitForRetryGrant } from './retry-startup.js';
 
 const VALID_WORKER_ACTIONS = new Set([
@@ -32,7 +32,7 @@ interface ParsedWorkerArgs {
   rootDir?: string;
   action: WorkerAction;
   runId?: string;
-  itemId?: string;
+  itemIds: string[];
   from?: string;
   latestConfig: boolean;
   requiresRetryGrant: boolean;
@@ -56,7 +56,7 @@ export function parseWorkerArgs(argv: readonly string[]): ParsedWorkerArgs {
   let rootDir: string | undefined;
   let action: WorkerAction | undefined;
   let runId: string | undefined;
-  let itemId: string | undefined;
+  const itemIds: string[] = [];
   let from: string | undefined;
   let latestConfig = false;
   let requiresRetryGrant = false;
@@ -85,10 +85,17 @@ export function parseWorkerArgs(argv: readonly string[]): ParsedWorkerArgs {
         runId = requireFlagValue(argv, i, '--run-id');
         i += 1;
         break;
-      case '--item-id':
-        itemId = requireFlagValue(argv, i, '--item-id');
+      case '--item-id': {
+        const rawIds = requireFlagValue(argv, i, '--item-id');
+        for (const id of rawIds.split(',')) {
+          const trimmed = id.trim();
+          if (trimmed) {
+            itemIds.push(trimmed);
+          }
+        }
         i += 1;
         break;
+      }
       case '--from':
         from = requireFlagValue(argv, i, '--from');
         i += 1;
@@ -142,7 +149,7 @@ export function parseWorkerArgs(argv: readonly string[]): ParsedWorkerArgs {
     rootDir,
     action,
     runId,
-    itemId,
+    itemIds,
     from,
     latestConfig,
     requiresRetryGrant,
@@ -239,8 +246,8 @@ async function executeWorkerAction(
       }
       case 'retry-item': {
         const runId = requireRunId(parsed);
-        if (!parsed.itemId) {
-          throw new Error('retry-item 操作必须提供 --item-id 参数');
+        if (parsed.itemIds.length === 0) {
+          throw new Error('retry-item 操作必须提供至少一个 --item-id 参数');
         }
         let fromStep: EditSubStep | undefined;
         if (parsed.from) {
@@ -255,7 +262,7 @@ async function executeWorkerAction(
           }
           fromStep = parsed.from;
         }
-        await retryRunItem(core.context, runId, parsed.itemId, {
+        await retryRunItems(core.context, runId, parsed.itemIds, {
           fromStep,
           useLatestConfig: parsed.latestConfig,
           onStarted,

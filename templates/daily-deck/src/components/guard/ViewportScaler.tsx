@@ -1,5 +1,6 @@
 import type React from 'react';
 import { useLayoutEffect, useRef, useState } from 'react';
+import type { DeckClockMode } from '../../bridge/videoSynthBridge';
 
 /** 画布逻辑基准宽度（像素） */
 export const STAGE_WIDTH = 1920;
@@ -11,6 +12,7 @@ export interface ViewportScalerProps {
   children: React.ReactNode;
   theme?: 'light' | 'dark';
   motion?: 'animated' | 'static';
+  clockMode?: DeckClockMode;
   cleanMode?: boolean;
   overlay?: React.ReactNode;
 }
@@ -20,6 +22,7 @@ export const ViewportScaler: React.FC<ViewportScalerProps> = ({
   children,
   theme = 'light',
   motion = 'animated',
+  clockMode = 'realtime',
   cleanMode = false,
   overlay,
 }) => {
@@ -79,6 +82,7 @@ export const ViewportScaler: React.FC<ViewportScalerProps> = ({
           className="deck-stage"
           data-theme={theme}
           data-motion={motion}
+          data-clock={clockMode}
           style={{
             width: STAGE_WIDTH,
             height: STAGE_HEIGHT,

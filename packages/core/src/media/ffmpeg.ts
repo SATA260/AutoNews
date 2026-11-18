@@ -1,7 +1,9 @@
+import { spawn } from 'node:child_process';
 import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import type { Timeline } from '@aidaily/contracts';
+import { VOICE_LEVELING_FILTER } from '@aidaily/tts';
 import { execa } from 'execa';
 
 const DEFAULT_FFMPEG_TIMEOUT_MS = 180_000;
@@ -109,6 +111,7 @@ export async function buildMasterAudioWav(opts: {
   sampleRate: number;
   loudnessLUFS: number;
   isSilentProvider: boolean;
+  levelVoice?: boolean;
   bgm: { file: string; volumeDb: number; duckDb: number };
   rootDir: string;
   ffmpegBin?: string;
@@ -142,8 +145,13 @@ export async function buildMasterAudioWav(opts: {
 
       const delayMs = Math.max(0, Math.round(sec.startMs));
       const delayFilter = delayMs > 0 ? `,adelay=${delayMs}|${delayMs}` : '';
+      // 仅针对尚未在语音合成阶段执行均衡的外部音源启用单遍响度拉齐，避免重复放大已淡出的尾音
+      const levelingPrefix =
+        opts.levelVoice && !opts.isSilentProvider
+          ? `${VOICE_LEVELING_FILTER},loudnorm=I=${opts.loudnessLUFS}:TP=-1.5:LRA=5,`
+          : '';
       filterParts.push(
-        `[${i}:a]aresample=${opts.sampleRate},aformat=sample_fmts=s16:channel_layouts=stereo${delayFilter}[s${i}]`,
+        `[${i}:a]${levelingPrefix}aresample=${opts.sampleRate},aformat=sample_fmts=s16:channel_layouts=stereo${delayFilter}[s${i}]`,
       );
       mixTags.push(`[s${i}]`);
     }
@@ -201,18 +209,22 @@ export async function buildMasterAudioWav(opts: {
 
       const duckMagnitude = Math.abs(opts.bgm.duckDb);
       const bgmFilter =
-        `[0:a]aresample=${opts.sampleRate},aformat=sample_fmts=s16:channel_layouts=stereo,` +
-        `atrim=0:${totalSec},asetpts=PTS-STARTPTS,volume=${opts.bgm.volumeDb}dB,afade=t=out:st=${Math.max(0, opts.timeline.totalMs / 1000 - 1.5).toFixed(3)}:d=1.5[bgm_lvl];`;
+        `[0:a]atrim=0:${totalSec},asetpts=PTS-STARTPTS,` +
+        `loudnorm=I=-16:TP=-1.5:LRA=11,` +
+        `aresample=${opts.sampleRate},aformat=sample_fmts=s16:channel_layouts=stereo,` +
+        `volume=${opts.bgm.volumeDb}dB,afade=t=out:st=${Math.max(0, opts.timeline.totalMs / 1000 - 1.5).toFixed(3)}:d=1.5[bgm_lvl];`;
 
       const filterComplex =
         duckMagnitude === 0
           ? `${bgmFilter}[1:a][bgm_lvl]amix=inputs=2:duration=first:normalize=0,atrim=0:${totalSec},alimiter=limit=0.95:level=false:latency=true[out]`
           : (() => {
-              const duckRatio = Math.max(2, Math.min(20, Math.round(duckMagnitude / 2) || 2));
+              const duckRatio = Number(
+                Math.max(1.5, Math.min(8, 1 + duckMagnitude / 4)).toFixed(2),
+              );
               return (
                 `[1:a]asplit=2[voice_main][voice_sc];` +
                 bgmFilter +
-                `[bgm_lvl][voice_sc]sidechaincompress=threshold=0.02:ratio=${duckRatio}:attack=40:release=350[bgm_ducked];` +
+                `[bgm_lvl][voice_sc]sidechaincompress=threshold=0.06:ratio=${duckRatio}:attack=50:release=400[bgm_ducked];` +
                 `[voice_main][bgm_ducked]amix=inputs=2:duration=first:normalize=0,atrim=0:${totalSec},alimiter=limit=0.95:level=false:latency=true[out]`
               );
             })();
@@ -364,6 +376,345 @@ export async function composeSlidesVideoMp4(opts: {
           signal: opts.signal,
           timeoutMs: mediaTimeoutMs(opts.totalMs, true),
           actionLabel: 'ffmpeg 合成成片 MP4',
+        },
+      );
+    });
+  } finally {
+    await fs.rm(workDir, { recursive: true, force: true }).catch(() => undefined);
+  }
+}
+
+/**
+ * 通过标准输入管道将逐帧截取的 JPEG 字节流实时编码为单个章节的无音轨 H.264 视频分片，
+ * 避免在磁盘生成成百上千张零碎图片文件，并采用同目录临时文件原子替换落盘。
+ */
+export async function encodeJpegStreamToMp4(opts: {
+  produceFrames: (pushJpegFrame: (jpegBytes: Buffer) => Promise<void>) => Promise<number>;
+  outMp4: string;
+  width: number;
+  height: number;
+  fps: number;
+  durationMs: number;
+  crf?: number;
+  ffmpegBin?: string;
+  signal?: AbortSignal;
+}): Promise<void> {
+  const ffmpegBin = opts.ffmpegBin ?? 'ffmpeg';
+  const crf = opts.crf ?? 18;
+  const vf = `scale=${opts.width}:${opts.height}:force_original_aspect_ratio=decrease,pad=${opts.width}:${opts.height}:(ow-iw)/2:(oh-ih)/2,format=yuv420p`;
+
+  await withAtomicMediaWrite(opts.outMp4, '.mp4', async (tmpOut) => {
+    if (opts.signal?.aborted) {
+      throw new DOMException('已取消', 'AbortError');
+    }
+
+    const child = spawn(
+      ffmpegBin,
+      [
+        '-y',
+        '-f',
+        'image2pipe',
+        '-vcodec',
+        'mjpeg',
+        '-framerate',
+        String(opts.fps),
+        '-i',
+        '-',
+        '-vf',
+        vf,
+        '-c:v',
+        'libx264',
+        '-profile:v',
+        'high',
+        '-preset',
+        'veryfast',
+        '-crf',
+        String(crf),
+        '-r',
+        String(opts.fps),
+        '-pix_fmt',
+        'yuv420p',
+        '-an',
+        tmpOut,
+      ],
+      { stdio: ['pipe', 'ignore', 'pipe'] },
+    );
+
+    const stdin = child.stdin;
+    const stderr = child.stderr;
+    let stderrText = '';
+    stderr?.setEncoding('utf8');
+    stderr?.on('data', (chunk: string) => {
+      if (stderrText.length < 16_384) {
+        stderrText += chunk;
+      }
+    });
+
+    let spawnErr: Error | null = null;
+    child.on('error', (err) => {
+      spawnErr = err;
+    });
+
+    let stdinErr: Error | null = null;
+    stdin?.on('error', (err) => {
+      stdinErr = err;
+    });
+
+    let inputEnded = false;
+    let childExited = false;
+    let childExitCode: number | null = null;
+
+    const exitPromise = new Promise<number | null>((resolve) => {
+      child.once('close', (code) => {
+        childExited = true;
+        childExitCode = code;
+        resolve(code);
+      });
+    });
+
+    let timedOut = false;
+    const timer = setTimeout(
+      () => {
+        timedOut = true;
+        stdin?.destroy();
+        stderr?.destroy();
+        child.kill('SIGKILL');
+      },
+      mediaTimeoutMs(opts.durationMs, true),
+    );
+
+    const onAbort = () => {
+      stdin?.destroy();
+      stderr?.destroy();
+      child.kill('SIGKILL');
+    };
+    opts.signal?.addEventListener('abort', onAbort, { once: true });
+
+    /** 为单次管道反压构造独立可清理的等待句柄，避免在全局退出 Promise 上残留未捕获拒绝分支 */
+    const waitForDrainOrClose = (): Promise<void> => {
+      if (!stdin) {
+        return Promise.reject(new Error('无法打开 ffmpeg 视频帧写入管道'));
+      }
+      if (opts.signal?.aborted) {
+        return Promise.reject(new DOMException('已取消', 'AbortError'));
+      }
+      if (timedOut) {
+        return Promise.reject(new Error('ffmpeg 章节视频流编码超时'));
+      }
+      if (spawnErr) {
+        return Promise.reject(spawnErr);
+      }
+      if (stdinErr) {
+        return Promise.reject(stdinErr);
+      }
+      if (childExited || stdin.destroyed || !stdin.writable) {
+        return Promise.reject(new Error(`ffmpeg 在等待帧写入时提前退出: ${stderrText}`));
+      }
+
+      return new Promise<void>((resolve, reject) => {
+        const cleanup = () => {
+          stdin.removeListener('drain', onDrain);
+          stdin.removeListener('error', onPipeErr);
+          stdin.removeListener('close', onPipeClose);
+          child.removeListener('close', onChildClose);
+          child.removeListener('error', onPipeErr);
+          opts.signal?.removeEventListener('abort', onSignalAbort);
+        };
+
+        const onDrain = () => {
+          cleanup();
+          resolve();
+        };
+
+        const onPipeErr = (err: Error) => {
+          cleanup();
+          reject(err);
+        };
+
+        const onPipeClose = () => {
+          cleanup();
+          if (opts.signal?.aborted) {
+            reject(new DOMException('已取消', 'AbortError'));
+          } else if (timedOut) {
+            reject(new Error('ffmpeg 章节视频流编码超时'));
+          } else {
+            reject(new Error(`ffmpeg 帧管道在反压等待期间关闭: ${stderrText}`));
+          }
+        };
+
+        const onChildClose = () => {
+          cleanup();
+          if (opts.signal?.aborted) {
+            reject(new DOMException('已取消', 'AbortError'));
+          } else if (timedOut) {
+            reject(new Error('ffmpeg 章节视频流编码超时'));
+          } else {
+            reject(
+              new Error(
+                `ffmpeg 在等待帧写入时异常退出 (code=${String(childExitCode)}): ${stderrText}`,
+              ),
+            );
+          }
+        };
+
+        const onSignalAbort = () => {
+          cleanup();
+          reject(new DOMException('已取消', 'AbortError'));
+        };
+
+        stdin.on('drain', onDrain);
+        stdin.on('error', onPipeErr);
+        stdin.on('close', onPipeClose);
+        child.on('close', onChildClose);
+        child.on('error', onPipeErr);
+        opts.signal?.addEventListener('abort', onSignalAbort, { once: true });
+      });
+    };
+
+    try {
+      if (!stdin) {
+        throw new Error('无法打开 ffmpeg 视频帧写入管道');
+      }
+
+      const writtenFrames = await opts.produceFrames(async (jpegBytes: Buffer) => {
+        if (opts.signal?.aborted) {
+          throw new DOMException('已取消', 'AbortError');
+        }
+        if (timedOut) {
+          throw new Error('ffmpeg 章节视频流编码超时');
+        }
+        if (spawnErr) {
+          throw spawnErr;
+        }
+        if (stdinErr) {
+          throw stdinErr;
+        }
+        if (childExited || stdin.destroyed || !stdin.writable) {
+          throw new Error(`ffmpeg 帧管道提前关闭: ${stderrText}`);
+        }
+        const ok = stdin.write(jpegBytes);
+        if (!ok) {
+          await waitForDrainOrClose();
+        }
+      });
+
+      if (writtenFrames <= 0) {
+        throw new Error('章节流式渲染未产出任何画面帧');
+      }
+
+      inputEnded = true;
+      stdin.end();
+      const exitCode = await exitPromise;
+      if (opts.signal?.aborted) {
+        throw new DOMException('已取消', 'AbortError');
+      }
+      if (timedOut) {
+        throw new Error('ffmpeg 章节视频流编码超时');
+      }
+      if (spawnErr) {
+        throw spawnErr;
+      }
+      if (exitCode !== 0 || !inputEnded) {
+        throw new Error(`ffmpeg 章节视频流编码失败 (code=${String(exitCode)}): ${stderrText}`);
+      }
+    } catch (err) {
+      stdin?.removeAllListeners('drain');
+      stdin?.destroy();
+      stderr?.destroy();
+      child.kill('SIGKILL');
+      await Promise.race([
+        exitPromise.catch(() => undefined),
+        new Promise<void>((r) => setTimeout(r, 2000)),
+      ]);
+      throw err;
+    } finally {
+      clearTimeout(timer);
+      opts.signal?.removeEventListener('abort', onAbort);
+      stdin?.removeAllListeners('drain');
+      stdin?.destroy();
+      stderr?.destroy();
+    }
+  });
+}
+
+/**
+ * 将各章节已编码好的无损对齐 H.264 视频分片按顺序直接拼接（不重复编码视频流），
+ * 并与校准后的全片主音轨混流封装为支持网页快速起播的标准 MP4 成片。
+ */
+export async function composeSectionVideosMp4(opts: {
+  sectionMp4Files: string[];
+  totalMs: number;
+  totalFrames?: number;
+  fps?: number;
+  masterWav: string;
+  outMp4: string;
+  sampleRate: number;
+  ffmpegBin?: string;
+  signal?: AbortSignal;
+}): Promise<void> {
+  if (opts.sectionMp4Files.length === 0) {
+    throw new Error('没有可用于拼接合成的章节视频分片');
+  }
+  const ffmpegBin = opts.ffmpegBin ?? 'ffmpeg';
+  const totalSec =
+    opts.totalFrames !== undefined && opts.fps !== undefined && opts.totalFrames > 0 && opts.fps > 0
+      ? (opts.totalFrames / opts.fps).toFixed(6)
+      : (opts.totalMs / 1000).toFixed(3);
+  const workDir = path.join(
+    path.dirname(opts.outMp4),
+    `.concat-work-${crypto.randomBytes(4).toString('hex')}`,
+  );
+  await fs.mkdir(workDir, { recursive: true });
+
+  try {
+    const lines = ['ffconcat version 1.0'];
+    for (let i = 0; i < opts.sectionMp4Files.length; i++) {
+      const mp4File = opts.sectionMp4Files[i];
+      if (!mp4File) {
+        throw new Error(`第 ${i} 个章节视频分片路径为空`);
+      }
+      lines.push(`file '${escapeConcatPath(path.resolve(mp4File))}'`);
+    }
+    const concatFile = path.join(workDir, 'sections.ffconcat');
+    await fs.writeFile(concatFile, `${lines.join('\n')}\n`, 'utf8');
+
+    await withAtomicMediaWrite(opts.outMp4, '.mp4', async (tmpOut) => {
+      await runMediaCommand(
+        ffmpegBin,
+        [
+          '-y',
+          '-fflags',
+          '+genpts',
+          '-f',
+          'concat',
+          '-safe',
+          '0',
+          '-i',
+          concatFile,
+          '-i',
+          opts.masterWav,
+          '-map',
+          '0:v:0',
+          '-map',
+          '1:a:0',
+          '-c:v',
+          'copy',
+          '-c:a',
+          'aac',
+          '-b:a',
+          '192k',
+          '-ar',
+          String(opts.sampleRate),
+          '-movflags',
+          '+faststart',
+          '-t',
+          totalSec,
+          tmpOut,
+        ],
+        {
+          signal: opts.signal,
+          timeoutMs: mediaTimeoutMs(opts.totalMs),
+          actionLabel: 'ffmpeg 拼接章节视频与主音轨',
         },
       );
     });

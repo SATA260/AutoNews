@@ -1,6 +1,6 @@
 import type { ItemVersion, ItemVersionKind, RunDetail } from '@aidaily/contracts';
 import type { RunArticleWithContent } from '@aidaily/core';
-import { RetryItemForm } from '@/components/RunCancelAndItemActions';
+import { BatchRetryItemsPanel, RetryItemForm } from '@/components/RunCancelAndItemActions';
 import { formatTimestamp, ITEM_STATUS_TEXT } from '@/lib/format';
 
 /** 条目与原文核对页签组件的参数定义 */
@@ -47,6 +47,16 @@ export function RunItemsTab({
 
   return (
     <div className="space-y-4">
+      {canRetryItems && sortedItems.length > 1 ? (
+        <BatchRetryItemsPanel
+          runId={detail.id}
+          items={sortedItems.map((it) => ({
+            id: it.id,
+            status: it.status,
+            label: it.finalJson?.shortTitle ?? eventById.get(it.eventId)?.title ?? it.eventId,
+          }))}
+        />
+      ) : null}
       {sortedItems.map((item) => {
         const event = eventById.get(item.eventId);
         const relatedArticleIds = Array.from(

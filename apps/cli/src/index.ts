@@ -496,25 +496,40 @@ export function buildProgram(io: CliIo = DEFAULT_IO, onExitCode?: (code: number)
       },
     );
 
-  // 3. aidaily retry-item <runId> <itemId> [--from summarize|polish|factcheck] [--latest-config] [--detach]
+  // 3. aidaily retry-item <runId> <itemIds...> [--from summarize|polish|factcheck] [--latest-config] [--detach]
   program
     .command('retry-item')
-    .description('只重新处理某一条新闻，并在完成后自动重跑整期编排与合成')
+    .description(
+      '重新处理一条或多条新闻（支持空格或逗号分隔多个 ID 并发执行），完成后统一重新编排与合成',
+    )
     .argument('<runId>', '任务 ID')
-    .argument('<itemId>', '新闻条目 ID')
+    .argument('<itemIds...>', '一个或多个新闻条目 ID')
     .option('--from <step>', '起始处理子步骤 (summarize | polish | factcheck)')
     .option('--latest-config', '使用磁盘最新配置刷新本期快照', false)
     .option('--detach', '在后台独立进程中异步重做', false)
     .action(
       async (
         runId: string,
-        itemId: string,
+        rawItemIds: string[],
         opts: { from?: string; latestConfig: boolean; detach: boolean },
         cmd: Command,
       ) => {
         const gOpts = getGlobals(cmd);
         const jsonMode = Boolean(gOpts.json);
         const print = createPrinter(io, jsonMode);
+
+        const itemIds = Array.from(
+          new Set(
+            rawItemIds
+              .flatMap((token) => token.split(','))
+              .map((id) => id.trim())
+              .filter(Boolean),
+          ),
+        );
+        if (itemIds.length === 0) {
+          throw new CliUsageError('请至少提供一个新闻条目 ID');
+        }
+        const singleItemId = itemIds.length === 1 ? itemIds[0] : undefined;
 
         let fromStep: (typeof EDIT_SUB_STEPS)[number] | undefined;
         if (opts.from !== undefined) {
@@ -528,14 +543,22 @@ export function buildProgram(io: CliIo = DEFAULT_IO, onExitCode?: (code: number)
 
         const code = await withCore(gOpts, async (core) => {
           if (opts.detach) {
-            await core.tasks.retryItem(runId, itemId, {
+            await core.tasks.retryItems(runId, itemIds, {
               fromStep,
               useLatestConfig: opts.latestConfig,
               detach: true,
             });
             print(
-              { runId, itemId, fromStep: fromStep ?? 'summarize', detached: true },
-              `已提交后台单条重试：任务 ${runId} 条目 ${itemId}。`,
+              {
+                runId,
+                ...(singleItemId !== undefined ? { itemId: singleItemId } : {}),
+                itemIds,
+                fromStep: fromStep ?? 'summarize',
+                detached: true,
+              },
+              singleItemId !== undefined
+                ? `已提交后台单条重试：任务 ${runId} 条目 ${singleItemId}。`
+                : `已提交后台批量并发重试：任务 ${runId} 共 ${itemIds.length} 条新闻（${itemIds.join(', ')}）。`,
             );
             return 0;
           }
@@ -546,14 +569,14 @@ export function buildProgram(io: CliIo = DEFAULT_IO, onExitCode?: (code: number)
             runId,
             afterId,
             jsonMode,
-            core.tasks.retryItem(runId, itemId, {
+            core.tasks.retryItems(runId, itemIds, {
               fromStep,
               useLatestConfig: opts.latestConfig,
               detach: false,
             }),
           );
           const detail = await core.tasks.get(runId);
-          print(detail, `\n单条重试完成，任务 ${detail.id} 当前状态：${detail.status}`);
+          print(detail, `\n新闻条目重试完成，任务 ${detail.id} 当前状态：${detail.status}`);
           return 0;
         });
         setExit(code);

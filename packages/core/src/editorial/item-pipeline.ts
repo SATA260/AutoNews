@@ -8,9 +8,12 @@ import type {
   Settings,
   SummaryDraft,
 } from '@aidaily/contracts';
+import pLimit from 'p-limit';
 import type { CoreContext } from '../context.js';
 import { PipelineError } from '../errors.js';
 import { readJsonOrNull, writeJsonAtomic } from '../storage/files.js';
+import { normalizeStoredPolishedItem } from '../storage/repos/editorial-repo.js';
+import { getRunPersona } from './personas.js';
 import { type PrecheckResult, precheckPolishedItem } from './prechecks.js';
 import { runRefillRound } from './refill.js';
 import { loadEventArticles, summarizeEventItem } from './s3-summarize.js';
@@ -32,11 +35,13 @@ export interface PendingItemRetryState {
   baselineVersionId: number;
 }
 
-/** 采编阶段的版本水位与单条重试断点文件结构 */
+/** 采编阶段的版本起点记录与单条重试断点文件结构 */
 export interface EditWatermarkData {
   versionFloorByItemId?: Record<string, number>;
   pendingRetryByItemId?: Record<string, PendingItemRetryState>;
 }
+
+const MAX_LOCAL_PRECHECK_FIXES_PER_ROUND = 2;
 
 const watermarkWriteQueues = new Map<string, Promise<void>>();
 
@@ -67,7 +72,7 @@ function findLatestPolished(
   for (let i = versions.length - 1; i >= 0; i--) {
     const v = versions[i];
     if (v && (v.kind === 'polish' || v.kind === 'revise')) {
-      return v.payload as PolishedItem;
+      return normalizeStoredPolishedItem(v.payload);
     }
   }
   return null;
@@ -86,12 +91,19 @@ function findLatestSummary(
   return null;
 }
 
-/** 从有序版本列表里判断本轮或之前是否已用掉唯一的免费预检修正机会 */
-function countFailedPrechecks(
+/** 统计自最近一次独立事实核查以来累计的本地预检失败次数（与事实核查打回轮次解耦） */
+function countFailedPrechecksSinceLastFactcheck(
   versions: ReturnType<CoreContext['repos']['runItems']['listVersions']>,
 ): number {
   let count = 0;
-  for (const v of versions) {
+  for (let i = versions.length - 1; i >= 0; i--) {
+    const v = versions[i];
+    if (!v) {
+      continue;
+    }
+    if (v.kind === 'factcheck') {
+      break;
+    }
     if (v.kind === 'precheck') {
       const payload = v.payload as PrecheckResult;
       if (!payload.passed) {
@@ -100,6 +112,23 @@ function countFailedPrechecks(
     }
   }
   return count;
+}
+
+/** 提取最近一轮未通过事实核查时给出的修改意见清单，供下一轮复核保持核查口径一致 */
+function findLatestFactCheckNotes(
+  versions: ReturnType<CoreContext['repos']['runItems']['listVersions']>,
+): string[] | undefined {
+  for (let i = versions.length - 1; i >= 0; i--) {
+    const v = versions[i];
+    if (v?.kind === 'factcheck') {
+      const fc = v.payload as FactCheckResult;
+      if (fc.verdict === 'revise' && fc.revisionNotes.length > 0) {
+        return fc.revisionNotes;
+      }
+      return undefined;
+    }
+  }
+  return undefined;
 }
 
 /** 将某条新闻标记为通过核查并保存成品单条文件 */
@@ -259,9 +288,8 @@ export async function processSingleItem(opts: {
       ? null
       : findLatestPolished(versions);
 
-  const failedPrechecksCount = countFailedPrechecks(versions);
-  // 每条新闻仅允许享受一次不计入修改轮次的预检修正额度
-  let freePrecheckUsed = failedPrechecksCount > 0;
+  let localPrecheckFixCount = countFailedPrechecksSinceLastFactcheck(versions);
+  let lastFactCheckNotes = findLatestFactCheckNotes(versions);
 
   const clearPendingRetry = async () => {
     if (pendingRetry) {
@@ -279,6 +307,63 @@ export async function processSingleItem(opts: {
     }
   };
 
+  /** 执行单次微调或因超过允许轮数而标记剔除，并推送实时微调事件日志，避免续跑与主循环重复逻辑 */
+  const applyReviseOrDrop = async (optsRev: {
+    nextRevision: number;
+    reasonSource: 'precheck' | 'factcheck';
+    notes: string[];
+    currentPolished: PolishedItem;
+  }): Promise<{ dropped: true } | { dropped: false; updated: PolishedItem }> => {
+    if (optsRev.nextRevision > settings.editorial.maxRevisions) {
+      markItemDropped({
+        ctx,
+        runId,
+        item,
+        event,
+        revision: optsRev.nextRevision,
+        reason: 'exceeded_revisions',
+      });
+      await clearPendingRetry();
+      return { dropped: true };
+    }
+    const reviseTs = ctx.now().toISOString();
+    ctx.repos.runItems.updateItem(item.id, {
+      status: 'revising',
+      revision: optsRev.nextRevision,
+      updatedAt: reviseTs,
+    });
+    const displayTitle = optsRev.currentPolished.shortTitle || event.title;
+    const sourceLabel = optsRev.reasonSource === 'precheck' ? '本地规则预检' : '独立事实核查';
+    ctx.repos.runEvents.append({
+      runId,
+      ts: reviseTs,
+      level: 'info',
+      stage: 'edit',
+      itemId: item.id,
+      type: 'item_revising',
+      message: `新闻「${displayTitle}」进入并发微调（来源：${sourceLabel}，第 ${optsRev.nextRevision} 轮）`,
+      data: {
+        eventId: event.id,
+        revision: optsRev.nextRevision,
+        source: optsRev.reasonSource,
+      },
+    });
+    const updated = await revisePolishedItem({
+      ctx,
+      settings,
+      limits,
+      runId,
+      itemId: item.id,
+      previous: optsRev.currentPolished,
+      revisionNotes: optsRev.notes,
+      evidence: optsRev.currentPolished.evidence,
+      articlesMap,
+      round: optsRev.nextRevision,
+      signal,
+    });
+    return { dropped: false, updated };
+  };
+
   const canResumeFromLastVer =
     !effectiveFromStep || (effectiveFromStep !== 'summarize' && hasPostRetryWork);
 
@@ -289,62 +374,21 @@ export async function processSingleItem(opts: {
       if (preRes.passed) {
         skipPrecheckOnce = true;
       } else {
-        const usedFreeEarlier = failedPrechecksCount > 1;
-        if (!usedFreeEarlier) {
-          freePrecheckUsed = true;
-          ctx.repos.runItems.updateItem(item.id, {
-            status: 'revising',
-            revision,
-            updatedAt: ctx.now().toISOString(),
-          });
-          polished = await revisePolishedItem({
-            ctx,
-            settings,
-            limits,
-            runId,
-            itemId: item.id,
-            previous: polished,
-            revisionNotes: preRes.errors,
-            evidence: polished.evidence,
-            articlesMap,
-            round: revision,
-            signal,
-          });
-        } else {
-          // 防止在修改轮数递增与保存修订稿之间崩溃导致轮数重复叠加
-          revision = Math.max(revision, lastVer.round + 1);
-          freePrecheckUsed = true;
-          if (revision > settings.editorial.maxRevisions) {
-            markItemDropped({
-              ctx,
-              runId,
-              item,
-              event,
-              revision,
-              reason: 'exceeded_revisions',
-            });
-            await clearPendingRetry();
-            return 'dropped';
-          }
-          ctx.repos.runItems.updateItem(item.id, {
-            status: 'revising',
-            revision,
-            updatedAt: ctx.now().toISOString(),
-          });
-          polished = await revisePolishedItem({
-            ctx,
-            settings,
-            limits,
-            runId,
-            itemId: item.id,
-            previous: polished,
-            revisionNotes: preRes.errors,
-            evidence: polished.evidence,
-            articlesMap,
-            round: revision,
-            signal,
-          });
+        const nextRevision =
+          localPrecheckFixCount <= MAX_LOCAL_PRECHECK_FIXES_PER_ROUND
+            ? revision
+            : Math.max(revision, lastVer.round + 1);
+        revision = nextRevision;
+        const stepRes = await applyReviseOrDrop({
+          nextRevision,
+          reasonSource: 'precheck',
+          notes: preRes.errors,
+          currentPolished: polished,
+        });
+        if (stepRes.dropped) {
+          return 'dropped';
         }
+        polished = stepRes.updated;
       }
     } else if (lastVer?.kind === 'factcheck' && polished) {
       const fc = lastVer.payload as FactCheckResult;
@@ -374,37 +418,19 @@ export async function processSingleItem(opts: {
         await clearPendingRetry();
         return 'dropped';
       }
+      lastFactCheckNotes = fc.revisionNotes;
+      localPrecheckFixCount = 0;
       revision = Math.max(revision, lastVer.round + 1);
-      if (revision > settings.editorial.maxRevisions) {
-        markItemDropped({
-          ctx,
-          runId,
-          item,
-          event,
-          revision,
-          reason: 'exceeded_revisions',
-        });
-        await clearPendingRetry();
+      const stepRes = await applyReviseOrDrop({
+        nextRevision: revision,
+        reasonSource: 'factcheck',
+        notes: fc.revisionNotes,
+        currentPolished: polished,
+      });
+      if (stepRes.dropped) {
         return 'dropped';
       }
-      ctx.repos.runItems.updateItem(item.id, {
-        status: 'revising',
-        revision,
-        updatedAt: ctx.now().toISOString(),
-      });
-      polished = await revisePolishedItem({
-        ctx,
-        settings,
-        limits,
-        runId,
-        itemId: item.id,
-        previous: polished,
-        revisionNotes: fc.revisionNotes,
-        evidence: polished.evidence,
-        articlesMap,
-        round: revision,
-        signal,
-      });
+      polished = stepRes.updated;
     }
   }
 
@@ -445,6 +471,7 @@ export async function processSingleItem(opts: {
       itemId: item.id,
       event,
       summary,
+      articlesMap,
       round: revision,
       signal,
     });
@@ -463,12 +490,15 @@ export async function processSingleItem(opts: {
         updatedAt: ctx.now().toISOString(),
       });
 
+      const persona = await getRunPersona(ctx, runId);
       const precheckRes = precheckPolishedItem({
         item: polished,
         articlesById: articlesForPrecheck,
         limits,
         metaTextBlacklist: settings.editorial.metaTextBlacklist,
         compact: settings.issue.minScore !== undefined,
+        forbiddenTokens: persona?.forbiddenTokens,
+        hostSelfName: persona?.selfName,
       });
 
       ctx.repos.runItems.appendVersion({
@@ -480,42 +510,20 @@ export async function processSingleItem(opts: {
       });
 
       if (!precheckRes.passed) {
-        if (!freePrecheckUsed) {
-          freePrecheckUsed = true;
-        } else {
+        localPrecheckFixCount += 1;
+        if (localPrecheckFixCount > MAX_LOCAL_PRECHECK_FIXES_PER_ROUND) {
           revision += 1;
-          if (revision > settings.editorial.maxRevisions) {
-            markItemDropped({
-              ctx,
-              runId,
-              item,
-              event,
-              revision,
-              reason: 'exceeded_revisions',
-            });
-            await clearPendingRetry();
-            return 'dropped';
-          }
         }
-
-        ctx.repos.runItems.updateItem(item.id, {
-          status: 'revising',
-          revision,
-          updatedAt: ctx.now().toISOString(),
+        const stepRes = await applyReviseOrDrop({
+          nextRevision: revision,
+          reasonSource: 'precheck',
+          notes: precheckRes.errors,
+          currentPolished: polished,
         });
-        polished = await revisePolishedItem({
-          ctx,
-          settings,
-          limits,
-          runId,
-          itemId: item.id,
-          previous: polished,
-          revisionNotes: precheckRes.errors,
-          evidence: polished.evidence,
-          articlesMap,
-          round: revision,
-          signal,
-        });
+        if (stepRes.dropped) {
+          return 'dropped';
+        }
+        polished = stepRes.updated;
         continue;
       }
     }
@@ -539,8 +547,10 @@ export async function processSingleItem(opts: {
       candidate: polished,
       articlesMap,
       round: revision,
+      previousRevisionNotes: lastFactCheckNotes,
       signal,
     });
+    localPrecheckFixCount = 0;
 
     if (fcRes.verdict === 'pass') {
       if (!claimPassSlot()) {
@@ -570,39 +580,18 @@ export async function processSingleItem(opts: {
       return 'dropped';
     }
 
+    lastFactCheckNotes = fcRes.revisionNotes;
     revision += 1;
-    if (revision > settings.editorial.maxRevisions) {
-      markItemDropped({
-        ctx,
-        runId,
-        item,
-        event,
-        revision,
-        reason: 'exceeded_revisions',
-      });
-      await clearPendingRetry();
+    const stepRes = await applyReviseOrDrop({
+      nextRevision: revision,
+      reasonSource: 'factcheck',
+      notes: fcRes.revisionNotes,
+      currentPolished: polished,
+    });
+    if (stepRes.dropped) {
       return 'dropped';
     }
-
-    ctx.repos.runItems.updateItem(item.id, {
-      status: 'revising',
-      revision,
-      updatedAt: ctx.now().toISOString(),
-    });
-
-    polished = await revisePolishedItem({
-      ctx,
-      settings,
-      limits,
-      runId,
-      itemId: item.id,
-      previous: polished,
-      revisionNotes: fcRes.revisionNotes,
-      evidence: polished.evidence,
-      articlesMap,
-      round: revision,
-      signal,
-    });
+    polished = stepRes.updated;
   }
 }
 
@@ -838,6 +827,163 @@ export async function runEditStage(
 }
 
 /**
+ * 批量并发重试指定的一条或多条新闻条目：
+ * 保持其他未参与重做的已过审条目名额后，按并发配置同时重跑全部选中条目的总结、润色、核查与微调；
+ * 全部目标条目并发结束后，若仍有被剔除的缺口则自动从替补队列补位。
+ */
+export async function retryMultipleEditItems(opts: {
+  ctx: CoreContext;
+  settings: Settings;
+  runId: string;
+  itemIds: readonly string[];
+  fromStep?: EditSubStep;
+  limitsOverride?: Partial<ContentLimits>;
+  signal?: AbortSignal;
+}): Promise<EditCheckpoint> {
+  const { ctx, settings, runId, itemIds, fromStep = 'summarize', limitsOverride, signal } = opts;
+  const uniqueItemIds = Array.from(new Set(itemIds.map((id) => id.trim()).filter(Boolean)));
+  if (uniqueItemIds.length === 0) {
+    throw new Error('请至少指定一条需要重做的新闻条目 ID');
+  }
+
+  const run = ctx.repos.runs.getById(runId);
+  if (!run) {
+    throw new Error(`未找到任务记录: ${runId}`);
+  }
+  const events = ctx.repos.events.listByRun(runId);
+  const eventById = new Map(events.map((e) => [e.id, e]));
+  const allItems = ctx.repos.runItems.listByRun(runId);
+  const itemById = new Map(allItems.map((i) => [i.id, i]));
+
+  const targets: Array<{ item: RunItemRecord; event: EventRecord; maxVersionId: number }> = [];
+  for (const itemId of uniqueItemIds) {
+    const targetItem = itemById.get(itemId);
+    if (!targetItem || targetItem.runId !== runId) {
+      throw new Error(`任务 ${runId} 中不存在新闻条目: ${itemId}`);
+    }
+    const targetEvent = eventById.get(targetItem.eventId);
+    if (!targetEvent) {
+      throw new Error(`未找到新闻条目关联的事件记录: ${targetItem.eventId}`);
+    }
+    const versions = ctx.repos.runItems.listVersions(itemId);
+    const maxVersionId = versions.reduce((acc, v) => Math.max(v.id, acc), 0);
+    targets.push({ item: targetItem, event: targetEvent, maxVersionId });
+  }
+
+  const targetIdSet = new Set(uniqueItemIds);
+  const targetPassCount =
+    settings.issue.minScore === undefined
+      ? run.itemCount
+      : Math.max(uniqueItemIds.length, events.filter((event) => event.role === 'primary').length);
+
+  const otherPassed = allItems
+    .filter((i) => !targetIdSet.has(i.id) && i.status === 'passed')
+    .sort((a, b) => {
+      const rankA = eventById.get(a.eventId)?.rank ?? 9999;
+      const rankB = eventById.get(b.eventId)?.rank ?? 9999;
+      return rankA - rankB;
+    });
+
+  // 退回多出的末位已过审条目，确保重做条目全部通过后整期总数严格不超过上限
+  while (otherPassed.length > 0 && otherPassed.length + uniqueItemIds.length > targetPassCount) {
+    const demoted = otherPassed.pop();
+    if (!demoted) {
+      break;
+    }
+    ctx.repos.runItems.updateItem(demoted.id, {
+      status: 'queued',
+      position: null,
+      updatedAt: ctx.now().toISOString(),
+    });
+  }
+
+  let remainingPassSlots = Math.max(0, targetPassCount - otherPassed.length);
+  const limits = resolveContentLimits(settings, limitsOverride);
+  const nowIso = ctx.now().toISOString();
+  for (const target of targets) {
+    ctx.repos.runItems.updateItem(target.item.id, {
+      status: 'queued',
+      position: null,
+      revision: 0,
+      dropReason: null,
+      finalJson: null,
+      updatedAt: nowIso,
+    });
+  }
+
+  const runDir = ctx.paths.runDir(runId);
+  await updateEditWatermark(runDir, (prev) => {
+    const nextFloor = { ...(prev.versionFloorByItemId ?? {}) };
+    const nextPending = { ...(prev.pendingRetryByItemId ?? {}) };
+    for (const target of targets) {
+      if (fromStep === 'summarize') {
+        if (target.maxVersionId > 0) {
+          nextFloor[target.item.id] = target.maxVersionId;
+        }
+        delete nextPending[target.item.id];
+      } else {
+        nextPending[target.item.id] = { fromStep, baselineVersionId: target.maxVersionId };
+      }
+    }
+    return {
+      versionFloorByItemId: nextFloor,
+      pendingRetryByItemId: nextPending,
+    };
+  });
+
+  const localAc = new AbortController();
+  const onAbort = () => localAc.abort();
+  signal?.addEventListener('abort', onAbort, { once: true });
+
+  const claimPassSlot = () => {
+    if (remainingPassSlots <= 0) {
+      return false;
+    }
+    remainingPassSlots -= 1;
+    return true;
+  };
+
+  try {
+    const concurrency = Math.max(1, settings.issue.itemConcurrency);
+    const limit = pLimit(concurrency);
+    await Promise.all(
+      targets.map((target) =>
+        limit(async () => {
+          try {
+            await processSingleItem({
+              ctx,
+              settings,
+              limits,
+              runId,
+              item: {
+                ...target.item,
+                status: 'queued',
+                position: null,
+                revision: 0,
+                dropReason: null,
+                finalJson: null,
+              },
+              event: target.event,
+              signal: localAc.signal,
+              forceFromStep: fromStep,
+              claimPassSlot,
+            });
+          } catch (err) {
+            localAc.abort();
+            throw err;
+          }
+        }),
+      ),
+    );
+  } finally {
+    signal?.removeEventListener('abort', onAbort);
+  }
+
+  // 若批量重做后仍有条目被核查剔除导致过审总数不足，交由协调器自动从替补队列补位
+  return runEditStage(ctx, runId, settings, { signal, limitsOverride });
+}
+
+/**
  * 单条重试指定新闻条目：
  * 若目标条目曾被剔除且当前已有足够过审条目，则先将末位过审条目退回排队以保持整期总数不变；
  * 若重跑后本条被剔除，则自动继续从替补队列补位凑足整期条数。
@@ -851,108 +997,13 @@ export async function retrySingleEditItem(opts: {
   limitsOverride?: Partial<ContentLimits>;
   signal?: AbortSignal;
 }): Promise<EditCheckpoint> {
-  const { ctx, settings, runId, itemId, fromStep = 'summarize', limitsOverride, signal } = opts;
-  const run = ctx.repos.runs.getById(runId);
-  if (!run) {
-    throw new Error(`未找到任务记录: ${runId}`);
-  }
-  const targetItem = ctx.repos.runItems.getById(itemId);
-  if (!targetItem || targetItem.runId !== runId) {
-    throw new Error(`任务 ${runId} 中不存在新闻条目: ${itemId}`);
-  }
-  const events = ctx.repos.events.listByRun(runId);
-  const eventById = new Map(events.map((e) => [e.id, e]));
-  const targetEvent = eventById.get(targetItem.eventId);
-  if (!targetEvent) {
-    throw new Error(`未找到新闻条目关联的事件记录: ${targetItem.eventId}`);
-  }
-
-  const allItems = ctx.repos.runItems.listByRun(runId);
-  const otherPassed = allItems
-    .filter((i) => i.id !== itemId && i.status === 'passed')
-    .sort((a, b) => {
-      const rankA = eventById.get(a.eventId)?.rank ?? 9999;
-      const rankB = eventById.get(b.eventId)?.rank ?? 9999;
-      return rankA - rankB;
-    });
-
-  // 保证其它已过审条数严格不超过 N - 1，从而给当前重跑条目留出名额
-  while (otherPassed.length >= run.itemCount) {
-    const demoted = otherPassed.pop();
-    if (!demoted) {
-      break;
-    }
-    ctx.repos.runItems.updateItem(demoted.id, {
-      status: 'queued',
-      position: null,
-      updatedAt: ctx.now().toISOString(),
-    });
-  }
-
-  const limits = resolveContentLimits(settings, limitsOverride);
-  const localAc = new AbortController();
-  const onAbort = () => localAc.abort();
-  signal?.addEventListener('abort', onAbort, { once: true });
-
-  ctx.repos.runItems.updateItem(targetItem.id, {
-    status: 'queued',
-    position: null,
-    revision: 0,
-    dropReason: null,
-    finalJson: null,
-    updatedAt: ctx.now().toISOString(),
+  return retryMultipleEditItems({
+    ctx: opts.ctx,
+    settings: opts.settings,
+    runId: opts.runId,
+    itemIds: [opts.itemId],
+    fromStep: opts.fromStep,
+    limitsOverride: opts.limitsOverride,
+    signal: opts.signal,
   });
-
-  const runDir = ctx.paths.runDir(runId);
-  const versions = ctx.repos.runItems.listVersions(itemId);
-  const maxVersionId = versions.reduce((acc, v) => Math.max(v.id, acc), 0);
-  await updateEditWatermark(runDir, (prev) => {
-    const nextFloor = { ...(prev.versionFloorByItemId ?? {}) };
-    const nextPending = { ...(prev.pendingRetryByItemId ?? {}) };
-    if (fromStep === 'summarize') {
-      if (maxVersionId > 0) {
-        nextFloor[itemId] = maxVersionId;
-      }
-      delete nextPending[itemId];
-    } else {
-      nextPending[itemId] = { fromStep, baselineVersionId: maxVersionId };
-    }
-    return {
-      versionFloorByItemId: nextFloor,
-      pendingRetryByItemId: nextPending,
-    };
-  });
-
-  try {
-    let slotClaimed = false;
-    await processSingleItem({
-      ctx,
-      settings,
-      limits,
-      runId,
-      item: {
-        ...targetItem,
-        status: 'queued',
-        position: null,
-        revision: 0,
-        dropReason: null,
-        finalJson: null,
-      },
-      event: targetEvent,
-      signal: localAc.signal,
-      forceFromStep: fromStep,
-      claimPassSlot: () => {
-        if (slotClaimed) {
-          return false;
-        }
-        slotClaimed = true;
-        return true;
-      },
-    });
-  } finally {
-    signal?.removeEventListener('abort', onAbort);
-  }
-
-  // 若重做这条后过审总数仍少于 N（例如被核查剔除），交由协调器自动从替补队列补位
-  return runEditStage(ctx, runId, settings, { signal, limitsOverride });
 }

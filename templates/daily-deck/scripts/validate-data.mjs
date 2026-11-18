@@ -10,8 +10,12 @@ const LIMITS = {
   footerCta: 56,
   category: 10,
   shortTitle: 30,
+  progressLabel: 12,
   title: 48,
   summary: 100,
+  cardsMaxCount: 8,
+  cardTitle: 16,
+  cardBody: 80,
   keyPointsCount: 3,
   keyPoint: 32,
   imageCaption: 44,
@@ -59,6 +63,7 @@ items.forEach((item, idx) => {
   const prefix = `items[${idx}]`;
   checkLen(`${prefix}.category`, item.category, LIMITS.category);
   checkLen(`${prefix}.shortTitle`, item.shortTitle, LIMITS.shortTitle);
+  checkLen(`${prefix}.progressLabel`, item.progressLabel, LIMITS.progressLabel);
   checkLen(`${prefix}.title`, item.title, LIMITS.title);
   checkLen(`${prefix}.summary`, item.summary, LIMITS.summary);
   checkLen(`${prefix}.imageCaption`, item.imageCaption, LIMITS.imageCaption);
@@ -66,6 +71,15 @@ items.forEach((item, idx) => {
   checkLen(`${prefix}.source`, item.source, LIMITS.source);
   checkLen(`${prefix}.sourceUrl`, item.sourceUrl, LIMITS.sourceUrl);
   checkLen(`${prefix}.publishedAt`, item.publishedAt, LIMITS.publishedAt);
+  if (Array.isArray(item.cards)) {
+    if (item.cards.length > LIMITS.cardsMaxCount) {
+      warnings.push(`${prefix}.cards: count ${item.cards.length} exceeds ${LIMITS.cardsMaxCount}`);
+    }
+    item.cards.forEach((c, cIdx) => {
+      checkLen(`${prefix}.cards[${cIdx}].title`, c?.title, LIMITS.cardTitle);
+      checkLen(`${prefix}.cards[${cIdx}].body`, c?.body, LIMITS.cardBody);
+    });
+  }
   if (Array.isArray(item.keyPoints)) {
     if (item.keyPoints.length > LIMITS.keyPointsCount) {
       warnings.push(`${prefix}.keyPoints: count ${item.keyPoints.length} exceeds ${LIMITS.keyPointsCount}`);

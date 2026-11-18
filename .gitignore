@@ -12,6 +12,8 @@ next-env.d.ts
 # Runtime data & secrets
 /storage/
 /tmp/
+/assets/tts/
+*.gguf
 .env
 .env.*
 !.env.example

@@ -19,7 +19,7 @@ import { format } from 'date-fns';
 import type { CoreContext } from '../context.js';
 import {
   type EditSubStep,
-  retrySingleEditItem,
+  retryMultipleEditItems,
   updateEditWatermark,
 } from '../editorial/item-pipeline.js';
 import { PipelineError } from '../errors.js';
@@ -747,13 +747,13 @@ export async function resumeRun(
 }
 
 /**
- * 单独重做某期任务中的一条新闻（可指定从总结、润色或核查步骤开始），
- * 完成后自动作废整期编排及之后的阶段并重新向后生成成片。
+ * 批量并发重做某期任务中的一条或多条新闻（可指定从总结、润色或核查步骤开始），
+ * 全部目标条目并发完成后统一作废整期编排及之后的阶段并重新向后生成成片。
  */
-export async function retryRunItem(
+export async function retryRunItems(
   ctx: CoreContext,
   runId: string,
-  itemId: string,
+  itemIds: readonly string[],
   opts?: {
     fromStep?: EditSubStep;
     useLatestConfig?: boolean;
@@ -768,6 +768,11 @@ export async function retryRunItem(
     }) => Promise<void>;
   },
 ): Promise<void> {
+  const uniqueItemIds = Array.from(new Set(itemIds.map((id) => id.trim()).filter(Boolean)));
+  if (uniqueItemIds.length === 0) {
+    throw new Error('请至少指定一条需要重做的新闻条目 ID');
+  }
+
   const run = ctx.repos.runs.getById(runId);
   if (!run) {
     throw new Error(`未找到任务记录: ${runId}`);
@@ -777,22 +782,26 @@ export async function retryRunItem(
     if (holder) {
       throw new LockBusyError(holder);
     }
-    throw new Error(`任务 ${runId} 正在运行中，无法重做单条新闻`);
+    throw new Error(`任务 ${runId} 正在运行中，无法重做新闻条目`);
   }
   if (!RETRYABLE_RUN_STATUSES.includes(run.status)) {
-    throw new Error(`任务 ${runId} 状态为 ${run.status}，不允许重做单条新闻`);
+    throw new Error(`任务 ${runId} 状态为 ${run.status}，不允许重做新闻条目`);
   }
 
   const stageRecs = ctx.repos.runStages.listByRun(runId);
   const selectRec = stageRecs.find((s) => s.stage === 'select');
   if (selectRec?.status !== 'done') {
-    throw new Error(`任务 ${runId} 的选题阶段尚未完成，无法重做单条新闻`);
+    throw new Error(`任务 ${runId} 的选题阶段尚未完成，无法重做新闻条目`);
   }
 
-  const item = ctx.repos.runItems.getById(itemId);
-  if (!item || item.runId !== runId) {
-    throw new Error(`任务 ${runId} 中未找到新闻条目: ${itemId}`);
+  for (const itemId of uniqueItemIds) {
+    const item = ctx.repos.runItems.getById(itemId);
+    if (!item || item.runId !== runId) {
+      throw new Error(`任务 ${runId} 中未找到新闻条目: ${itemId}`);
+    }
   }
+
+  const singleItemId = uniqueItemIds.length === 1 ? uniqueItemIds[0] : undefined;
 
   let settings = parseRunSettingsSnapshot(run.configSnapshotJson);
   acquirePipelineLock(ctx, runId, settings);
@@ -848,27 +857,36 @@ export async function retryRunItem(
       runId,
       level: 'info',
       stage: 'edit',
-      itemId,
+      itemId: singleItemId,
       type: 'retry_started',
-      message: `开始单独重试新闻条目 ${itemId}（起始步骤：${fromStep}）`,
-      data: { granularity: 'item', itemId, fromStep, attempt },
+      message:
+        singleItemId !== undefined
+          ? `开始单独重试新闻条目 ${singleItemId}（起始步骤：${fromStep}）`
+          : `开始并发重试 ${uniqueItemIds.length} 条新闻（${uniqueItemIds.join(', ')}，起始步骤：${fromStep}）`,
+      data: {
+        granularity: singleItemId !== undefined ? 'item' : 'items',
+        ...(singleItemId !== undefined ? { itemId: singleItemId } : {}),
+        itemIds: uniqueItemIds,
+        fromStep,
+        attempt,
+      },
     });
     opts?.onStarted?.();
 
     let editOut: unknown;
     try {
-      editOut = await retrySingleEditItem({
+      editOut = await retryMultipleEditItems({
         ctx,
         settings,
         runId,
-        itemId,
+        itemIds: uniqueItemIds,
         fromStep,
         limitsOverride: opts?.limitsOverride,
         signal: itemSignal,
       });
     } catch (itemErr) {
       if (lostLock) {
-        throw new PipelineError('interrupted', '运行锁已被其他进程接管，当前单条重试已停止', {
+        throw new PipelineError('interrupted', '运行锁已被其他进程接管，当前条目重试已停止', {
           cause: itemErr,
         });
       }
@@ -898,9 +916,9 @@ export async function retryRunItem(
           runId,
           level: 'warn',
           stage: 'edit',
-          itemId,
+          itemId: singleItemId,
           type: 'run_cancelled',
-          message: '单条新闻重试已被取消',
+          message: singleItemId !== undefined ? '单条新闻重试已被取消' : '批量新闻重试已被取消',
         });
       } else {
         const msg = itemErr instanceof Error ? itemErr.message : String(itemErr);
@@ -908,16 +926,21 @@ export async function retryRunItem(
           runId,
           level: 'error',
           stage: 'edit',
-          itemId,
+          itemId: singleItemId,
           type: 'run_failed',
-          message: `单条新闻重试失败（${code}）：${msg}`,
+          message: `${singleItemId !== undefined ? '单条' : '批量'}新闻重试失败（${code}）：${msg}`,
           data: { errorCode: code },
         });
         await ctx.notifier.notify({
           type: 'failed',
           runId,
-          message: `第 ${runId} 期单条重试失败（${code}）：${msg}`,
-          data: { errorCode: code, stage: 'edit', itemId },
+          message: `第 ${runId} 期${singleItemId !== undefined ? '单条' : '批量'}重试失败（${code}）：${msg}`,
+          data: {
+            errorCode: code,
+            stage: 'edit',
+            ...(singleItemId !== undefined ? { itemId: singleItemId } : {}),
+            itemIds: uniqueItemIds,
+          },
         });
       }
       throw itemErr;
@@ -951,6 +974,31 @@ export async function retryRunItem(
     hb.stop();
     releasePipelineLock(ctx, runId);
   }
+}
+
+/**
+ * 单独重做某期任务中的一条新闻（可指定从总结、润色或核查步骤开始），
+ * 完成后自动作废整期编排及之后的阶段并重新向后生成成片。
+ */
+export async function retryRunItem(
+  ctx: CoreContext,
+  runId: string,
+  itemId: string,
+  opts?: {
+    fromStep?: EditSubStep;
+    useLatestConfig?: boolean;
+    stopAfterStage?: PipelineStage;
+    stageOverrides?: Partial<Record<PipelineStage, StageExecutor>>;
+    limitsOverride?: Partial<ContentLimits>;
+    onStarted?: () => void;
+    onAwaitingReview?: (opts: {
+      ctx: CoreContext;
+      runId: string;
+      settings: Settings;
+    }) => Promise<void>;
+  },
+): Promise<void> {
+  return retryRunItems(ctx, runId, [itemId], opts);
 }
 
 /**

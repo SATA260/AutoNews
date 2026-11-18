@@ -306,6 +306,76 @@ describe('template rendering, Playwright capture, ffmpeg composition, and QA', (
     expect(mediaTimeoutMs(600_000, true)).toBeGreaterThan(mediaTimeoutMs(600_000));
   });
 
+  it('开启口播均衡后将同段内过响与过轻的句子拉平至相近音量', async () => {
+    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'aidaily-level-voice-'));
+    tempDirs.push(tmpDir);
+    const uneven = path.join(tmpDir, 'uneven.wav');
+    const leveled = path.join(tmpDir, 'leveled.wav');
+
+    // FFmpeg sine 默认基准约 -23 dB，此处构造 -9 dB（过响）与 -25 dB（偏轻）的两段真实口播电平（中间保留 0.4s 停顿）
+    await execa('ffmpeg', [
+      '-y',
+      '-f',
+      'lavfi',
+      '-i',
+      'sine=frequency=440:sample_rate=48000:duration=4.4',
+      '-af',
+      'volume=5.0:enable=between(t\\,0\\,1.8),volume=0.0:enable=between(t\\,1.8\\,2.2),volume=0.8:enable=between(t\\,2.2\\,4.4)',
+      uneven,
+    ]);
+
+    await buildMasterAudioWav({
+      runDir: tmpDir,
+      rootDir: tmpDir,
+      outWav: leveled,
+      sampleRate: 48000,
+      loudnessLUFS: -16,
+      isSilentProvider: false,
+      levelVoice: true,
+      bgm: { file: '', volumeDb: -9, duckDb: -5 },
+      timeline: {
+        totalMs: 4400,
+        sections: [
+          {
+            key: 'intro',
+            kind: 'intro',
+            audioFile: 'uneven.wav',
+            startMs: 0,
+            speechMs: 4400,
+            pageMs: 4400,
+            sentences: [],
+          },
+        ],
+      },
+    });
+
+    const readSliceMean = async (startSec: number, durSec: number) => {
+      const res = await execa('ffmpeg', [
+        '-hide_banner',
+        '-ss',
+        String(startSec),
+        '-t',
+        String(durSec),
+        '-i',
+        leveled,
+        '-af',
+        'volumedetect',
+        '-f',
+        'null',
+        '-',
+      ]);
+      const match = /mean_volume: ([\d.-]+) dB/.exec(res.stderr);
+      if (!match) throw new Error('未能测量分段音量');
+      return Number(match[1]);
+    };
+
+    const loudHalf = await readSliceMean(0.3, 1.2);
+    const pauseGap = await readSliceMean(1.85, 0.3);
+    const quietHalf = await readSliceMean(2.5, 1.4);
+    expect(Math.abs(loudHalf - quietHalf)).toBeLessThan(3.5);
+    expect(pauseGap).toBeLessThan(-60);
+  });
+
   it('limits speech peaks and mixes sidechain-ducked BGM cleanly', async () => {
     const { rootDir, settingsFile } = await setupRenderWorkspace('solid-color');
     const bgmFile = path.join(rootDir, 'bgm.wav');
@@ -440,6 +510,7 @@ describe('template rendering, Playwright capture, ffmpeg composition, and QA', (
         finalJson: {
           title: 'OpenAI 开放新一代代码推理模型预览，支持长程规划',
           shortTitle: 'OpenAI 开放新推理预览',
+          progressLabel: 'OpenAI推理预览',
           category: '大模型',
           entity: 'OpenAI',
           summary: '今天起，开发者可以直接接入全新推理接口，显著缩短复杂代码调试耗时。',
@@ -507,16 +578,64 @@ describe('template rendering, Playwright capture, ffmpeg composition, and QA', (
       timeline,
     });
     expect(renderCkpt.frameCount).toBe(3);
+    expect(renderCkpt.capturedFrameCount).toBe(3);
+    expect(renderCkpt.reusedFrameCount).toBe(0);
 
     const page0Stat = await fs.stat(path.join(runDir, 'frames', 'page-00.png'));
     const page1Stat = await fs.stat(path.join(runDir, 'frames', 'page-01.png'));
     const page2Stat = await fs.stat(path.join(runDir, 'frames', 'page-02.png'));
+    const sec0Stat = await fs.stat(path.join(runDir, 'frames', 'section-00.mp4'));
+    const sec1Stat = await fs.stat(path.join(runDir, 'frames', 'section-01.mp4'));
+    const sec2Stat = await fs.stat(path.join(runDir, 'frames', 'section-02.mp4'));
     expect(page0Stat.size).toBeGreaterThan(5000);
     expect(page1Stat.size).toBeGreaterThan(5000);
     expect(page2Stat.size).toBeGreaterThan(5000);
+    expect(sec0Stat.size).toBeGreaterThan(2000);
+    expect(sec1Stat.size).toBeGreaterThan(2000);
+    expect(sec2Stat.size).toBeGreaterThan(2000);
+
+    const sectionsProg = await readJsonOrNull<{
+      template: string;
+      sections: Record<string, unknown>;
+    }>(path.join(runDir, 'frames', 'sections-progress.json'));
+    expect(sectionsProg?.template).toBe('daily-deck');
+    expect(Object.keys(sectionsProg?.sections ?? {})).toHaveLength(3);
+
+    const tplData = await readJsonOrNull<Record<string, unknown>>(
+      path.join(runDir, 'template-data.json'),
+    );
+    expect(tplData?.hostLive2dUrl).toBe('/__mascot_assets__/gemini/gemini.model3.json');
+    expect(Array.isArray(tplData?.coverLipSync)).toBe(true);
 
     const stagedAssetStat = await fs.stat(path.join(runDir, 'assets', 'item-01.png'));
     expect(stagedAssetStat.size).toBeGreaterThan(0);
+
+    // 验证章节未发生变更时再次执行渲染可直接复用全部已编码章节分片，无需重新启动浏览器截帧
+    const cachedRenderCkpt = await runRenderStage({
+      ctx: core.context,
+      runId,
+      settings: core.context.settings,
+      packageData: pkgData,
+      timeline,
+    });
+    expect(cachedRenderCkpt.reusedFrameCount).toBe(3);
+    expect(cachedRenderCkpt.capturedFrameCount).toBe(0);
+
+    // 验证即使损坏分片体积超过 1024 字节，ffprobe 校验也会拒绝复用并仅重渲该损坏章节
+    await fs.writeFile(
+      path.join(runDir, 'frames', 'section-01.mp4'),
+      'corrupted-mp4-'.repeat(200),
+      'utf8',
+    );
+    const repairedRenderCkpt = await runRenderStage({
+      ctx: core.context,
+      runId,
+      settings: core.context.settings,
+      packageData: pkgData,
+      timeline,
+    });
+    expect(repairedRenderCkpt.reusedFrameCount).toBe(2);
+    expect(repairedRenderCkpt.capturedFrameCount).toBe(1);
 
     const qa = await runQaStage({
       ctx: core.context,

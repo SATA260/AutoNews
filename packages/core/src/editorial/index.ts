@@ -1,5 +1,6 @@
 export * from './item-pipeline.js';
 export * from './llm.js';
+export * from './personas.js';
 export * from './prechecks.js';
 export * from './prompts.js';
 export * from './refill.js';

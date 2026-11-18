@@ -119,8 +119,31 @@ export const DataInspectorDrawer: React.FC<DataInspectorDrawerProps> = ({
       id: `news-${String(nextNum).padStart(2, '0')}`,
       category: '新资讯',
       shortTitle: `新增 AI 动态 #${nextNum}`,
+      progressLabel: `AI动态#${nextNum}`,
       title: `新增 AI 动态 #${nextNum}：请填写标题`,
       summary: '填入简短的新闻事实梗概（建议 35~80 字），画面不展示主持人长篇口播稿。',
+      cards: [
+        {
+          icon: 'rocket',
+          title: '核心发布',
+          body: '在这里填入核心发布内容，概括该项 AI 进展的主要看点与定位。',
+        },
+        {
+          icon: 'cpu',
+          title: '技术规格',
+          body: '补充参数规模、上下文长度、延迟表现或其他关键技术指标。',
+        },
+        {
+          icon: 'grid',
+          title: '平台与入口',
+          body: '说明支持的访问平台、客户端、开发接口或开源仓库地址。',
+        },
+        {
+          icon: 'shield',
+          title: '适用范围',
+          body: '明确免费额度、付费门槛、区域或内测时间等当前真实使用限制。',
+        },
+      ],
       keyPoints: ['要点一：简述核心发布内容', '要点二：说明实际影响或边界'],
       officialQuote: '未配置官方图片时，右侧将自动展示此原文摘录与关键参数表格。',
       source: '官方发布',
@@ -157,6 +180,7 @@ export const DataInspectorDrawer: React.FC<DataInspectorDrawerProps> = ({
 
   const titleLen = Array.from(currentItem.title ?? '').length;
   const shortTitleLen = Array.from(currentItem.shortTitle ?? '').length;
+  const progressLabelLen = Array.from(currentItem.progressLabel ?? '').length;
   const summaryLen = Array.from(currentItem.summary ?? '').length;
   const captionLen = Array.from(currentItem.imageCaption ?? '').length;
 
@@ -314,6 +338,23 @@ export const DataInspectorDrawer: React.FC<DataInspectorDrawerProps> = ({
                     value={currentItem.shortTitle ?? ''}
                     onChange={(e) => updateCurrentItem({ shortTitle: e.target.value })}
                     placeholder="例如：DeepSeek 新一代推理架构开源"
+                  />
+                </label>
+
+                <label className="editor-field full-span">
+                  <div className="field-label-row">
+                    <span>顶部进度条极简总结（建议 6~10 字，留空自动截取短标题）</span>
+                    <span
+                      className={`char-count ${progressLabelLen > HARD_LIMITS.progressLabel ? 'is-over' : ''}`}
+                    >
+                      {progressLabelLen} / {HARD_LIMITS.progressLabel}
+                    </span>
+                  </div>
+                  <input
+                    type="text"
+                    value={currentItem.progressLabel ?? ''}
+                    onChange={(e) => updateCurrentItem({ progressLabel: e.target.value })}
+                    placeholder="例如：DeepSeek推理降本"
                   />
                 </label>
 

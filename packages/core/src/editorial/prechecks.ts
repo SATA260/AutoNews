@@ -1,4 +1,10 @@
-import type { ContentLimits, IssuePackage, PolishedItem, Settings } from '@aidaily/contracts';
+import type {
+  ContentLimits,
+  Evidence,
+  IssuePackage,
+  PolishedItem,
+  Settings,
+} from '@aidaily/contracts';
 
 /** 确定性规则预检结果（未通过时附带可供模型微调的具体批注） */
 export interface PrecheckResult {
@@ -7,24 +13,128 @@ export interface PrecheckResult {
   warnings: string[];
 }
 
+/** 单条引文依据的原文核验结果 */
+export interface EvidenceQuoteMatchResult {
+  valid: boolean;
+  exact: boolean;
+  ratio: number;
+}
+
 const URL_PATTERN = /https?:\/\/|www\./i;
 const MARKDOWN_PATTERN = /[`*]|\b__|(^|\n)\s*#{1,6}\s|\[[^\]]+\]\([^)]+\)/;
 const CHINESE_CHAR_PATTERN = /[\u4e00-\u9fff]/;
 const CHINESE_NUMBER_PHRASE_PATTERN =
   /[零一二两三四五六七八九十百千万亿]{2,}|[一二两三四五六七八九十]+点[零一二三四五六七八九十]+|[一二两三四五六七八九十][万亿倍成个家款代次年月天小时分秒%％]/g;
 
+const ENGLISH_NUMBER_WORDS: Record<string, number> = {
+  zero: 0,
+  one: 1,
+  first: 1,
+  single: 1,
+  two: 2,
+  second: 2,
+  double: 2,
+  twice: 2,
+  pair: 2,
+  three: 3,
+  third: 3,
+  triple: 3,
+  four: 4,
+  fourth: 4,
+  five: 5,
+  fifth: 5,
+  six: 6,
+  sixth: 6,
+  seven: 7,
+  seventh: 7,
+  eight: 8,
+  eighth: 8,
+  nine: 9,
+  ninth: 9,
+  ten: 10,
+  tenth: 10,
+  eleven: 11,
+  eleventh: 11,
+  twelve: 12,
+  twelfth: 12,
+  dozen: 12,
+  thirteen: 13,
+  fourteen: 14,
+  fifteen: 15,
+  sixteen: 16,
+  seventeen: 17,
+  eighteen: 18,
+  nineteen: 19,
+  twenty: 20,
+  thirty: 30,
+  forty: 40,
+  fifty: 50,
+  sixty: 60,
+  seventy: 70,
+  eighty: 80,
+  ninety: 90,
+  hundred: 100,
+};
+
+const ENGLISH_MONTH_VALUES: ReadonlyArray<readonly [RegExp, number]> = [
+  [/\bJanuary\b|\bJan\.?\b/gi, 1],
+  [/\bFebruary\b|\bFeb\.?\b/gi, 2],
+  // 对可能作为常见英文动词或情态词的月份缩写，仅在月份上下文或首字母大写日期格式下识别
+  [
+    /\b(?:in|on|by|since|until|from|this|last|next)\s+March\b|\bMar(?:ch)?\.?\s+\d{1,2}\b|\b\d{1,2}(?:st|nd|rd|th)?\s+(?:of\s+)?Mar(?:ch)?\.?\b/g,
+    3,
+  ],
+  [/\bApril\b|\bApr\.?\b/gi, 4],
+  [
+    /\b(?:in|on|by|since|until|from|this|last|next)\s+May\b|\bMay\s+\d{1,2}\b|\b\d{1,2}(?:st|nd|rd|th)?\s+(?:of\s+)?May\b/g,
+    5,
+  ],
+  [
+    /\b(?:in|on|by|since|until|from|this|last|next)\s+June?\b|\bJun(?:e)?\.?\s+\d{1,2}\b|\b\d{1,2}(?:st|nd|rd|th)?\s+(?:of\s+)?Jun(?:e)?\.?\b/gi,
+    6,
+  ],
+  [
+    /\b(?:in|on|by|since|until|from|this|last|next)\s+July?\b|\bJul(?:y)?\.?\s+\d{1,2}\b|\b\d{1,2}(?:st|nd|rd|th)?\s+(?:of\s+)?Jul(?:y)?\.?\b/gi,
+    7,
+  ],
+  [
+    /\b(?:in|on|by|since|until|from|this|last|next)\s+Aug(?:ust)?\.?\b|\bAug(?:ust)?\.?\s+\d{1,2}\b|\b\d{1,2}(?:st|nd|rd|th)?\s+(?:of\s+)?Aug(?:ust)?\.?\b/gi,
+    8,
+  ],
+  [/\bSeptember\b|\bSept?\.?\b/gi, 9],
+  [/\bOctober\b|\bOct\.?\b/gi, 10],
+  [/\bNovember\b|\bNov\.?\b/gi, 11],
+  [/\bDecember\b|\bDec\.?\b/gi, 12],
+];
+
+const CHINESE_DIGIT_VALUES: Record<string, number> = {
+  零: 0,
+  一: 1,
+  二: 2,
+  两: 2,
+  三: 3,
+  四: 4,
+  五: 5,
+  六: 6,
+  七: 7,
+  八: 8,
+  九: 9,
+  十: 10,
+};
+
 /** 统计字符串按 Unicode 字符个数计算的长度（准确计入双字节与表情符号） */
 function charLength(text: string): number {
   return Array.from(text.trim()).length;
 }
 
-/** 归一化文本用于原文引语比对：NFKC 规范化、统一全半角与弯引号、压缩连续空白 */
+/** 归一化文本用于原文引语比对：NFKC 规范化、清理不可见断词符、统一弯引号与各类连字符、压缩连续空白 */
 export function normalizeForQuoteCheck(text: string): string {
   return text
     .normalize('NFKC')
+    .replace(/[\u00AD\u200B-\u200D\uFEFF]/g, '')
     .replace(/[\u2018\u2019\u201A]/g, "'")
     .replace(/[\u201C\u201D\u201E]/g, '"')
-    .replace(/[\u2013\u2014]/g, '-')
+    .replace(/[\u2010-\u2015\u2212\uFE58\uFE63\uFF0D]/g, '-')
     .replace(/\s+/g, ' ')
     .trim();
 }
@@ -62,11 +172,303 @@ export function longestCommonSubstringLength(needle: string, haystack: string): 
   return maxLen;
 }
 
+/** 校验单条引文依据是否在对应原文正文中真实存在（支持完整子串、有序省略分段与高重合连续子串） */
+export function verifyEvidenceQuote(
+  ev: Evidence,
+  articlesById: ReadonlyMap<string, { text: string }>,
+): EvidenceQuoteMatchResult {
+  const article = articlesById.get(ev.articleId);
+  const normQuote = normalizeForQuoteCheck(ev.quote);
+  if (!article || !normQuote) {
+    return { valid: false, exact: false, ratio: 0 };
+  }
+  const normBody = normalizeForQuoteCheck(article.text);
+  if (!normBody) {
+    return { valid: false, exact: false, ratio: 0 };
+  }
+  if (normBody.includes(normQuote)) {
+    return { valid: true, exact: true, ratio: 1 };
+  }
+
+  // 支持模型使用省略号连接同一篇原文中的前后连续摘录片段
+  if (/\.{3,}|…+/.test(normQuote)) {
+    const segments = normQuote
+      .split(/\.{3,}|…+/)
+      .map((s) => s.trim())
+      .filter((s) => s.length > 0);
+    const totalSegLen = segments.reduce((sum, s) => sum + s.length, 0);
+    if (segments.length >= 2 && totalSegLen >= 16 && segments.every((s) => s.length >= 6)) {
+      let cursor = 0;
+      let allOrderedMatch = true;
+      for (const seg of segments) {
+        const foundAt = normBody.indexOf(seg, cursor);
+        if (foundAt < 0) {
+          allOrderedMatch = false;
+          break;
+        }
+        cursor = foundAt + seg.length;
+      }
+      if (allOrderedMatch) {
+        return { valid: true, exact: false, ratio: 0.95 };
+      }
+    }
+  }
+
+  const lcsLen = longestCommonSubstringLength(normQuote, normBody);
+  const ratio = lcsLen / normQuote.length;
+  return {
+    valid: ratio >= 0.9,
+    exact: false,
+    ratio,
+  };
+}
+
+/** 从优先与备选引文依据中筛选通过原文核验的条目并去重；若暂无有效条目则返回可待修复的最新提交引文 */
+export function selectGroundedEvidence(
+  primary: readonly Evidence[],
+  fallback: readonly Evidence[],
+  articlesById: ReadonlyMap<string, { text: string }>,
+): Evidence[] {
+  const verified: Evidence[] = [];
+  const seen = new Set<string>();
+  for (const ev of [...primary, ...fallback]) {
+    if (!verifyEvidenceQuote(ev, articlesById).valid) {
+      continue;
+    }
+    const dedupKey = `${ev.articleId}::${normalizeForQuoteCheck(ev.quote)}`;
+    if (!seen.has(dedupKey)) {
+      seen.add(dedupKey);
+      verified.push(ev);
+    }
+  }
+  if (verified.length > 0) {
+    return verified;
+  }
+  if (fallback.length > 0) {
+    return [...fallback];
+  }
+  return [...primary];
+}
+
 /** 提取文本中的标准化阿拉伯数字（全角转半角并移除千位分隔符） */
 export function extractArabicNumbers(text: string): string[] {
   const normalized = text.normalize('NFKC').replace(/(?<=\d),(?=\d)/g, '');
   const matches = normalized.match(/\d+(?:\.\d+)?/g);
   return matches ? Array.from(new Set(matches)) : [];
+}
+
+/** 将数值格式化为不含浮点尾差与科学计数法的干净字符串写入集合 */
+function addCleanNumber(target: Set<string>, value: number): void {
+  if (!Number.isFinite(value) || value < 0) {
+    return;
+  }
+  const normalized = Number(value.toPrecision(12));
+  const raw = String(normalized);
+  if (!/[eE]/.test(raw)) {
+    target.add(raw);
+  }
+}
+
+/** 根据数值与紧随的中英文数量级单位推导等价表达（如 44 billion 对应 440 亿） */
+function addMagnitudeEquivalents(target: Set<string>, baseValue: number, rawUnit: string): void {
+  if (!Number.isFinite(baseValue) || baseValue <= 0) {
+    return;
+  }
+  addCleanNumber(target, baseValue);
+  switch (rawUnit.toLowerCase()) {
+    case 'thousand':
+    case 'k':
+      addCleanNumber(target, baseValue * 1000);
+      addCleanNumber(target, baseValue / 10);
+      break;
+    case 'million':
+    case 'mn':
+    case 'm':
+      addCleanNumber(target, baseValue * 1_000_000);
+      addCleanNumber(target, baseValue * 100);
+      if (baseValue >= 10) {
+        addCleanNumber(target, baseValue / 100);
+      }
+      break;
+    case 'billion':
+    case 'bn':
+    case 'b':
+      addCleanNumber(target, baseValue * 1_000_000_000);
+      addCleanNumber(target, baseValue * 10);
+      if (baseValue >= 100) {
+        addCleanNumber(target, baseValue / 1000);
+      }
+      break;
+    case 'trillion':
+    case 't':
+      addCleanNumber(target, baseValue * 1_000_000_000_000);
+      addCleanNumber(target, baseValue * 10_000);
+      break;
+    case '万':
+      addCleanNumber(target, baseValue * 10_000);
+      if (baseValue >= 1000) {
+        addCleanNumber(target, baseValue / 10_000);
+      }
+      break;
+    case '亿':
+      addCleanNumber(target, baseValue * 100_000_000);
+      addCleanNumber(target, baseValue * 10_000);
+      addCleanNumber(target, baseValue / 10);
+      break;
+    case '万亿':
+      addCleanNumber(target, baseValue * 1_000_000_000_000);
+      addCleanNumber(target, baseValue * 10_000);
+      break;
+    case '千':
+      addCleanNumber(target, baseValue * 1000);
+      addCleanNumber(target, baseValue / 10);
+      break;
+    case '百':
+      addCleanNumber(target, baseValue * 100);
+      break;
+    default:
+      break;
+  }
+}
+
+/** 从原文或已精确匹配引文中提取全部合法数字及跨语言换算等价数值 */
+export function extractGroundedSourceNumbers(text: string): string[] {
+  const result = new Set<string>(extractArabicNumbers(text));
+  const normalized = text
+    .normalize('NFKC')
+    .replace(/[\u2010-\u2015\u2212\uFE58\uFE63\uFF0D]/g, '-')
+    .replace(/(?<=\d),(?=\d)/g, '');
+
+  // 1. 大整数自动支持「万 / 亿」折算，百分比支持「成 / 折 / 小数」表达
+  for (const numStr of result) {
+    const val = Number(numStr);
+    if (!Number.isFinite(val)) {
+      continue;
+    }
+    if (val >= 10_000) {
+      addCleanNumber(result, val / 10_000);
+    }
+    if (val >= 100_000_000) {
+      addCleanNumber(result, val / 100_000_000);
+    }
+  }
+
+  for (const match of normalized.matchAll(/(\d+(?:\.\d+)?)\s*(?:%|percent\b)/gi)) {
+    const pct = Number(match[1]);
+    if (Number.isFinite(pct) && pct >= 0) {
+      addCleanNumber(result, pct / 10);
+      addCleanNumber(result, pct / 100);
+    }
+  }
+
+  // 2. 识别范围带数量级（如 $44-62 billion、10 to 20 million）
+  for (const match of normalized.matchAll(
+    /(\d+(?:\.\d+)?)\s*(?:[$€£¥]?\s*(?:-|~|to|and)\s*[$€£¥]?)\s*(\d+(?:\.\d+)?)\s*(trillion|billion|million|thousand|bn|mn|万亿|亿|万|千|百)\b/gi,
+  )) {
+    const unit = match[3] ?? '';
+    addMagnitudeEquivalents(result, Number(match[1]), unit);
+    addMagnitudeEquivalents(result, Number(match[2]), unit);
+  }
+  for (const match of normalized.matchAll(
+    /(\d+(?:\.\d+)?)\s*(?:-|to)\s*(\d+(?:\.\d+)?)\s*([BMKTbmkt])(?![A-Za-z0-9_])/g,
+  )) {
+    const unit = match[3] ?? '';
+    addMagnitudeEquivalents(result, Number(match[1]), unit);
+    addMagnitudeEquivalents(result, Number(match[2]), unit);
+  }
+
+  // 3. 识别单值带数量级（如 44 billion、8.2B、12 million、150B）
+  for (const match of normalized.matchAll(
+    /(\d+(?:\.\d+)?)\s*(trillion|billion|million|thousand|bn|mn|万亿|亿|万|千|百)(?![A-Za-z0-9_])/gi,
+  )) {
+    addMagnitudeEquivalents(result, Number(match[1]), match[2] ?? '');
+  }
+  for (const match of normalized.matchAll(/(\d+(?:\.\d+)?)\s*([BMKTbmkt])(?![A-Za-z0-9_])/g)) {
+    addMagnitudeEquivalents(result, Number(match[1]), match[2] ?? '');
+  }
+
+  // 4. 识别英文数词及其后随数量级（如 six、twenty-four、twenty-five million、two billion、half a billion）
+  for (const match of normalized.matchAll(
+    /\b(twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety)[-\s]+(one|two|three|four|five|six|seven|eight|nine)(?:\s+(?:of\s+)?(trillion|billion|million|thousand))?\b/gi,
+  )) {
+    const tens = ENGLISH_NUMBER_WORDS[(match[1] ?? '').toLowerCase()] ?? 0;
+    const ones = ENGLISH_NUMBER_WORDS[(match[2] ?? '').toLowerCase()] ?? 0;
+    const scale = match[3];
+    if (tens > 0 && ones > 0) {
+      const combined = tens + ones;
+      if (scale) {
+        addMagnitudeEquivalents(result, combined, scale);
+      } else {
+        addCleanNumber(result, combined);
+      }
+    }
+  }
+  for (const match of normalized.matchAll(
+    /\b([a-z]+)(?:\s+(?:of\s+)?(trillion|billion|million|thousand))?\b/gi,
+  )) {
+    const word = (match[1] ?? '').toLowerCase();
+    const scale = match[2];
+    if (word === 'half') {
+      addCleanNumber(result, 50);
+      addCleanNumber(result, 0.5);
+      addCleanNumber(result, 2);
+      if (scale) {
+        addMagnitudeEquivalents(result, 0.5, scale);
+      }
+      continue;
+    }
+    if (word === 'quarter') {
+      addCleanNumber(result, 25);
+      addCleanNumber(result, 4);
+      continue;
+    }
+    const wordVal = ENGLISH_NUMBER_WORDS[word];
+    if (wordVal !== undefined) {
+      if (scale) {
+        addMagnitudeEquivalents(result, wordVal, scale);
+      } else {
+        addCleanNumber(result, wordVal);
+      }
+    }
+  }
+  for (const match of normalized.matchAll(
+    /\bhalf\s+(?:a|an)\s+(trillion|billion|million|thousand)\b/gi,
+  )) {
+    addMagnitudeEquivalents(result, 0.5, match[1] ?? '');
+  }
+
+  // 5. 识别正文出现的英文月份名称（不涉及外部发布时间字段）
+  for (const [pattern, monthNum] of ENGLISH_MONTH_VALUES) {
+    if (pattern.test(normalized)) {
+      addCleanNumber(result, monthNum);
+    }
+    pattern.lastIndex = 0;
+  }
+
+  // 6. 识别中文正文里的中文数词与倍/成/折/量词组合（如「两倍」「三成」「六国」）
+  for (const match of normalized.matchAll(
+    /([零一二两三四五六七八九十])(万亿|亿|万|千|百|倍|成|折|个|家|款|代|国|项|次|轮|天|年|月|周|小时|分钟|秒)/g,
+  )) {
+    const base = CHINESE_DIGIT_VALUES[match[1] ?? ''];
+    const unit = match[2] ?? '';
+    if (base === undefined) {
+      continue;
+    }
+    addCleanNumber(result, base);
+    if (unit === '成' || unit === '折') {
+      addCleanNumber(result, base * 10);
+    } else if (
+      unit === '万' ||
+      unit === '亿' ||
+      unit === '万亿' ||
+      unit === '千' ||
+      unit === '百'
+    ) {
+      addMagnitudeEquivalents(result, base, unit);
+    }
+  }
+
+  return Array.from(result);
 }
 
 /** 检查单句口播文本是否满足纯中文口语、不含链接与标记符号的基本格式规范 */
@@ -96,6 +498,13 @@ function checkNarrationSentence(
   if (MARKDOWN_PATTERN.test(trimmed)) {
     errors.push(`${label}第 ${index + 1} 句口播不允许包含 Markdown 格式符号`);
   }
+  if (
+    / {2,}/.test(trimmed) ||
+    /\u3000/.test(trimmed) ||
+    /(?<=[\u4e00-\u9fff])\s+(?=[\u4e00-\u9fff])/.test(trimmed)
+  ) {
+    errors.push(`${label}第 ${index + 1} 句口播包含多余空格或使用空格断句，请改用中文标点`);
+  }
 }
 
 /** 检查字符串列表中是否命中自我描述套话黑名单 */
@@ -121,6 +530,30 @@ function checkMetaBlacklist(
   }
 }
 
+/** 检查主播相关展示或口播字段中是否出现人设禁用词或旧式称呼 */
+function checkForbiddenPersonaTokens(
+  fields: Array<{ label: string; value: string }>,
+  forbiddenTokens: readonly string[] | undefined,
+  hostSelfName: string | undefined,
+  errors: string[],
+): void {
+  const tokens = (forbiddenTokens ?? [])
+    .map((term) => term.normalize('NFKC').toLowerCase().trim())
+    .filter((term) => term.length > 0);
+  const oldSuffixPattern = /(deepseek|gemini|gpt|claude)\s*娘/i;
+  const selfNameHint = hostSelfName ? `，若需自称请固定使用「${hostSelfName}」` : '';
+
+  for (const field of fields) {
+    const normalized = field.value.normalize('NFKC').toLowerCase();
+    const matchedToken = tokens.find((token) => normalized.includes(token));
+    const oldMatch = field.value.match(oldSuffixPattern)?.[0];
+    const hit = matchedToken ?? oldMatch;
+    if (hit) {
+      errors.push(`字段「${field.label}」包含主播禁用词 "${hit}"${selfNameHint}`);
+    }
+  }
+}
+
 /**
  * 对中文润色后的单条新闻定稿执行确定性规则检查：
  * 校验逐字引语是否在原文中真实存在、稿件里的阿拉伯数字是否有原文或依据支撑、
@@ -132,12 +565,14 @@ export function precheckPolishedItem(opts: {
   limits: ContentLimits;
   metaTextBlacklist: readonly string[];
   compact?: boolean;
+  forbiddenTokens?: readonly string[];
+  hostSelfName?: string;
 }): PrecheckResult {
   const errors: string[] = [];
   const warnings: string[] = [];
   const { item, articlesById, limits, metaTextBlacklist } = opts;
 
-  // 1. 校验每条引文在对应原始文章正文中确实存在（精确子串，或最长公共子串达到 90%）
+  // 1. 校验每条引文在对应原始文章正文中确实存在（精确子串、省略拼接分段或最长公共子串达到 90%）
   const exactMatchedQuotes: string[] = [];
   for (let i = 0; i < item.evidence.length; i++) {
     const ev = item.evidence[i];
@@ -149,35 +584,31 @@ export function precheckPolishedItem(opts: {
       errors.push(`第 ${i + 1} 条引文依据引用了不存在的文章 ID: ${ev.articleId}`);
       continue;
     }
-    const normQuote = normalizeForQuoteCheck(ev.quote);
-    const normBody = normalizeForQuoteCheck(article.text);
-    if (!normQuote) {
+    if (!normalizeForQuoteCheck(ev.quote)) {
       errors.push(`第 ${i + 1} 条引文依据 quote 为空`);
       continue;
     }
-    if (normBody.includes(normQuote)) {
+    const match = verifyEvidenceQuote(ev, articlesById);
+    if (match.exact) {
       exactMatchedQuotes.push(ev.quote);
-    } else {
-      const lcsLen = longestCommonSubstringLength(normQuote, normBody);
-      const ratio = lcsLen / normQuote.length;
-      if (ratio < 0.9) {
-        errors.push(
-          `第 ${i + 1} 条引文依据（articleId=${ev.articleId}）与原文匹配率仅为 ${Math.round(ratio * 100)}%，低于 90% 下限`,
-        );
-      }
+    } else if (!match.valid) {
+      errors.push(
+        `第 ${i + 1} 条引文依据（articleId=${ev.articleId}）与原文匹配率仅为 ${Math.round(match.ratio * 100)}%，低于 90% 下限`,
+      );
     }
   }
 
-  // 2. 校验稿件各展示与口播字段中的阿拉伯数字必须全部在已精确匹配的引文或原文正文中出现过
+  // 2. 校验稿件各展示与口播字段中的阿拉伯数字必须全部在已精确匹配的引文或原文正文中出现过（含合法跨语言单位换算）
   const groundedSourceChunks: string[] = [...exactMatchedQuotes];
   for (const article of articlesById.values()) {
     groundedSourceChunks.push(article.text);
   }
-  const groundedNumbers = new Set(extractArabicNumbers(groundedSourceChunks.join('\n')));
+  const groundedNumbers = new Set(extractGroundedSourceNumbers(groundedSourceChunks.join('\n')));
 
   const draftFields: Array<{ label: string; value: string }> = [
     { label: 'title', value: item.title },
     { label: 'shortTitle', value: item.shortTitle },
+    { label: 'progressLabel', value: item.progressLabel ?? '' },
     { label: 'category', value: item.category },
     { label: 'entity', value: item.entity },
     { label: 'summary', value: item.summary },
@@ -186,6 +617,15 @@ export function precheckPolishedItem(opts: {
     { label: 'hostComment', value: item.hostComment },
     ...item.narration.map((line, idx) => ({ label: `narration[${idx}]`, value: line })),
   ];
+  if (item.cards) {
+    for (let i = 0; i < item.cards.length; i++) {
+      const card = item.cards[i];
+      if (card) {
+        draftFields.push({ label: `cards[${i}].title`, value: card.title });
+        draftFields.push({ label: `cards[${i}].body`, value: card.body });
+      }
+    }
+  }
   if (item.officialQuote) {
     draftFields.push({ label: 'officialQuote', value: item.officialQuote });
   }
@@ -217,6 +657,14 @@ export function precheckPolishedItem(opts: {
     errors.push(`稿件中出现原文与引文依据均未提及的数字: ${Array.from(ungroundedNums).join('、')}`);
   }
 
+  const pLen = charLength(item.progressLabel ?? '');
+  const maxProgressLen = limits.progressLabel ?? 10;
+  if (pLen < 4 || pLen > maxProgressLen) {
+    errors.push(
+      `字段「progressLabel」必填且字数须在 4 到 ${maxProgressLen} 字之间（当前为 ${pLen} 字）`,
+    );
+  }
+
   // 3. 校验各字段字数上限及要点数量上限
   const lengthChecks: Array<[string, string, number]> = [
     ['title', item.title, limits.title],
@@ -243,8 +691,32 @@ export function precheckPolishedItem(opts: {
     }
   }
 
+  if (item.cards) {
+    if (item.cards.length > 8) {
+      errors.push(`信息卡片数量过多（${item.cards.length} > 8 张）`);
+    }
+    for (let i = 0; i < item.cards.length; i++) {
+      const card = item.cards[i];
+      if (!card) {
+        continue;
+      }
+      const titleLen = charLength(card.title);
+      const bodyLen = charLength(card.body);
+      if (titleLen > 16) {
+        errors.push(`第 ${i + 1} 张信息卡片小标题超出字数上限（${titleLen} > 16 字）`);
+      }
+      if (bodyLen > 80) {
+        errors.push(`第 ${i + 1} 张信息卡片正文超出字数上限（${bodyLen} > 80 字）`);
+      }
+    }
+  }
+
+  const sentenceLimit = opts.compact
+    ? Math.max(46, limits.narrationSentence)
+    : limits.narrationSentence;
+
   if (opts.compact) {
-    if (charLength(item.title) > 22 || charLength(item.shortTitle) > 16)
+    if (charLength(item.title) > 36 || charLength(item.shortTitle) > 16)
       errors.push('标题或短标题超过新版字数上限');
     if (!item.highlight || charLength(item.highlight) > 18)
       errors.push('核心高亮必须为不超过十八字的客观结论');
@@ -254,21 +726,74 @@ export function precheckPolishedItem(opts: {
       item.keyPoints.some((point) => charLength(point) > 15)
     )
       errors.push('核心要点须为二到三条，每条不超过十五字');
+    if (!item.cards || item.cards.length < 2 || item.cards.length > 8) {
+      errors.push('信息卡片须为二到八张');
+    } else if (
+      item.cards.some(
+        (card) =>
+          charLength(card.title) < 2 ||
+          charLength(card.title) > 12 ||
+          charLength(card.body) < 10 ||
+          charLength(card.body) > 56,
+      )
+    ) {
+      errors.push('每张信息卡片小标题须为二到十二字，正文须为十到五十六字');
+    }
     const total = item.narration.reduce((sum, sentence) => sum + charLength(sentence), 0);
-    if (item.narration.length < 4 || item.narration.length > 7 || total < 110 || total > 180)
-      errors.push('口播应为四到七句，总长一百一十到一百八十字');
-    if (item.narration.some((sentence) => charLength(sentence) < 14 || charLength(sentence) > 30))
-      errors.push('每句口播须为十四到三十字');
+    if (item.narration.length < 2 || item.narration.length > 5 || total < 40 || total > 140)
+      errors.push('口播应为二到五句，总长四十到一百四十字');
+    if (
+      item.narration.some(
+        (sentence) => charLength(sentence) < 4 || charLength(sentence) > sentenceLimit,
+      )
+    )
+      errors.push(`每句口播须为四到${sentenceLimit}字`);
     if (item.narration.some((sentence) => /[~～♪♫]|……|呐呐|呢喵/.test(sentence)))
       errors.push('口播包含不适合语音合成的符号或语气词');
+    const firstSentence = item.narration[0]?.trim() ?? '';
+    if (
+      /^(?:今天(?:我们)?(?:先|一起)?(?:来|一起)?(?:看|关注|聊聊|说说)(?:一条|一下|这?条)|接下来(?:我们)?(?:先|一起)?来?(?:看|关注)|下面(?:我们)?(?:先|一起)?来?(?:看|关注)(?:一条|一下))/.test(
+        firstSentence,
+      )
+    ) {
+      errors.push('口播首句严禁使用“今天先来看一条…”等铺垫套话，请直接切入新闻主体与事件');
+    }
+    const lastSentence = item.narration[item.narration.length - 1]?.trim() ?? '';
+    if (
+      /值得(?:我们|大家)?持续关注|标志着.{0,12}迈入新阶段|未来(?:发展|表现)?值得期待/.test(
+        lastSentence,
+      )
+    ) {
+      errors.push('口播结尾严禁使用“值得持续关注”等拔高套话，说完事实与限制即可收尾');
+    }
+    const vagueRefCount = item.narration.filter((sentence) => /该公司|后者/.test(sentence)).length;
+    if (vagueRefCount >= 2)
+      errors.push('口播多次使用“该公司”或“后者”等模糊指代，请改为具体主语并优化衔接');
+    const stripPunctuation = (text: string): string =>
+      text.replace(/[\s，。！？；：、“”"'‘’（）()【】[\]、,.!?;:-]/g, '');
+    const cardTitleSet = new Set(
+      (item.cards ?? []).map((card) => stripPunctuation(card.title)).filter(Boolean),
+    );
+    if (item.narration.some((sentence) => cardTitleSet.has(stripPunctuation(sentence)))) {
+      errors.push('口播出现直接念卡片小标题的情况，请改为自然串联口播句子');
+    }
   }
 
-  // 4. 检查自我描述黑名单
+  // 4. 检查自我描述黑名单与主播禁用词
   checkMetaBlacklist(draftFields, metaTextBlacklist, errors);
+  checkForbiddenPersonaTokens(
+    [
+      { label: 'hostComment', value: item.hostComment },
+      ...item.narration.map((line, idx) => ({ label: `narration[${idx}]`, value: line })),
+    ],
+    opts.forbiddenTokens,
+    opts.hostSelfName,
+    errors,
+  );
 
   // 5. 校验口播分句规则
   for (let i = 0; i < item.narration.length; i++) {
-    checkNarrationSentence(item.narration[i] ?? '', i, limits.narrationSentence, '', errors);
+    checkNarrationSentence(item.narration[i] ?? '', i, sentenceLimit, '', errors);
   }
 
   return {
@@ -288,6 +813,9 @@ export function precheckIssuePackage(opts: {
   limits: ContentLimits;
   publishConfig: Settings['publish']['bilibili'];
   metaTextBlacklist: readonly string[];
+  compact?: boolean;
+  forbiddenTokens?: readonly string[];
+  hostSelfName?: string;
 }): PrecheckResult {
   const errors: string[] = [];
   const warnings: string[] = [];
@@ -358,6 +886,48 @@ export function precheckIssuePackage(opts: {
     );
   }
 
+  if (opts.compact) {
+    const introText = pkg.intro.narration.join('');
+    const introTotal = charLength(introText);
+    if (pkg.intro.narration.length > 2 || introTotal > 65) {
+      errors.push('开场口播应简短高效（一到两句、总长不超过六十五字），不要在开头总结新闻');
+    }
+    if (opts.hostSelfName) {
+      const normIntro = introText.normalize('NFKC').toLowerCase();
+      const normSelf = opts.hostSelfName.normalize('NFKC').toLowerCase();
+      if (!normIntro.includes(normSelf)) {
+        errors.push(`开场口播必须简短直接地做自我介绍并包含主播自称「${opts.hostSelfName}」`);
+      }
+    }
+    if (
+      /(?:我是|来自)[^，。！？]{1,15}(?:公司|旗下|出品)的|我是(?:谷歌|google|deepmind|openai|anthropic|深度求索|deepseek)[^，。！？]{0,8}的/i.test(
+        introText,
+      )
+    ) {
+      errors.push('开场自我介绍直接报名字即可，不用说自己是哪个公司的');
+    }
+    const outroTotal = pkg.outro.narration.reduce((sum, line) => sum + charLength(line), 0);
+    if (pkg.outro.narration.length > 2 || outroTotal > 55) {
+      errors.push('结尾口播应干净利落（一到两句、总长不超过五十五字），不要做长篇总结');
+    }
+
+    const publishTitle = pkg.publish.title.trim();
+    if (/^(?:【?\s*)?(?:AI\s*(?:每日报|早报|晚报|日报)|今日\s*AI\s*资讯)/i.test(publishTitle)) {
+      errors.push(
+        '视频标题严禁以“AI每日报/AI早报”等死板栏目名开头，请改用高张力冲突钩子直切硬核看点',
+      );
+    }
+    if (charLength(publishTitle) < 32) {
+      errors.push('视频标题过于简短平淡（须至少三十二字并写入具体模型名、关键数字或反差冲突）');
+    }
+    if (!/[!！?？]/.test(publishTitle)) {
+      errors.push('视频标题缺少感叹号或问号情绪张力钩子，请参考爆款标题风格强化冲击力');
+    }
+    if (/(?<=[\u4e00-\u9fff])_|_(?=[\u4e00-\u9fff])/.test(publishTitle)) {
+      errors.push('视频标题请使用正常标点或空格，不要混入文件名下划线“_”');
+    }
+  }
+
   const fields: Array<{ label: string; value: string }> = [
     { label: 'headline', value: pkg.headline },
     { label: 'leadSummary', value: pkg.leadSummary },
@@ -370,6 +940,20 @@ export function precheckIssuePackage(opts: {
     ...pkg.outro.narration.map((s, idx) => ({ label: `outro.narration[${idx}]`, value: s })),
   ];
   checkMetaBlacklist(fields, metaTextBlacklist, errors);
+  checkForbiddenPersonaTokens(
+    [
+      { label: 'headline', value: pkg.headline },
+      { label: 'leadSummary', value: pkg.leadSummary },
+      { label: 'intro.hostComment', value: pkg.intro.hostComment },
+      { label: 'outro.hostComment', value: pkg.outro.hostComment },
+      { label: 'outro.cta', value: pkg.outro.cta },
+      ...pkg.intro.narration.map((s, idx) => ({ label: `intro.narration[${idx}]`, value: s })),
+      ...pkg.outro.narration.map((s, idx) => ({ label: `outro.narration[${idx}]`, value: s })),
+    ],
+    opts.forbiddenTokens,
+    opts.hostSelfName,
+    errors,
+  );
 
   return {
     passed: errors.length === 0,

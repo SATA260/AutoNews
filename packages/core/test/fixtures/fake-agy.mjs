@@ -192,25 +192,49 @@ if (stage === 'polish') {
   const title = rawTitle.slice(0, 24);
   const shortTitle = rawTitle.slice(0, 12);
 
+  const paddedLabel =
+    rawTitle.length >= 4 ? rawTitle.slice(0, 9) : `${rawTitle}动态速递`.slice(0, 9);
+  const compactMode = /总字数40～140字/.test(prompt);
+  const defaultCards = [
+    {
+      icon: 'rocket',
+      title: '核心发布动态',
+      body: '相关团队正式公布本次人工智能能力升级与核心产品更新说明。',
+    },
+    {
+      icon: 'zap',
+      title: '实用能力提升',
+      body: '本次更新重点围绕高频场景优化响应效率与日常操作流畅体验。',
+    },
+    {
+      icon: 'globe',
+      title: '开放使用范围',
+      body: '当前功能已面向常规用户陆续开放接入，支持按官方指引直接体验。',
+    },
+    {
+      icon: 'shield',
+      title: '适用与边界说明',
+      body: '具体功能边界与适用条件以官方说明为准，暂无额外未披露限制。',
+    },
+  ];
+
   emitSuccess({
     title,
     shortTitle,
+    progressLabel: paddedLabel,
     category: '大模型',
     entity: 'OpenAI',
     summary: '主流机构推出新一轮人工智能更新，当前用户已可使用。',
-    ...(prompt.includes('总字数110～180字')
-      ? { highlight: '人工智能技术获得更新', preferArticleImage: false }
-      : {}),
+    ...(compactMode ? { highlight: '人工智能技术获得更新', preferArticleImage: false } : {}),
+    cards: defaultCards,
     keyPoints: ['新功能已正式推出', '面向普通用户开放体验'],
     detail: '本次发布重点围绕实用性优化，降低了普通人的使用门槛。',
     hostComment: '这项更新对日常工作很有帮助。',
-    narration: prompt.includes('总字数110～180字')
+    narration: compactMode
       ? [
-          '今天我们一起来关注一项人工智能领域的新进展。',
-          '有关团队介绍了这次更新，并说明目前的使用范围。',
-          '这项进展为关注人工智能技术的用户提供了新的信息。',
-          '具体的能力和适用范围，还需要结合官方说明来了解。',
-          '我们也会继续关注这项技术之后带来的实际变化。',
+          '主流研发团队正式发布新一代人工智能工具更新。',
+          '新版本围绕高频场景优化响应效率，目前已向常规用户陆续开放。',
+          '具体功能边界以官方说明为准，整体改动相当实在。',
         ]
       : ['今天来看一条新动态。', '新功能已经面向大众用户正式推出。'],
     evidence: draft.evidence,
@@ -221,11 +245,39 @@ if (stage === 'revise') {
   const prev = extractJsonSection(prompt, '## 上一版润色稿（JSON）') ?? {};
   const art = extractFirstArticle(prompt);
   const quote = art.body.slice(0, 80).trim();
+  const prevLabel = String(prev.progressLabel ?? prev.shortTitle ?? '核心进展速递').trim();
+  const prevCards =
+    Array.isArray(prev.cards) && prev.cards.length >= 4
+      ? prev.cards
+      : [
+          {
+            icon: 'rocket',
+            title: '核心更新摘要',
+            body: '经对照原文核对修正，当前功能已在局部测试范围内公布更新。',
+          },
+          {
+            icon: 'zap',
+            title: '开放范围核实',
+            body: '该新能力目前仅在局部范围内开放测试，面向限定范围用户可用。',
+          },
+          {
+            icon: 'globe',
+            title: '渠道接入说明',
+            body: '用户需按官方公布的测试入口申请接入并等待逐步开放覆盖。',
+          },
+          {
+            icon: 'shield',
+            title: '信息依据边界',
+            body: '本次表述已按原始信源严格校准，不包含任何原文未提及数据。',
+          },
+        ];
   emitSuccess({
     ...prev,
     title: String(prev.title ?? '修正后 AI 动态').slice(0, 24),
     shortTitle: String(prev.shortTitle ?? '修正动态').slice(0, 12),
+    progressLabel: prevLabel.length >= 4 ? prevLabel.slice(0, 9) : '修正核心进展',
     summary: '经过核对修正，该功能目前在测试范围外暂未全部开放。',
+    cards: prevCards,
     narration: ['经过仔细核对原文信息。', '该新能力目前仅在局部范围内开放测试。'],
     evidence:
       Array.isArray(prev.evidence) && prev.evidence.length > 0
@@ -250,23 +302,34 @@ if (stage === 'factcheck') {
 
 if (stage === 'package') {
   const items = extractJsonSection(prompt, '## 本期已过审新闻列表（JSON）') ?? [];
+  const persona = extractJsonSection(prompt, '## 当期主播人设');
   const order = items.map((i) => i.itemId);
+  const selfName =
+    typeof persona?.selfName === 'string' && persona.selfName ? persona.selfName : '';
   emitSuccess({
     order,
     headlineItemId: order[0] ?? 'item-1',
     headline: '今日头条看点：大模型应用再迎实用升级',
     leadSummary: '今天重点为你盘点几条贴近日常工作的人工智能新动向。',
     intro: {
-      narration: ['大家好，欢迎收看今天的 AI 每日报。', '马上带你速览今日热点。'],
-      hostComment: '今天每条动态都值得留意。',
+      narration: selfName
+        ? [
+            `大家好，我是${selfName}，欢迎收看今天的AI每日报。`,
+            '屏幕上是今天的主要内容，接下来请看详细报道。',
+          ]
+        : ['大家好，欢迎收看今天的 AI 每日报。', '屏幕上是今天的主要内容，接下来请看详细报道。'],
+      hostComment: '直接看今天重点。',
     },
     outro: {
-      narration: ['以上就是本期全部内容。', '感谢大家收看。'],
-      hostComment: '期待在评论区看到你的真实体验。',
+      narration: [
+        selfName ? `今天的资讯播送完了，我是${selfName}，明天见。` : '今天的资讯播送完了，明天见。',
+      ],
+      hostComment: '欢迎在评论区聊聊。',
       cta: '本期更新里你最期待哪项功能？评论区聊聊吧。',
     },
     publish: {
-      title: 'AI每日报｜实用新功能上线，普通人也能轻松用',
+      title:
+        'AI圈大地震！新一代旗舰推理模型重磅上线，高频场景响应速度大涨，常规用户现已开放直接体验！',
       descriptionIntro: '本期整理了今日最值得关注的几条实用 AI 进展。',
       tags: ['科技前沿', '效率工具'],
     },

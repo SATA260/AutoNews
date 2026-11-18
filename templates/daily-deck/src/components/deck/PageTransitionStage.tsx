@@ -17,10 +17,120 @@ export interface PageTransitionStageProps {
   issueVersion: number;
   transitionStyle: DeckTransitionStyle;
   motion: 'animated' | 'static';
+  /** 确定性虚拟时钟模式下传入的 [0, 1] 翻页进度插值；为空时使用浏览器原生实时 CSS 动画 */
+  virtualProgress?: number | null;
   renderPage: (pageIndex: number, isExiting: boolean) => React.ReactNode;
 }
 
-/** 双层书页过渡舞台：通过稳定的页码键值同步维护离场页与入场页，消除翻页瞬间的空白闪屏 */
+/** 计算与 CSS cubic-bezier(0.22, 1, 0.36, 1) 对齐的平滑缓出曲线 */
+function easeOutEditorial(t: number): number {
+  const clamped = Math.min(1, Math.max(0, t));
+  return 1 - (1 - clamped) ** 3.4;
+}
+
+/** 在虚拟时钟手动步进模式下计算离场页与入场页的精确内联变换样式 */
+function computeVirtualTurnStyles(
+  style: DeckTransitionStyle,
+  direction: 'next' | 'prev',
+  rawProgress: number,
+): {
+  entering: React.CSSProperties;
+  exiting: React.CSSProperties;
+  dimOpacity: number;
+} {
+  const e = easeOutEditorial(rawProgress);
+
+  if (style === 'fade') {
+    const offsetPx = (direction === 'next' ? 24 : -24) * (1 - e);
+    return {
+      entering: {
+        zIndex: 4,
+        opacity: e,
+        transform: `translate3d(${offsetPx.toFixed(2)}px, 0, 0)`,
+      },
+      exiting: {
+        zIndex: 2,
+        opacity: 1,
+        transform: 'translate3d(0, 0, 0)',
+      },
+      dimOpacity: 0,
+    };
+  }
+
+  if (style === 'flip') {
+    if (direction === 'next') {
+      const rot = -16 * e;
+      const tx = -26 * e;
+      const op = e <= 0.55 ? 1 : Math.max(0, 1 - (e - 0.55) / 0.45);
+      const scaleIn = 0.992 + 0.008 * e;
+      return {
+        entering: {
+          zIndex: 2,
+          transform: `translate3d(0, 0, 0) scale(${scaleIn.toFixed(4)})`,
+        },
+        exiting: {
+          zIndex: 4,
+          transformOrigin: '0% 50%',
+          transform: `rotateY(${rot.toFixed(2)}deg) translate3d(${tx.toFixed(2)}%, 0, 0)`,
+          opacity: op,
+        },
+        dimOpacity: 0,
+      };
+    }
+    const rot = -16 * (1 - e);
+    const tx = -26 * (1 - e);
+    const op = e >= 0.45 ? 1 : e / 0.45;
+    const scaleOut = 1 - 0.008 * e;
+    return {
+      entering: {
+        zIndex: 4,
+        transformOrigin: '0% 50%',
+        transform: `rotateY(${rot.toFixed(2)}deg) translate3d(${tx.toFixed(2)}%, 0, 0)`,
+        opacity: op,
+      },
+      exiting: {
+        zIndex: 2,
+        transform: `translate3d(0, 0, 0) scale(${scaleOut.toFixed(4)})`,
+      },
+      dimOpacity: 0,
+    };
+  }
+
+  // 默认 glide 纸张滑移过渡
+  if (direction === 'next') {
+    const enterTx = 100 * (1 - e);
+    const exitTx = -8 * e;
+    const exitScale = 1 - 0.014 * e;
+    return {
+      entering: {
+        zIndex: 4,
+        transform: `translate3d(${enterTx.toFixed(3)}%, 0, 0)`,
+      },
+      exiting: {
+        zIndex: 2,
+        transform: `translate3d(${exitTx.toFixed(3)}%, 0, 0) scale(${exitScale.toFixed(4)})`,
+      },
+      dimOpacity: 0.07 * e,
+    };
+  }
+
+  const exitTx = 100 * e;
+  const enterTx = -8 * (1 - e);
+  const enterScale = 0.986 + 0.014 * e;
+  return {
+    entering: {
+      zIndex: 2,
+      transform: `translate3d(${enterTx.toFixed(3)}%, 0, 0) scale(${enterScale.toFixed(4)})`,
+    },
+    exiting: {
+      zIndex: 4,
+      transform: `translate3d(${exitTx.toFixed(3)}%, 0, 0)`,
+    },
+    dimOpacity: 0.07 * (1 - e),
+  };
+}
+
+/** 双层书页过渡舞台：同时支持实时 CSS 翻页动画与确定性虚拟时钟插值渲染 */
 export const PageTransitionStage: React.FC<PageTransitionStageProps> = ({
   currentPage,
   exitingPage,
@@ -28,32 +138,45 @@ export const PageTransitionStage: React.FC<PageTransitionStageProps> = ({
   issueVersion,
   transitionStyle,
   motion,
+  virtualProgress = null,
   renderPage,
 }) => {
   const effectiveStyle: DeckTransitionStyle = motion === 'static' ? 'none' : transitionStyle;
   const isTurning =
     effectiveStyle !== 'none' && exitingPage !== null && exitingPage !== currentPage;
+  const isVirtual = isTurning && virtualProgress !== null && Number.isFinite(virtualProgress);
+  const virtualStyles = isVirtual
+    ? computeVirtualTurnStyles(effectiveStyle, direction, virtualProgress)
+    : null;
 
   return (
     <div
       className={`page-turn-stage mode-${effectiveStyle} ${
         isTurning ? `is-turning dir-${direction}` : 'is-settled'
-      }`}
+      } ${isVirtual ? 'is-virtual-turn' : ''}`}
     >
       {isTurning && exitingPage !== null && (
         <div
           key={`issue-${issueVersion}-page-${exitingPage}`}
           className="page-sheet is-exiting"
+          style={virtualStyles?.exiting}
           aria-hidden="true"
         >
           <div className="page-sheet-inner">{renderPage(exitingPage, true)}</div>
-          <div className="page-exit-dim" aria-hidden="true" />
+          <div
+            className="page-exit-dim"
+            style={
+              virtualStyles ? { opacity: Number(virtualStyles.dimOpacity.toFixed(4)) } : undefined
+            }
+            aria-hidden="true"
+          />
         </div>
       )}
 
       <div
         key={`issue-${issueVersion}-page-${currentPage}`}
         className={`page-sheet is-active ${isTurning ? 'is-entering' : ''}`}
+        style={virtualStyles?.entering}
       >
         <div className="page-sheet-inner">{renderPage(currentPage, false)}</div>
       </div>

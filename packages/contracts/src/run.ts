@@ -148,8 +148,8 @@ export const RunSummarySchema = z.object({
 /** 任务摘要类型 */
 export type RunSummary = z.infer<typeof RunSummarySchema>;
 
-/** 模型调用记录所属阶段（支持主流程步骤名称及具体的 AI 处理子阶段） */
-export const LlmStageSchema = z.union([StageSchema, AiStageNameSchema]);
+/** 模型调用记录所属阶段（支持主流程步骤名称、AI 配置环节及独立的打回微调子步骤） */
+export const LlmStageSchema = z.union([StageSchema, AiStageNameSchema, z.literal('revise')]);
 /** 模型调用所属阶段类型 */
 export type LlmStage = z.infer<typeof LlmStageSchema>;
 

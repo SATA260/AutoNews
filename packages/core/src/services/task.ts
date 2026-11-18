@@ -41,7 +41,7 @@ import {
   executeRun,
   getRunRetryOptions,
   resumeRun,
-  retryRunItem,
+  retryRunItems,
 } from '../workflow/runner.js';
 
 /** 带有正文原文内容的新闻文章详情，用于管理后台核对出处与原稿 */
@@ -98,6 +98,8 @@ export interface TaskService {
   resume(runId: string, opts?: TaskResumeOptions): Promise<void>;
   /** 对指定期次中的某一条新闻单独重新生成或重新核查，并自动重新编排合成 */
   retryItem(runId: string, itemId: string, opts?: TaskRetryItemOptions): Promise<void>;
+  /** 对指定期次中的一条或多条新闻批量并发重做或重审，全部完成后统一重新编排合成 */
+  retryItems(runId: string, itemIds: string[], opts?: TaskRetryItemOptions): Promise<void>;
   /** 查询某期任务当前允许的恢复入口及重试截止时间 */
   getRetryOptions(runId: string): Promise<RetryOptions>;
   /** 主动放弃未完结的任务，释放它占用的新闻文章回到待选库 */
@@ -375,6 +377,9 @@ export function createTaskService(ctx: CoreContext): TaskService {
         throw err;
       }
 
+      // 每次启动新任务前重新读取磁盘配置与信源清单，防止常驻服务持有旧内存配置生成过期快照
+      await ctx.reloadConfig();
+
       const runId = inTransaction(ctx.db, () => {
         const createdId = createRun(ctx, {
           itemCount: opts.itemCount,
@@ -491,38 +496,44 @@ export function createTaskService(ctx: CoreContext): TaskService {
 
     /** 单独重跑某期任务中的一条新闻并自动向后重新编排与合成成片 */
     async retryItem(runId: string, itemId: string, opts?: TaskRetryItemOptions): Promise<void> {
+      return this.retryItems(runId, [itemId], opts);
+    },
+
+    /** 批量并发重跑某期任务中的一条或多条新闻，完成后统一向后重新编排与合成成片 */
+    async retryItems(runId: string, itemIds: string[], opts?: TaskRetryItemOptions): Promise<void> {
+      const uniqueItemIds = Array.from(new Set(itemIds.map((id) => id.trim()).filter(Boolean)));
+      if (uniqueItemIds.length === 0) {
+        throw new Error('请至少指定一条需要重做的新闻条目');
+      }
+
       const run = ctx.repos.runs.getById(runId);
       if (!run) {
         throw new Error(`未找到任务记录: ${runId}`);
       }
       if (!RETRYABLE_RUN_STATUSES.includes(run.status)) {
-        throw new Error(`任务 ${runId} 当前状态为 ${run.status}，不允许单独重试新闻条目`);
+        throw new Error(`任务 ${runId} 当前状态为 ${run.status}，不允许重试新闻条目`);
       }
 
       const stageRecs = ctx.repos.runStages.listByRun(runId);
       const selectRec = stageRecs.find((s) => s.stage === 'select');
       if (selectRec?.status !== 'done') {
-        throw new Error(`任务 ${runId} 尚未完成选题阶段，无法单独重试新闻条目`);
+        throw new Error(`任务 ${runId} 尚未完成选题阶段，无法重试新闻条目`);
       }
 
-      const item = ctx.repos.runItems.getById(itemId);
-      if (!item || item.runId !== runId) {
-        throw new Error(`任务 ${runId} 中未找到新闻条目: ${itemId}`);
+      for (const itemId of uniqueItemIds) {
+        const item = ctx.repos.runItems.getById(itemId);
+        if (!item || item.runId !== runId) {
+          throw new Error(`任务 ${runId} 中未找到新闻条目: ${itemId}`);
+        }
       }
 
       assertPipelineLockAvailable(ctx);
 
       if (opts?.detach) {
-        const args = [
-          '--root',
-          ctx.paths.rootDir,
-          '--action',
-          'retry-item',
-          '--run-id',
-          runId,
-          '--item-id',
-          itemId,
-        ];
+        const args = ['--root', ctx.paths.rootDir, '--action', 'retry-item', '--run-id', runId];
+        for (const itemId of uniqueItemIds) {
+          args.push('--item-id', itemId);
+        }
         if (opts.fromStep) {
           args.push('--from', opts.fromStep);
         }
@@ -533,7 +544,7 @@ export function createTaskService(ctx: CoreContext): TaskService {
         return;
       }
 
-      await retryRunItem(ctx, runId, itemId, {
+      await retryRunItems(ctx, runId, uniqueItemIds, {
         fromStep: opts?.fromStep,
         useLatestConfig: opts?.useLatestConfig,
       });

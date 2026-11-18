@@ -7,8 +7,11 @@ import type { TtsSettings } from '@aidaily/contracts';
 import { execa } from 'execa';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
+  alignSentencesToWav,
   computeTtsCacheKey,
+  createIndexTtsProvider,
   createQwenLocalTtsProvider,
+  normalizeSegmentToWav,
   probeAudioDurationMs,
   type TtsProvider,
   TtsService,
@@ -44,7 +47,9 @@ describe('@aidaily/tts', () => {
     const outDir = path.join(tmpDir, 'out');
 
     const service = new TtsService({ settings: baseSettings('silent'), cacheDir });
-    expect(service.listProviders()).toContain('silent');
+    expect(service.listProviders()).toEqual(
+      expect.arrayContaining(['silent', 'indextts', 'qwen-local']),
+    );
 
     const sections = await service.synthesizeSections(
       [
@@ -66,10 +71,146 @@ describe('@aidaily/tts', () => {
     }
 
     expect(intro.sentences).toHaveLength(2);
-    expect(intro.sentences[1]?.offsetMs).toBe((intro.sentences[0]?.durationMs ?? 0) + 250);
+    expect(intro.sentences[0]?.text).toBe('欢迎收看今天的人工智能快报。');
+    expect(intro.sentences[1]?.text).toBe('马上来看重点。');
+    expect(intro.sentences[0]?.offsetMs).toBe(0);
+    expect(intro.sentences[1]?.offsetMs).toBeGreaterThan(0);
+    expect((intro.sentences[0]?.durationMs ?? 0) + (intro.sentences[1]?.durationMs ?? 0)).toBe(
+      intro.speechMs,
+    );
 
     const probedMs = await probeAudioDurationMs(intro.file);
     expect(Math.abs(intro.speechMs - probedMs)).toBeLessThan(50);
+
+    // 验证多句段落在整段合成模式下只触发一次引擎调用
+    let synthCalls = 0;
+    const spyProvider: TtsProvider = {
+      id: 'spy-paragraph',
+      async healthcheck() {
+        return { ok: true, detail: 'ok' };
+      },
+      async synthesize(req) {
+        synthCalls += 1;
+        await execa('ffmpeg', [
+          '-y',
+          '-f',
+          'lavfi',
+          '-i',
+          'sine=frequency=440:duration=0.4',
+          '-ar',
+          '48000',
+          '-ac',
+          '1',
+          req.outFile,
+        ]);
+      },
+    };
+    const spyService = new TtsService({
+      settings: baseSettings('spy-paragraph'),
+      cacheDir: path.join(tmpDir, 'spy-cache'),
+    });
+    spyService.register(spyProvider);
+    await spyService.synthesizeSections(
+      [
+        {
+          key: 'intro',
+          kind: 'intro',
+          sentences: ['欢迎收看。', '第二句话。'],
+        },
+        {
+          key: 'item-01',
+          kind: 'item',
+          itemId: 'i1',
+          sentences: ['新闻第一句。', '新闻第二句。'],
+        },
+      ],
+      path.join(tmpDir, 'spy-out'),
+    );
+    expect(synthCalls).toBe(2);
+  });
+
+  it('aligns sentence subtitle boundaries to pause valleys inside synthesized WAV', async () => {
+    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'aidaily-tts-subtitles-'));
+    tempDirs.push(tmpDir);
+    const wavPath = path.join(tmpDir, 'two-sentences.wav');
+
+    // 构造 0.60s 语音 + 0.30s 静音停顿低谷 + 0.60s 语音 + 0.16s 尾静音（总计 1.66s）
+    await execa('ffmpeg', [
+      '-y',
+      '-f',
+      'lavfi',
+      '-i',
+      'sine=frequency=440:sample_rate=48000:duration=1.66',
+      '-af',
+      'volume=0.45:enable=between(t\\,0\\,0.60),volume=0.0:enable=between(t\\,0.60\\,0.90),volume=0.45:enable=between(t\\,0.90\\,1.50),volume=0.0:enable=between(t\\,1.50\\,1.66)',
+      '-ar',
+      '48000',
+      '-ac',
+      '1',
+      '-c:a',
+      'pcm_s16le',
+      wavPath,
+    ]);
+
+    const aligned = await alignSentencesToWav(
+      wavPath,
+      ['第一句故意写得稍微短一些。', '第二句在后面包含稍微多一点的内容用来检验停顿低谷吸附。'],
+      1660,
+    );
+
+    expect(aligned).toHaveLength(2);
+    const first = aligned[0];
+    const second = aligned[1];
+    expect(first).toBeDefined();
+    expect(second).toBeDefined();
+    if (!first || !second) return;
+
+    expect(first.offsetMs).toBe(0);
+    // 吸附低谷后，第二句起点应精准落在 600ms～900ms 停顿窗口附近
+    expect(second.offsetMs).toBeGreaterThanOrEqual(550);
+    expect(second.offsetMs).toBeLessThanOrEqual(920);
+    expect(second.offsetMs + second.durationMs).toBeLessThanOrEqual(1660);
+    expect(second.offsetMs + second.durationMs).toBeGreaterThanOrEqual(1480);
+  });
+
+  it('keeps aligned sentence boundaries monotonic and within totalDurationMs on ultra-short WAV', async () => {
+    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'aidaily-tts-short-subtitles-'));
+    tempDirs.push(tmpDir);
+    const wavPath = path.join(tmpDir, 'ultra-short.wav');
+
+    await execa('ffmpeg', [
+      '-y',
+      '-f',
+      'lavfi',
+      '-i',
+      'sine=frequency=440:sample_rate=48000:duration=0.40',
+      '-ar',
+      '48000',
+      '-ac',
+      '1',
+      '-c:a',
+      'pcm_s16le',
+      wavPath,
+    ]);
+
+    const sentences = [
+      '第一句很短。',
+      '第二句很短。',
+      '第三句很短。',
+      '第四句很短。',
+      '第五句很短。',
+    ];
+    const aligned = await alignSentencesToWav(wavPath, sentences, 400);
+
+    expect(aligned).toHaveLength(sentences.length);
+    let prevEndMs = 0;
+    for (const cue of aligned) {
+      expect(cue.offsetMs).toBeGreaterThanOrEqual(prevEndMs);
+      expect(cue.durationMs).toBeGreaterThan(0);
+      expect(cue.offsetMs + cue.durationMs).toBeLessThanOrEqual(400);
+      prevEndMs = cue.offsetMs + cue.durationMs;
+    }
+    expect(prevEndMs).toBeLessThanOrEqual(400);
   });
 
   it('hits cache on repeat synthesis without re-invoking provider', async () => {
@@ -219,12 +360,24 @@ describe('@aidaily/tts', () => {
 });
 
 describe('口播文字清洗', () => {
-  it('保留英文词组空格，移除中英之间的空格、括号和干扰符号', async () => {
-    const { sanitizeNarrationSentence } = await import('../src/index.js');
+  it('保留英文词组空格，清除句内中文、数字与标点间多余空格，并以单个空格逐句分隔', async () => {
+    const { sanitizeNarrationSentence, buildNarrationParagraph } = await import('../src/index.js');
     expect(sanitizeNarrationSentence('今天 Open AI 发布了 新模型（注释）～ ♪')).toBe(
       '今天Open AI发布了新模型。',
     );
     expect(sanitizeNarrationSentence('这是测试！')).toBe('这是测试!');
+    expect(sanitizeNarrationSentence('阿里巴巴在 11 月 16 日发布了 Qwen 4-Max ， 降本 58 %')).toBe(
+      '阿里巴巴在11月16日发布了Qwen4-Max，降本58%。',
+    );
+    expect(
+      buildNarrationParagraph([
+        'Hugging Face 上线 新模型 — 效率翻倍 ',
+        '每百万 Tokens 只需 5 元（内部口径）',
+      ]),
+    ).toBe('Hugging Face上线新模型，效率翻倍。 每百万Tokens只需5元。');
+    expect(buildNarrationParagraph(['第一句平均耗时 3.5 秒。第二句已支持 5.5 万人！'])).toBe(
+      '第一句平均耗时3.5秒。 第二句已支持5.5万人!',
+    );
   });
 });
 
@@ -270,6 +423,134 @@ describe('本地语音重试与取消', () => {
     expect(computeTtsCacheKey('qwen-local', {}, { ...common, loudnessLUFS: -16 }, '句子')).not.toBe(
       computeTtsCacheKey('qwen-local', {}, { ...common, loudnessLUFS: -18 }, '句子'),
     );
+    expect(computeTtsCacheKey('indextts', {}, { ...common, loudnessLUFS: -16 }, '句子')).not.toBe(
+      computeTtsCacheKey('indextts', {}, { ...common, loudnessLUFS: -18 }, '句子'),
+    );
+  });
+
+  it('保留段落末尾轻声尾音并追加平滑淡出与静音缓冲，避免突然截断', async () => {
+    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'aidaily-tts-tail-'));
+    tempDirs.push(tmpDir);
+    const rawWav = path.join(tmpDir, 'raw-tail.wav');
+    const outWav = path.join(tmpDir, 'polished-tail.wav');
+
+    // 生成 0.55s 主音 + 0.15s 衰减至 -40dB 的尾音（总计 0.7s）
+    await execa('ffmpeg', [
+      '-y',
+      '-f',
+      'lavfi',
+      '-i',
+      'sine=frequency=440:duration=0.7',
+      '-af',
+      'volume=0.8:enable=between(t\\,0\\,0.55),volume=0.012:enable=between(t\\,0.55\\,0.70)',
+      '-ar',
+      '48000',
+      '-ac',
+      '1',
+      rawWav,
+    ]);
+
+    await normalizeSegmentToWav({
+      inFile: rawWav,
+      outFile: outWav,
+      sampleRate: 48000,
+      trimSilence: true,
+      normalizeLoudness: true,
+      loudnessLUFS: -16,
+    });
+
+    const outMs = await probeAudioDurationMs(outWav);
+    // 保留轻声尾音后再加上 160ms 平滑缓冲，成片应完整覆盖 0.7s 语音 + 尾部余量
+    expect(outMs).toBeGreaterThanOrEqual(800);
+
+    const tailRes = await execa('ffmpeg', [
+      '-hide_banner',
+      '-sseof',
+      '-0.12',
+      '-i',
+      outWav,
+      '-af',
+      'astats=metadata=0:reset=1',
+      '-f',
+      'null',
+      '-',
+    ]);
+    const rmsMatches = Array.from(tailRes.stderr.matchAll(/RMS level dB:\s*([-\d.inf]+)/g));
+    const overallRmsStr = rmsMatches[rmsMatches.length - 1]?.[1] ?? '-100';
+    const overallRms = overallRmsStr === '-inf' ? -120 : Number(overallRmsStr);
+    expect(overallRms).toBeLessThan(-50);
+  });
+
+  it('将同一段落中过响与过轻的句子均衡到一致响度并保持停顿区与尾音安静', async () => {
+    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'aidaily-tts-level-'));
+    tempDirs.push(tmpDir);
+    const rawWav = path.join(tmpDir, 'uneven.wav');
+    const outWav = path.join(tmpDir, 'leveled.wav');
+
+    await execa('ffmpeg', [
+      '-y',
+      '-f',
+      'lavfi',
+      '-i',
+      'sine=frequency=440:sample_rate=48000:duration=4.4',
+      '-af',
+      'volume=5.0:enable=between(t\\,0\\,1.8),volume=0.0:enable=between(t\\,1.8\\,2.2),volume=0.8:enable=between(t\\,2.2\\,4.4)',
+      rawWav,
+    ]);
+
+    await normalizeSegmentToWav({
+      inFile: rawWav,
+      outFile: outWav,
+      sampleRate: 48000,
+      trimSilence: true,
+      normalizeLoudness: true,
+      loudnessLUFS: -16,
+    });
+
+    const readSliceMean = async (startSec: number, durSec: number) => {
+      const res = await execa('ffmpeg', [
+        '-hide_banner',
+        '-ss',
+        String(startSec),
+        '-t',
+        String(durSec),
+        '-i',
+        outWav,
+        '-af',
+        'volumedetect',
+        '-f',
+        'null',
+        '-',
+      ]);
+      const match = /mean_volume: ([\d.-]+) dB/.exec(res.stderr);
+      if (!match) throw new Error('未能测量片段音量');
+      return Number(match[1]);
+    };
+
+    const loudHalf = await readSliceMean(0.3, 1.2);
+    const pauseGap = await readSliceMean(1.85, 0.3);
+    const quietHalf = await readSliceMean(2.5, 1.4);
+    expect(Math.abs(loudHalf - quietHalf)).toBeLessThan(2.5);
+    expect(pauseGap).toBeLessThan(-60);
+  });
+
+  it('indextts 引擎启动等待期间收到取消后清理本地服务', async () => {
+    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'aidaily-indextts-cancel-'));
+    tempDirs.push(tmpDir);
+    const script = path.join(tmpDir, 'server.mjs');
+    await fs.writeFile(script, '#!/usr/bin/env node\nsetInterval(() => {}, 1000);\n', {
+      mode: 0o755,
+    });
+    const provider = createIndexTtsProvider(tmpDir, {
+      bin: script,
+      model: path.join(tmpDir, 'model'),
+    });
+    expect(provider.id).toBe('indextts');
+    const controller = new AbortController();
+    const starting = provider.start?.(undefined, controller.signal);
+    setTimeout(() => controller.abort(), 200);
+    await expect(starting).rejects.toMatchObject({ name: 'AbortError' });
+    await provider.stop?.();
   });
 
   it('启动等待期间收到取消后清理本地服务', async () => {

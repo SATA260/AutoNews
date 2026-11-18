@@ -9,6 +9,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   computeNextScheduleRunAt,
   createCore,
+  createRun,
   editSettingsFile,
   type LaunchctlExecutor,
   LockBusyError,
@@ -619,5 +620,73 @@ describe('M8 services, detached worker, launchd scheduler, and doctor', () => {
     expect(failedForce.modelsByCli['interleave-gw']).toEqual(['gw-model-3']);
 
     await core.close();
+  });
+
+  it('normalizes legacy run_items missing progressLabel when reading task details', async () => {
+    const baseUrl = await startFixtureHttpServer();
+    const { rootDir, launchAgentsDir } = await setupServiceWorkspace(baseUrl);
+    const core = await createCore({ rootDir, launchAgentsDir });
+    try {
+      const runId = createRun(core.context, { itemCount: 1, trigger: 'manual-cli' });
+      const nowIso = new Date().toISOString();
+      core.context.repos.events.insertMany([
+        {
+          id: 'ev-legacy-1',
+          runId,
+          rank: 1,
+          role: 'primary',
+          title: '历史任务事件标题',
+          articleIds: ['art-legacy-1'],
+          category: '大模型',
+          entity: 'OpenAI',
+          score: 9.0,
+          publicAppeal: 8.5,
+          reason: '测试历史兼容',
+          refillRound: 0,
+        },
+      ]);
+      const legacyFinalJson = {
+        title: '历史任务未包含进度短标签的完整新闻标题',
+        shortTitle: '测试数字2026123456完整兼容',
+        category: '大模型',
+        entity: 'OpenAI',
+        summary: '这是一条旧版任务持久化记录，不含 progressLabel 字段。',
+        keyPoints: ['兼容读取旧数据', '不切断末尾数字'],
+        detail: '用于验证历史任务详情接口的向后兼容能力。',
+        hostComment: '旧记录也能顺利查看。',
+        narration: ['第一条来自 OpenAI。', '历史数据也能正常读取。'],
+        evidence: [
+          {
+            claim: '旧记录兼容',
+            articleId: 'art-legacy-1',
+            quote: 'Legacy record evidence.',
+          },
+        ],
+      };
+      core.context.db
+        .prepare(
+          `INSERT INTO run_items (id, run_id, event_id, position, status, revision, drop_reason, final_json, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          'item-legacy-1',
+          runId,
+          'ev-legacy-1',
+          1,
+          'passed',
+          0,
+          null,
+          JSON.stringify(legacyFinalJson),
+          nowIso,
+        );
+
+      const detail = await core.tasks.get(runId);
+      const loadedLabel = detail.items[0]?.finalJson?.progressLabel ?? '';
+      expect(Array.from(loadedLabel).length).toBeGreaterThanOrEqual(4);
+      expect(Array.from(loadedLabel).length).toBeLessThanOrEqual(10);
+      expect(loadedLabel).toBe('测试数字');
+    } finally {
+      await core.close();
+    }
   });
 });

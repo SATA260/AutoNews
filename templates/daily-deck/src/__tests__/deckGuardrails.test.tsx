@@ -13,6 +13,7 @@ beforeEach(() => {
   vi.spyOn(transitionTiming, 'wait').mockResolvedValue(undefined);
 });
 
+/** 用于模拟子组件渲染异常的测试组件 */
 const BrokenChild = () => {
   throw new Error('Simulated crash');
 };
@@ -24,6 +25,7 @@ describe('Layer 1: Zero-Throw Sanitizer & Editorial Contract Limits', () => {
     expect(res.warnings).toHaveLength(0);
     expect(res.issue.items).toHaveLength(5);
     expect(res.issue.hostMascotId).toBe('deepseek');
+    expect(res.issue.items[0]!.progressLabel).toBe('DeepSeek推理降本');
   });
 
   it('never throws on null, undefined, primitives, empty items, or pathological proxies', () => {
@@ -49,6 +51,7 @@ describe('Layer 1: Zero-Throw Sanitizer & Editorial Contract Limits', () => {
       const res = sanitizeDailyIssue(bad);
       expect(res.issue.items.length).toBeGreaterThanOrEqual(1);
       expect(res.issue.items[0]!.summary.length).toBeGreaterThan(0);
+      expect(res.issue.items[0]!.progressLabel.length).toBeGreaterThan(0);
       expect(res.warnings.length).toBeGreaterThan(0);
     }
   });
@@ -58,7 +61,15 @@ describe('Layer 1: Zero-Throw Sanitizer & Editorial Contract Limits', () => {
     const items = Array.from({ length: 20 }).map((_, idx) => ({
       title: `${longEmojiText} 标题 #${idx}`,
       summary: `${'⚡'.repeat(60)} 总结`,
+      progressLabel: `${'🔥'.repeat(20)} 极简总结`,
       imageUrl: idx === 0 ? 'javascript:alert(1)' : '/media/official-deepseek-report.svg',
+      audioUrl: idx === 0 ? 'javascript:evil()' : '/__run_assets__/audio/01-item-1.wav',
+      cards: Array.from({ length: 10 }).map((_, cIdx) => ({
+        icon: 'invalid-icon',
+        title: `${'✨'.repeat(24)}卡片${cIdx}`,
+        body: `${'📢'.repeat(90)}内容${cIdx}`,
+      })),
+      lipSyncFrames: [0, 0.45, 1.5, -0.3],
       mascotId: idx === 0 ? 'unknown_bot' : idx === 1 ? 'claude' : 'deepseek',
       durationSec: idx === 1 ? 12.4 : 999,
     }));
@@ -69,20 +80,28 @@ describe('Layer 1: Zero-Throw Sanitizer & Editorial Contract Limits', () => {
     const first = res.issue.items[0]!;
     expect(Array.from(first.title).length).toBeLessThanOrEqual(HARD_LIMITS.title);
     expect(Array.from(first.summary).length).toBeLessThanOrEqual(HARD_LIMITS.summary);
+    expect(Array.from(first.progressLabel).length).toBeLessThanOrEqual(HARD_LIMITS.progressLabel);
     expect(first.title.includes('\uFFFD')).toBe(false);
     expect(first.imageUrl).toBeNull();
+    expect(first.audioUrl).toBeNull();
+    expect(first.cards).toHaveLength(HARD_LIMITS.cardsMaxCount);
+    expect(Array.from(first.cards[0]!.title).length).toBeLessThanOrEqual(HARD_LIMITS.cardTitle);
+    expect(Array.from(first.cards[0]!.body).length).toBeLessThanOrEqual(HARD_LIMITS.cardBody);
+    expect(first.cards[0]!.title.includes('\uFFFD')).toBe(false);
+    expect(first.lipSyncFrames).toEqual([0, 0.45, 1, 0]);
     expect(first.mascotId).toBe('deepseek');
     expect(first.durationSec).toBe(HARD_LIMITS.maxItemDurationSec);
 
     const second = res.issue.items[1]!;
     expect(second.durationSec).toBe(12.4);
+    expect(second.audioUrl).toBe('/__run_assets__/audio/01-item-1.wav');
     expect(res.warnings.some((w) => w.code === 'invalid_url')).toBe(true);
     expect(res.warnings.some((w) => w.code === 'clamped')).toBe(true);
   });
 });
 
-describe('Layer 2-5: Editorial Deck, Smooth Page Turn, Corner Mascot & Error Isolation', () => {
-  it('renders 7 editorial slides, defaults to glide transition, shows DeepSeek mascot, and clamps pagination safely', async () => {
+describe('Layer 2-5: Editorial Deck, Segmented Chapter Bar, Virtual Clock & Error Isolation', () => {
+  it('renders 7 editorial slides, segmented chapter progress pills, shows mascot, and clamps pagination safely', async () => {
     const { container } = render(<NewsDeck />);
 
     expect(window.__NEWS_DECK__).toBeDefined();
@@ -95,11 +114,18 @@ describe('Layer 2-5: Editorial Deck, Smooth Page Turn, Corner Mascot & Error Iso
     expect(parseTransitionStyle('unknown')).toBe('glide');
     expect(screen.getByText('今日要闻')).toBeInTheDocument();
 
+    // 验证顶部章节分段进度条渲染 [导览] + 5 条新闻总结胶囊 + [速览]，且已移除底部旧进度线
+    const pills = container.querySelectorAll('.chapter-pill');
+    expect(pills).toHaveLength(7);
+    expect(screen.getByText('DeepSeek推理降本')).toBeInTheDocument();
+    expect(screen.getByText('Claude百文件重构')).toBeInTheDocument();
+    expect(container.querySelector('.autoplay-progress-track')).toBeNull();
+
     const mascotImg = container.querySelector('.corner-mascot-img') as HTMLImageElement | null;
     expect(mascotImg).toBeTruthy();
     expect(mascotImg!.getAttribute('src')).toBe('/mascots/deepseek.png');
 
-    // Navigate to News #02 (Claude)
+    // 跳转到第 2 条新闻（Claude），验证内容与看板娘切换
     await act(async () => {
       const target = await window.__NEWS_DECK__!.goToPage(2);
       expect(target).toBe(2);
@@ -108,7 +134,7 @@ describe('Layer 2-5: Editorial Deck, Smooth Page Turn, Corner Mascot & Error Iso
     const claudeImg = container.querySelector('.corner-mascot-img') as HTMLImageElement | null;
     expect(claudeImg!.getAttribute('src')).toBe('/mascots/claude.png');
 
-    // Out-of-bounds clamping
+    // 验证越界页码安全钳制
     await act(async () => {
       const clampedHigh = await window.__NEWS_DECK__!.goToPage(999);
       expect(clampedHigh).toBe(6);
@@ -125,12 +151,65 @@ describe('Layer 2-5: Editorial Deck, Smooth Page Turn, Corner Mascot & Error Iso
     expect(window.__NEWS_DECK__!.getHealthReport().runtimeErrors).toHaveLength(0);
   });
 
+  it('drives deterministic virtual clock seekTo(ms) across exact frame grid, page-turn transition, and lip-sync envelope', async () => {
+    const { container } = render(
+      <NewsDeck
+        initialData={{
+          fps: 30,
+          coverFrameCount: 121,
+          coverSpeechSec: 3,
+          coverLipSync: Array.from({ length: 90 }, (_, i) => (i === 30 ? 0.8 : 0.2)),
+          outroFrameCount: 120,
+          items: [
+            {
+              title: '虚拟时钟步进验证新闻',
+              progressLabel: '虚拟时钟步进',
+              summary: '验证任意毫秒输入与跨区间跳转都能精确锁定唯一章节、翻页插值与口型振幅。',
+              frameCount: 180,
+              speechDurationSec: 5,
+              lipSyncFrames: Array.from({ length: 150 }, () => 0.65),
+              mascotId: 'deepseek',
+            },
+          ],
+        }}
+      />,
+    );
+
+    // 验证第 30 帧（1000ms）落在封面且口型精确命中 0.8
+    let snap = await act(async () => window.__NEWS_DECK__!.seekTo(1000, 1000 / 30));
+    expect(snap.currentPage).toBe(0);
+    expect(snap.exitingPage).toBeNull();
+    expect(snap.mouthOpen).toBeCloseTo(0.8, 3);
+
+    // 验证第 120 帧（4000ms）仍属于封面（coverFrameCount=121），而第 121 帧（4033.33ms）精确切入第 1 章起点
+    snap = await act(async () => window.__NEWS_DECK__!.seekTo((120 * 1000) / 30, 1000 / 30));
+    expect(snap.currentPage).toBe(0);
+    expect(snap.mouthOpen).toBe(0);
+
+    snap = await act(async () => window.__NEWS_DECK__!.seekTo((121 * 1000) / 30, 1000 / 30));
+    expect(snap.currentPage).toBe(1);
+    expect(snap.exitingPage).toBe(0);
+    expect(snap.transitionProgress).toBeCloseTo(0, 4);
+
+    // 验证无论从前面顺序步进还是从尾页跨区间跳回同一时刻，画面过渡状态均完全一致（无调用历史依赖）
+    const snapFromForward = await act(async () =>
+      window.__NEWS_DECK__!.seekTo((127 * 1000) / 30, 1000 / 30),
+    );
+    await act(async () => window.__NEWS_DECK__!.seekTo(9500, 1000 / 30));
+    const snapFromJump = await act(async () =>
+      window.__NEWS_DECK__!.seekTo((127 * 1000) / 30, 1000 / 30),
+    );
+    expect(snapFromJump).toEqual(snapFromForward);
+    expect(container.querySelector('.page-turn-stage')).toHaveClass('is-virtual-turn');
+    expect(snapFromJump.mouthOpen).toBeCloseTo(0.65, 2);
+  });
+
   it('mounts dual exiting/entering sheets in the same atomic turn without flash and cycles transition styles', async () => {
     vi.useFakeTimers();
     try {
       const { container } = render(<NewsDeck />);
 
-      // Cycle transition style via T shortcut: glide -> flip -> fade -> none -> glide
+      // 按 T 键依次循环四种过渡样式：glide -> flip -> fade -> none -> glide
       fireEvent.keyDown(window, { key: 't' });
       expect(window.__NEWS_DECK__!.getState().transition).toBe('flip');
       fireEvent.keyDown(window, { key: 't' });
@@ -140,7 +219,7 @@ describe('Layer 2-5: Editorial Deck, Smooth Page Turn, Corner Mascot & Error Iso
       fireEvent.keyDown(window, { key: 't' });
       expect(window.__NEWS_DECK__!.getState().transition).toBe('glide');
 
-      // Trigger forward page turn and verify atomic zero-flash dual-sheet mounting
+      // 触发向后翻页，验证离场页与入场页在同一原子提交中同时挂载且无闪烁
       fireEvent.click(screen.getByRole('button', { name: '下一页' }));
 
       const stage = container.querySelector('.page-turn-stage');
@@ -152,7 +231,7 @@ describe('Layer 2-5: Editorial Deck, Smooth Page Turn, Corner Mascot & Error Iso
       expect(exitingForward!.textContent).toContain('今日要闻');
       expect(enteringForward!.textContent).toContain(SAMPLE_DAILY_ISSUE.items[0]!.title);
 
-      // Advance past glide animation duration
+      // 推进定时器越过滑移过渡时长，验证离场页卸载
       await act(async () => {
         vi.advanceTimersByTime(PAGE_TURN_DURATION_MS.glide + 20);
       });
@@ -160,7 +239,7 @@ describe('Layer 2-5: Editorial Deck, Smooth Page Turn, Corner Mascot & Error Iso
       expect(container.querySelector('.page-sheet.is-exiting')).not.toBeInTheDocument();
       expect(container.querySelector('.page-turn-stage')).toHaveClass('is-settled');
 
-      // Trigger backward page turn and verify symmetric dual-sheet mounting
+      // 触发向前翻页，验证反向双页挂载对称生效
       fireEvent.click(screen.getByRole('button', { name: '上一页' }));
       expect(container.querySelector('.page-turn-stage')).toHaveClass(
         'mode-glide',
@@ -243,7 +322,29 @@ describe('Layer 2-5: Editorial Deck, Smooth Page Turn, Corner Mascot & Error Iso
     const activeSheet = container.querySelector('.page-sheet.is-active') as HTMLElement | null;
     expect(activeSheet).toBeTruthy();
     expect(activeSheet!.textContent).toContain('动态注入测试新闻');
+    expect(activeSheet!.querySelectorAll('.news-info-card').length).toBeGreaterThanOrEqual(1);
+    expect(activeSheet!.querySelector('.news-editorial-layout')).toHaveClass('no-mascot');
     expect(container.querySelector('.corner-mascot-dock')).toBeNull();
+
+    // 验证稀疏条目（1 条）比密集条目（12 条）顶部进度条初始响应式字号更大
+    const singleTrackFont = parseFloat(
+      (container.querySelector('.chapter-pill.is-news .chapter-pill-track-inner') as HTMLElement)
+        .style.fontSize,
+    );
+    act(() => {
+      window.__NEWS_DECK__!.setNewsData({
+        items: Array.from({ length: 12 }).map((_, i) => ({
+          title: `高密度测试新闻第 ${i + 1} 条`,
+          progressLabel: `测试总结第${i + 1}条`,
+          summary: '测试高密度章节轨道的响应式字号缩放表现。',
+        })),
+      });
+    });
+    const denseTrackFont = parseFloat(
+      (container.querySelector('.chapter-pill.is-news .chapter-pill-track-inner') as HTMLElement)
+        .style.fontSize,
+    );
+    expect(singleTrackFont).toBeGreaterThan(denseTrackFont);
 
     const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
     render(
@@ -253,5 +354,94 @@ describe('Layer 2-5: Editorial Deck, Smooth Page Turn, Corner Mascot & Error Iso
     );
     expect(screen.getByTestId('boundary-fallback-unit-probe')).toBeInTheDocument();
     consoleSpy.mockRestore();
+  });
+
+  it('binds chapter pill flex weights proportionally to section durations and syncs bottom subtitles', async () => {
+    const { container } = render(
+      <NewsDeck
+        initialData={{
+          fps: 30,
+          coverDurationSec: 5,
+          coverSubtitles: [{ text: '大家好，欢迎收看今天的AI每日报', startSec: 0, endSec: 4.4 }],
+          outroDurationSec: 6,
+          outroSubtitles: [{ text: '以上就是本期全部重点', startSec: 0, endSec: 5.2 }],
+          items: [
+            {
+              title: '时长绑定与同步字幕测试',
+              progressLabel: '同步字幕测试',
+              summary: '验证进度条长度随章节时长同比拉伸以及底部口播字幕随时间轴准确切换与退场。',
+              durationSec: 10,
+              speechDurationSec: 9.2,
+              subtitles: [
+                { text: '第一句字幕先交代事情核心变化', startSec: 0, endSec: 4.5 },
+                { text: '第二句接着说明为什么它很实用', startSec: 4.5, endSec: 9.2 },
+              ],
+            },
+            {
+              title: '长章节比例对照测试',
+              progressLabel: '长章节对照',
+              summary: '第二条新闻设为 20 秒，进度条宽度权重应为第一条 10 秒的两倍。',
+              durationSec: 20,
+              speechDurationSec: 18.5,
+              subtitles: [{ text: '这里是第二条新闻的字幕', startSec: 0, endSec: 18.5 }],
+            },
+          ],
+        }}
+      />,
+    );
+
+    const pills = Array.from(container.querySelectorAll('.chapter-pill')) as HTMLElement[];
+    expect(pills).toHaveLength(4);
+    expect(pills[0]?.style.flexGrow).toBe('5000');
+    expect(pills[1]?.style.flexGrow).toBe('10000');
+    expect(pills[2]?.style.flexGrow).toBe('20000');
+    expect(pills[3]?.style.flexGrow).toBe('6000');
+
+    await act(async () => {
+      await window.__NEWS_DECK__!.seekTo(1000, 1000 / 30);
+    });
+    expect(screen.getByTestId('deck-subtitle-text')).toHaveTextContent(
+      '大家好，欢迎收看今天的AI每日报',
+    );
+
+    await act(async () => {
+      await window.__NEWS_DECK__!.seekTo(6000, 1000 / 30);
+    });
+    expect(screen.getByTestId('deck-subtitle-text')).toHaveTextContent(
+      '第一句字幕先交代事情核心变化',
+    );
+
+    await act(async () => {
+      await window.__NEWS_DECK__!.seekTo(10500, 1000 / 30);
+    });
+    expect(screen.getByTestId('deck-subtitle-text')).toHaveTextContent(
+      '第二句接着说明为什么它很实用',
+    );
+
+    // 超过本章节 9.2s 语音结尾进入停顿期（第 14.5s）时，字幕应自动收起
+    await act(async () => {
+      await window.__NEWS_DECK__!.seekTo(14500, 1000 / 30);
+    });
+    expect(screen.queryByTestId('deck-subtitle-text')).toBeNull();
+
+    // 验证 sanitizeDailyIssue 会将重叠与越界的字幕时间单调裁剪至区间内且严格不重叠
+    const overlappingRes = sanitizeDailyIssue({
+      items: [
+        {
+          title: '字幕单调裁剪验证',
+          summary: '校验重叠和越界字幕区间会被自动顺延并严格截断在章节总时长之内。',
+          durationSec: 5,
+          subtitles: [
+            { text: '第一句字幕正常区间', startSec: 0, endSec: 2.5 },
+            { text: '第二句重叠起点会顺延', startSec: 2.0, endSec: 4.99 },
+            { text: '第三句越界时间段会被剔除', startSec: 4.5, endSec: 6.0 },
+          ],
+        },
+      ],
+    });
+    const cues = overlappingRes.issue.items[0]?.subtitles ?? [];
+    expect(cues).toHaveLength(2);
+    expect(cues[0]).toEqual({ text: '第一句字幕正常区间', startSec: 0, endSec: 2.5 });
+    expect(cues[1]).toEqual({ text: '第二句重叠起点会顺延', startSec: 2.5, endSec: 4.99 });
   });
 });

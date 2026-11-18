@@ -9,7 +9,12 @@ import type {
   Settings,
   Timeline,
 } from '@aidaily/contracts';
-import { probeAudioDurationMs, QWEN_AUDIO_PROCESSING_VERSION } from '@aidaily/tts';
+import {
+  buildNarrationParagraph,
+  isLocalVoiceCloneProvider,
+  probeAudioDurationMs,
+  QWEN_AUDIO_PROCESSING_VERSION,
+} from '@aidaily/tts';
 import type { CoreContext } from '../context.js';
 import { PipelineError } from '../errors.js';
 import { readJsonOrNull, writeJsonAtomic } from '../storage/files.js';
@@ -34,13 +39,16 @@ interface SectionProgressRecord {
 function computeSectionDigest(section: NarrationSection, settings: Settings): string {
   const providerId = settings.tts.provider;
   const providerConfig = settings.tts.providers[providerId] ?? {};
+  const { sampleRate, loudnessLUFS, trimSilence } = settings.tts.postprocess;
   const payload = JSON.stringify({
     key: section.key,
-    sentences: section.sentences,
+    paragraph: buildNarrationParagraph(section.sentences),
+    synthesisMode: 'whole-paragraph',
+    subtitleTimingVersion: 2,
     providerId,
     providerConfig,
-    postprocess: settings.tts.postprocess,
-    processingVersion: providerId === 'qwen-local' ? QWEN_AUDIO_PROCESSING_VERSION : 0,
+    postprocess: { sampleRate, loudnessLUFS, trimSilence },
+    processingVersion: isLocalVoiceCloneProvider(providerId) ? QWEN_AUDIO_PROCESSING_VERSION : 0,
   });
   return crypto.createHash('sha1').update(payload, 'utf8').digest('hex');
 }
@@ -83,7 +91,7 @@ export function buildNarrationSections(
 /**
  * 执行配音合成与时间轴生成阶段：
  * 优先复用此前中断前已完成且音频完整有效、配置未变的段落结果；
- * 其余段落逐句走本地缓存与标准化拼接，完成后原子写出 `timeline.json`。
+ * 其余段落先清洗句内多余空格并以单个空格逐句隔开合段送入语音引擎、执行标准化，完成后原子写出 `timeline.json`。
  */
 export async function runNarrateStage(opts: {
   ctx: CoreContext;
@@ -105,7 +113,7 @@ export async function runNarrateStage(opts: {
     | { host_id: string | null }
     | undefined;
   const providerId = settings.tts.provider;
-  if (providerId === 'qwen-local' && !row?.host_id)
+  if (isLocalVoiceCloneProvider(providerId) && !row?.host_id)
     throw new PipelineError('tts_failed', '尚未确定本期主播，请从选题阶段重新运行或指定主播');
   const providerConfig = {
     ...(settings.tts.providers[providerId] ?? {}),

@@ -45,7 +45,7 @@ export type Availability = z.infer<typeof AvailabilitySchema>;
 
 /** 对同一新闻事件提炼出的客观事实摘要草稿 */
 export const SummaryDraftSchema = z.object({
-  facts: z.array(z.string().min(1)).min(1).max(6),
+  facts: z.array(z.string().min(1)).min(1).max(10),
   relevance: z.string().min(1),
   availability: AvailabilitySchema,
   availabilityNote: z.string().min(1),
@@ -62,17 +62,51 @@ export const MetricPairSchema = z.object({
 /** 关键数据指标类型 */
 export type MetricPair = z.infer<typeof MetricPairSchema>;
 
+/** 新闻信息卡片语义图标标识 */
+export const InfoCardIconSchema = z.enum([
+  'rocket',
+  'cpu',
+  'trending-down',
+  'zap',
+  'grid',
+  'gift',
+  'clipboard-check',
+  'users',
+  'code',
+  'shield',
+  'globe',
+  'sparkles',
+]);
+/** 新闻信息卡片语义图标类型 */
+export type InfoCardIcon = z.infer<typeof InfoCardIconSchema>;
+
+/** 画面网格中展示的单张结构化事实信息卡片 */
+export const InfoCardSchema = z.object({
+  title: z.string().min(1).max(16),
+  body: z.string().min(1).max(80),
+  icon: InfoCardIconSchema.optional(),
+});
+/** 结构化事实信息卡片类型 */
+export type InfoCard = z.infer<typeof InfoCardSchema>;
+
+/** 看板娘随新闻内容呈现的表情状态 */
+export const MascotMoodSchema = z.enum(['neutral', 'proud', 'surprised', 'thinking']);
+/** 看板娘表情状态类型 */
+export type MascotMood = z.infer<typeof MascotMoodSchema>;
+
 /** 按指定核心要点数量上限构建单条新闻润色定稿校验规则 */
 export function createPolishedItemSchema(keyPointsMax = 3) {
   return z.object({
     title: z.string().min(1),
     shortTitle: z.string().min(1),
+    progressLabel: z.string().min(1).max(12),
     category: z.string().min(1),
     entity: z.string().min(1),
     summary: z.string().min(1),
     highlight: z.string().max(18).optional(),
     preferArticleImage: z.boolean().optional(),
     imageCaption: z.string().max(36).optional(),
+    cards: z.array(InfoCardSchema).max(8).optional(),
     keyPoints: z.array(z.string().min(1)).max(Math.max(1, keyPointsMax)),
     detail: z.string().min(1),
     hostComment: z.string().min(1),
@@ -99,10 +133,16 @@ export const ClaimStatusSchema = z.enum([
 /** 事实核验状态类型 */
 export type ClaimStatus = z.infer<typeof ClaimStatusSchema>;
 
+/** 事实核验问题严重程度：major 表示阻断过审的客观事实错误，minor 表示不阻断过审的轻微措辞微瑕 */
+export const ClaimSeveritySchema = z.enum(['major', 'minor']);
+/** 事实核验问题严重程度类型 */
+export type ClaimSeverity = z.infer<typeof ClaimSeveritySchema>;
+
 /** 事实审核中对单条陈述的具体检查结果与说明 */
 export const FactCheckClaimSchema = z.object({
   text: z.string().min(1),
   status: ClaimStatusSchema,
+  severity: ClaimSeveritySchema.optional(),
   note: z.string(),
 });
 /** 单条事实检查结果类型 */

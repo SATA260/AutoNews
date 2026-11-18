@@ -332,8 +332,14 @@ export default async function RunDetailPage({
                     <h3 className="font-semibold">本期口播稿</h3>
                     <p className="mt-2 whitespace-pre-line text-sm">
                       {timeline.sections
-                        .flatMap((section) => section.sentences.map((sentence) => sentence.text))
-                        .join('\n')}
+                        .map((section) =>
+                          section.sentences
+                            .map((sentence) => sentence.text.trim())
+                            .filter(Boolean)
+                            .join(' '),
+                        )
+                        .filter((text) => text.length > 0)
+                        .join('\n\n')}
                     </p>
                   </section>
                 ) : null}

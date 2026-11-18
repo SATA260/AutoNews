@@ -158,11 +158,23 @@ export async function resumeRunAction(formData: FormData): Promise<ActionResult>
   }
 }
 
-/** 单独重做指定新闻条目并自动触发后续编排与视频合成（后台进程执行） */
-export async function retryItemAction(formData: FormData): Promise<ActionResult> {
+/** 单独或批量并发重做指定新闻条目，并在完成后自动重新编排与合成成片（后台进程执行） */
+export async function retryItemsAction(formData: FormData): Promise<ActionResult> {
   try {
     const runId = RunIdSchema.parse(formData.get('runId'));
-    const itemId = ItemIdSchema.parse(formData.get('itemId'));
+    const rawItemIds = formData
+      .getAll('itemIds')
+      .map((val) => (typeof val === 'string' ? val.trim() : ''))
+      .filter(Boolean);
+    const singleFallback = formData.get('itemId');
+    if (
+      rawItemIds.length === 0 &&
+      typeof singleFallback === 'string' &&
+      singleFallback.trim().length > 0
+    ) {
+      rawItemIds.push(singleFallback.trim());
+    }
+    const itemIds = z.array(ItemIdSchema).min(1, '请至少选择一条需要重做的新闻').parse(rawItemIds);
     const rawStep = formData.get('fromStep');
     const fromStep =
       typeof rawStep === 'string' && rawStep.trim()
@@ -171,16 +183,27 @@ export async function retryItemAction(formData: FormData): Promise<ActionResult>
     const useLatestConfig = parseBooleanField(formData.get('useLatestConfig'));
 
     const core = await getCore();
-    await core.tasks.retryItem(runId, itemId, {
+    await core.tasks.retryItems(runId, itemIds, {
       fromStep,
       useLatestConfig,
       detach: true,
     });
     safeRevalidate(`/runs/${runId}`);
-    return { ok: true, message: '已开始重做这条新闻' };
+    return {
+      ok: true,
+      message:
+        itemIds.length === 1
+          ? '已开始重做这条新闻'
+          : `已启动并发重做选中的 ${itemIds.length} 条新闻`,
+    };
   } catch (err) {
     return { ok: false, error: err instanceof Error ? err.message : String(err) };
   }
+}
+
+/** 单独重做指定新闻条目并自动触发后续编排与视频合成（后台进程执行） */
+export async function retryItemAction(formData: FormData): Promise<ActionResult> {
+  return retryItemsAction(formData);
 }
 
 /** 放弃未发布或中断任务并释放已占用的新闻文章 */
@@ -480,7 +503,7 @@ export async function updateStageRoutingAction(formData: FormData): Promise<Acti
       .number()
       .int()
       .min(1)
-      .max(10)
+      .max(20)
       .parse(parseRequiredIntField(formData.get('maxConcurrentCalls'), '最大并发模型调用数'));
 
     const core = await getCore();
@@ -504,19 +527,23 @@ function assertValidTimezone(timezone: string): void {
 /** 保存选题补抓、模板渲染以及 B 站发布参数配置（强制保留 AI 声明开启状态） */
 export async function updateWorkflowSettingsAction(formData: FormData): Promise<ActionResult> {
   try {
+    const rawTtsProvider = formData.get('ttsProvider');
+    const rawBgmVolumeDb = formData.get('bgmVolumeDb');
     const parsed = z
       .object({
         timezone: z.string().trim().min(1),
         freshnessHours: z.number().int().positive(),
-        itemConcurrency: z.number().int().min(1).max(10),
+        itemConcurrency: z.number().int().min(1).max(20),
         maxRounds: z.number().int().min(0).max(10),
         useBackupSources: z.boolean(),
         lookbackStepHours: z.number().int().positive(),
         maxLookbackHours: z.number().int().positive(),
         reservationHoldHours: z.number().int().positive(),
         maxRevisions: z.number().int().min(0).max(5),
+        ttsProvider: z.string().trim().min(1).optional(),
         activeTemplate: z.string().trim().min(1),
         pagePaddingSec: z.number().nonnegative(),
+        bgmVolumeDb: z.number().min(-30).max(0).optional(),
         publishMode: z.enum(['manual-review', 'auto']),
         bilibiliTid: z.number().int().nonnegative(),
         titleMax: z.number().int().positive(),
@@ -541,11 +568,17 @@ export async function updateWorkflowSettingsAction(formData: FormData): Promise<
           '文章锁定保留小时数',
         ),
         maxRevisions: parseRequiredIntField(formData.get('maxRevisions'), '单条最大核查打回次数'),
+        ...(typeof rawTtsProvider === 'string' && rawTtsProvider.trim()
+          ? { ttsProvider: rawTtsProvider.trim() }
+          : {}),
         activeTemplate: formData.get('activeTemplate'),
         pagePaddingSec: parseRequiredNumberField(
           formData.get('pagePaddingSec'),
           '翻页停顿缓冲秒数',
         ),
+        ...(typeof rawBgmVolumeDb === 'string' && rawBgmVolumeDb.trim()
+          ? { bgmVolumeDb: parseRequiredNumberField(rawBgmVolumeDb, '背景音乐音量') }
+          : {}),
         publishMode: formData.get('publishMode'),
         bilibiliTid: parseRequiredIntField(formData.get('bilibiliTid'), 'B 站分区编号'),
         titleMax: parseRequiredIntField(formData.get('titleMax'), '标题最大字数'),
@@ -568,6 +601,12 @@ export async function updateWorkflowSettingsAction(formData: FormData): Promise<
 
     const core = await getCore();
     const currentSettings = core.config.getSettings();
+    if (
+      parsed.ttsProvider !== undefined &&
+      !Object.hasOwn(currentSettings.tts.providers, parsed.ttsProvider)
+    ) {
+      throw new Error(`未配置语音合成引擎: ${parsed.ttsProvider}`);
+    }
     if (!Object.hasOwn(currentSettings.template.registry, parsed.activeTemplate)) {
       throw new Error(`未在模板注册表中配置模板: ${parsed.activeTemplate}`);
     }
@@ -589,11 +628,13 @@ export async function updateWorkflowSettingsAction(formData: FormData): Promise<
       editorial: {
         maxRevisions: parsed.maxRevisions,
       },
+      ...(parsed.ttsProvider !== undefined ? { tts: { provider: parsed.ttsProvider } } : {}),
       template: {
         active: parsed.activeTemplate,
       },
       render: {
         pagePaddingSec: parsed.pagePaddingSec,
+        ...(parsed.bgmVolumeDb !== undefined ? { bgm: { volumeDb: parsed.bgmVolumeDb } } : {}),
       },
       publish: {
         mode: parsed.publishMode,

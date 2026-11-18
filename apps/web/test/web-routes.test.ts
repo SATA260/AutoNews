@@ -144,6 +144,7 @@ async function seedReviewReadyRun(): Promise<{ runId: string; mp4Bytes: Uint8Arr
       finalJson: {
         title: '模型工具调用速度升级',
         shortTitle: '工具调用提速',
+        progressLabel: '工具调用提速',
         category: '开发工具',
         entity: 'OpenAI',
         summary: '工具调用响应延迟显著下降。',
@@ -448,7 +449,7 @@ describe('apps/web routes and Server Actions', () => {
 
     const secrets = core.context.paths.secretsDir;
     const settingsFile = path.join(root, 'config', 'settings.yaml');
-    const first = core.config.getSettings().ai.providers?.['团队网关'];
+    const first = core.config.getSettings().ai.providers?.团队网关;
     const firstKeyPath = path.join(secrets, first?.apiKeyFile ?? '');
     expect(await fs.readFile(firstKeyPath, 'utf8')).toBe(originalKey);
     expect((await fs.stat(firstKeyPath)).mode & 0o777).toBe(0o600);
@@ -490,7 +491,7 @@ describe('apps/web routes and Server Actions', () => {
     const updated = core.config.getSettings().ai;
     expect(updated.stages.select).toMatchObject({ cli: '新网关', model: 'manual-model-id' });
     expect(core.system.getModelRoutes()).not.toContain('团队网关');
-    const nextKeyPath = path.join(secrets, updated.providers?.['新网关']?.apiKeyFile ?? '');
+    const nextKeyPath = path.join(secrets, updated.providers?.新网关?.apiKeyFile ?? '');
     expect(nextKeyPath).not.toBe(firstKeyPath);
     expect(await fs.readFile(firstKeyPath, 'utf8')).toBe(originalKey);
     expect(await fs.readFile(nextKeyPath, 'utf8')).toBe(replacementKey);
@@ -506,7 +507,7 @@ describe('apps/web routes and Server Actions', () => {
         }),
       ),
     ).toMatchObject({ ok: true });
-    expect(core.config.getSettings().ai.providers?.['新网关']?.apiKeyFile).toBeUndefined();
+    expect(core.config.getSettings().ai.providers?.新网关?.apiKeyFile).toBeUndefined();
     expect(await removeModelApiConnectionAction(apiConnectionForm('备用网关'))).toMatchObject({
       ok: true,
     });

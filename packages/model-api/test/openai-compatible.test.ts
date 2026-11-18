@@ -154,6 +154,7 @@ describe('OpenAI 兼容模型 API', () => {
     const polished = {
       title: '标题',
       shortTitle: '短题',
+      progressLabel: '核心进展',
       category: '分类',
       entity: '主体',
       summary: '摘要',
@@ -196,12 +197,14 @@ describe('OpenAI 兼容模型 API', () => {
         wire: {
           title: polished.title,
           shortTitle: polished.shortTitle,
+          progressLabel: polished.progressLabel,
           category: polished.category,
           entity: polished.entity,
           summary: polished.summary,
           highlight: null,
           preferArticleImage: null,
           imageCaption: null,
+          cards: null,
           keyPoints: polished.keyPoints,
           detail: polished.detail,
           hostComment: polished.hostComment,
@@ -214,8 +217,17 @@ describe('OpenAI 兼容模型 API', () => {
       },
       {
         schema: FactCheckResultSchema,
-        wire: { verdict: 'pass', claims: [], revisionNotes: [], dropReason: null },
-        output: { verdict: 'pass', claims: [], revisionNotes: [] },
+        wire: {
+          verdict: 'pass',
+          claims: [{ text: '事实无误', status: 'supported', severity: null, note: '一致' }],
+          revisionNotes: [],
+          dropReason: null,
+        },
+        output: {
+          verdict: 'pass',
+          claims: [{ text: '事实无误', status: 'supported', note: '一致' }],
+          revisionNotes: [],
+        },
       },
       { schema: IssuePackageSchema, wire: pack, output: pack },
     ];

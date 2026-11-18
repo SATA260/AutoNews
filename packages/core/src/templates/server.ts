@@ -1,3 +1,4 @@
+import fsSync from 'node:fs';
 import fs from 'node:fs/promises';
 import http from 'node:http';
 import path from 'node:path';
@@ -8,8 +9,10 @@ export interface TemplateHttpServerOptions {
   distDir?: string;
   /** 直接由内存提供的单页 HTML 内容（测试纯色模板时使用） */
   htmlContent?: string;
-  /** 本期任务目录，挂载在 `/__run_assets__/` 之下仅供同源页面安全读取配图等本地素材 */
+  /** 本期任务目录，挂载在 `/__run_assets__/` 之下仅供同源页面安全读取配图与口播音频等本地素材 */
   runDir?: string;
+  /** 角色立绘与 Live2D 模型包目录，只读挂载在 `/__mascot_assets__/` 之下 */
+  mascotDir?: string;
 }
 
 /** 已启动的本地模板静态服务实例 */
@@ -27,6 +30,8 @@ const MIME_TYPES: Record<string, string> = {
   '.mjs': 'application/javascript; charset=utf-8',
   '.css': 'text/css; charset=utf-8',
   '.json': 'application/json; charset=utf-8',
+  '.moc3': 'application/octet-stream',
+  '.wasm': 'application/wasm',
   '.svg': 'image/svg+xml',
   '.png': 'image/png',
   '.jpg': 'image/jpeg',
@@ -39,11 +44,16 @@ const MIME_TYPES: Record<string, string> = {
   '.woff2': 'font/woff2',
   '.ttf': 'font/ttf',
   '.wav': 'audio/wav',
+  '.mp3': 'audio/mpeg',
+  '.m4a': 'audio/mp4',
+  '.flac': 'audio/flac',
+  '.ogg': 'audio/ogg',
   '.mp4': 'video/mp4',
   '.txt': 'text/plain; charset=utf-8',
 };
 
 const ASSET_PREFIX = '/__run_assets__/';
+const MASCOT_PREFIX = '/__mascot_assets__/';
 
 /** 根据文件后缀名判断 HTTP 响应所需的 MIME 类型 */
 function guessMimeType(filePath: string): string {
@@ -88,27 +98,134 @@ async function resolveConfinedFile(
   return { status: 200, filePath: realTarget };
 }
 
-/** 发送单个磁盘文件的 HTTP 响应内容 */
+/** 通过受控可读流传输本地静态文件并在正常结束、客户端断连或流报错时立即释放文件句柄 */
+async function pipeStaticFileStream(
+  res: http.ServerResponse,
+  filePath: string,
+  range?: { start: number; end: number },
+): Promise<void> {
+  await new Promise<void>((resolve, reject) => {
+    const stream = fsSync.createReadStream(filePath, range);
+    let settled = false;
+
+    const cleanup = () => {
+      stream.removeListener('end', onEnd);
+      stream.removeListener('close', onClose);
+      stream.removeListener('error', onError);
+      res.removeListener('close', onResClose);
+      res.removeListener('error', onResClose);
+    };
+
+    const finishOk = () => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      cleanup();
+      resolve();
+    };
+
+    const onEnd = () => {
+      finishOk();
+    };
+
+    const onClose = () => {
+      finishOk();
+    };
+
+    const onError = (err: Error) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      cleanup();
+      stream.unpipe(res);
+      stream.destroy();
+      reject(err);
+    };
+
+    const onResClose = () => {
+      stream.unpipe(res);
+      stream.destroy();
+      finishOk();
+    };
+
+    stream.on('end', onEnd);
+    stream.on('close', onClose);
+    stream.on('error', onError);
+    res.on('close', onResClose);
+    res.on('error', onResClose);
+    stream.pipe(res);
+  });
+}
+
+/** 发送单个磁盘文件的 HTTP 响应内容，全程流式传输并支持音频与贴图的字节区间请求 */
 async function sendStaticFile(
   req: http.IncomingMessage,
   res: http.ServerResponse,
   filePath: string,
 ): Promise<void> {
-  const body = await fs.readFile(filePath);
+  const stat = await fs.stat(filePath);
+  const totalBytes = stat.size;
+  const contentType = guessMimeType(filePath);
+  const rangeHeader = req.headers.range;
+
+  if (rangeHeader && totalBytes > 0 && /^bytes=/i.test(rangeHeader)) {
+    const match = /^bytes=(\d*)-(\d*)/i.exec(rangeHeader.trim());
+    if (match) {
+      const rawStart = match[1] ?? '';
+      const rawEnd = match[2] ?? '';
+      let start = rawStart ? Number.parseInt(rawStart, 10) : 0;
+      let end = rawEnd ? Number.parseInt(rawEnd, 10) : totalBytes - 1;
+      if (!rawStart && rawEnd) {
+        const suffixLen = Number.parseInt(rawEnd, 10);
+        start = Math.max(0, totalBytes - suffixLen);
+        end = totalBytes - 1;
+      }
+      if (
+        Number.isFinite(start) &&
+        Number.isFinite(end) &&
+        start >= 0 &&
+        start <= end &&
+        start < totalBytes
+      ) {
+        end = Math.min(end, totalBytes - 1);
+        const chunkLen = end - start + 1;
+        res.writeHead(206, {
+          'Content-Type': contentType,
+          'Content-Range': `bytes ${start}-${end}/${totalBytes}`,
+          'Accept-Ranges': 'bytes',
+          'Content-Length': String(chunkLen),
+          'Cache-Control': 'no-store',
+        });
+        if (req.method === 'HEAD') {
+          res.end();
+          return;
+        }
+        await pipeStaticFileStream(res, filePath, { start, end });
+        return;
+      }
+      res.writeHead(416, { 'Content-Range': `bytes */${totalBytes}` });
+      res.end();
+      return;
+    }
+  }
+
   res.writeHead(200, {
-    'Content-Type': guessMimeType(filePath),
-    'Content-Length': String(body.byteLength),
+    'Content-Type': contentType,
+    'Accept-Ranges': 'bytes',
+    'Content-Length': String(totalBytes),
     'Cache-Control': 'no-store',
   });
-  if (req.method === 'HEAD') {
+  if (req.method === 'HEAD' || totalBytes === 0) {
     res.end();
     return;
   }
-  res.end(body);
+  await pipeStaticFileStream(res, filePath);
 }
 
 /**
- * 启动仅监听本机回环地址的模板静态资源服务器，用于向无头浏览器稳定提供模板页面和当期新闻配图。
+ * 启动仅监听本机回环地址的模板静态资源服务器，用于向浏览器稳定提供模板页面、当期配音配图及只读 Live2D 模型文件。
  */
 export async function startTemplateHttpServer(
   opts: TemplateHttpServerOptions,
@@ -119,6 +236,7 @@ export async function startTemplateHttpServer(
 
   const distRoot = opts.distDir ? path.resolve(opts.distDir) : null;
   const runRoot = opts.runDir ? path.resolve(opts.runDir) : null;
+  const mascotRoot = opts.mascotDir ? path.resolve(opts.mascotDir) : null;
 
   const server = http.createServer((req, res) => {
     void (async () => {
@@ -154,6 +272,23 @@ export async function startTemplateHttpServer(
         }
         const relAsset = decodedPath.slice(ASSET_PREFIX.length);
         const resolved = await resolveConfinedFile(runRoot, relAsset);
+        if (resolved.status !== 200 || !resolved.filePath) {
+          res.writeHead(resolved.status);
+          res.end();
+          return;
+        }
+        await sendStaticFile(req, res, resolved.filePath);
+        return;
+      }
+
+      if (decodedPath.startsWith(MASCOT_PREFIX)) {
+        if (!mascotRoot) {
+          res.writeHead(404);
+          res.end('Not Found');
+          return;
+        }
+        const relMascot = decodedPath.slice(MASCOT_PREFIX.length);
+        const resolved = await resolveConfinedFile(mascotRoot, relMascot);
         if (resolved.status !== 200 || !resolved.filePath) {
           res.writeHead(resolved.status);
           res.end();

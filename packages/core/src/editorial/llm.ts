@@ -1,16 +1,17 @@
-import type { AiStageName, Settings } from '@aidaily/contracts';
+import type { AiStageName, LlmStage, Settings } from '@aidaily/contracts';
 import { type InvokeRequest, type InvokeResult, ModelCallError } from '@aidaily/model-runtime';
 import type { z } from 'zod';
 import type { CoreContext } from '../context.js';
 import { PipelineError } from '../errors.js';
 
 /**
- * 按本期配置选择对应阶段的模型调用方式，并把调用失败转换为任务异常。
+ * 按本期配置选择对应阶段的模型调用方式（支持额外指定审计记录展示阶段名），并把调用失败转换为任务异常。
  */
 export async function invokeStageLlm<T>(opts: {
   ctx: CoreContext;
   settings: Settings;
   stage: AiStageName;
+  auditStage?: LlmStage;
   runId: string;
   itemId?: string;
   prompt: string;
@@ -19,6 +20,7 @@ export async function invokeStageLlm<T>(opts: {
 }): Promise<InvokeResult<T>> {
   const { ai, clis } = opts.settings;
   const stageCfg = ai.stages[opts.stage];
+  const recordedStage = opts.auditStage ?? opts.stage;
   const request: InvokeRequest<T> = {
     cli: stageCfg.cli,
     model: stageCfg.model,
@@ -27,7 +29,7 @@ export async function invokeStageLlm<T>(opts: {
     timeoutMs: stageCfg.timeoutSec * 1000,
     retries: stageCfg.retries,
     signal: opts.signal,
-    meta: { runId: opts.runId, stage: opts.stage, itemId: opts.itemId },
+    meta: { runId: opts.runId, stage: recordedStage, itemId: opts.itemId },
   };
   try {
     if (ai.providers && Object.hasOwn(ai.providers, stageCfg.cli)) {
@@ -44,7 +46,7 @@ export async function invokeStageLlm<T>(opts: {
     if (err instanceof ModelCallError) {
       throw new PipelineError(
         'llm_unavailable',
-        `AI 处理环节 ${opts.stage}（调用方式 ${stageCfg.cli}，模型 ${stageCfg.model}）调用失败：${err.message}`,
+        `AI 处理环节 ${recordedStage}（调用方式 ${stageCfg.cli}，模型 ${stageCfg.model}）调用失败：${err.message}`,
         { cause: err },
       );
     }

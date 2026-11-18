@@ -366,7 +366,7 @@ export function StageRoutingForm({
             name="maxConcurrentCalls"
             type="number"
             min={1}
-            max={10}
+            max={20}
             value={maxConcurrentCalls}
             onChange={(e) => setMaxConcurrentCalls(e.target.value)}
             className="w-20 rounded-lg border border-slate-300 px-2.5 py-1 text-xs"
@@ -500,13 +500,16 @@ export function WorkflowSettingsForm({ settings }: { settings: Settings }) {
   const [feedback, setFeedback] = useState<{ ok: boolean; text: string } | null>(null);
   const [isPending, startTransition] = useTransition();
   const templateNames = Object.keys(settings.template.registry);
+  const ttsProviders = Object.keys(settings.tts.providers);
   const workflowValuesKey = JSON.stringify({
     timezone: settings.timezone,
     issue: settings.issue,
     retry: settings.retry,
     editorial: settings.editorial,
+    ttsProvider: settings.tts.provider,
     activeTemplate: settings.template.active,
     pagePaddingSec: settings.render.pagePaddingSec,
+    bgmVolumeDb: settings.render.bgm.volumeDb,
     publish: settings.publish,
   });
 
@@ -568,7 +571,7 @@ export function WorkflowSettingsForm({ settings }: { settings: Settings }) {
               name="itemConcurrency"
               type="number"
               min={1}
-              max={10}
+              max={20}
               defaultValue={settings.issue.itemConcurrency}
               className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-1.5 text-xs font-normal"
             />
@@ -651,6 +654,40 @@ export function WorkflowSettingsForm({ settings }: { settings: Settings }) {
           </label>
         </div>
 
+        <div>
+          <label className="block text-xs font-medium text-slate-700">
+            语音合成引擎
+            <select
+              name="ttsProvider"
+              defaultValue={settings.tts.provider}
+              className="mt-1 w-full rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-xs font-normal"
+            >
+              {ttsProviders.map((name) => (
+                <option key={name} value={name}>
+                  {name === 'indextts'
+                    ? 'indextts（本地 IndexTTS2.5）'
+                    : name === 'qwen-local'
+                      ? 'qwen-local（本地 Qwen3-TTS）'
+                      : name}
+                </option>
+              ))}
+            </select>
+          </label>
+        </div>
+        <div>
+          <label className="block text-xs font-medium text-slate-700">
+            背景音乐基准音量（dB）
+            <input
+              name="bgmVolumeDb"
+              type="number"
+              step="1"
+              min={-30}
+              max={0}
+              defaultValue={settings.render.bgm.volumeDb}
+              className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-1.5 text-xs font-normal"
+            />
+          </label>
+        </div>
         <div>
           <label className="block text-xs font-medium text-slate-700">
             视频合成前端模板
