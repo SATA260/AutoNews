@@ -8,9 +8,11 @@ export function computeTtsCacheKey(
   providerId: string,
   providerConfig: Record<string, unknown>,
   postprocess: Pick<TtsSettings['postprocess'], 'sampleRate' | 'trimSilence'> & {
+    denoise?: boolean;
     loudnessLUFS?: number;
     fadeInMs?: number;
     fadeOutMs?: number;
+    tailPadMs?: number;
   },
   text: string,
 ): string {
@@ -19,9 +21,11 @@ export function computeTtsCacheKey(
     providerConfig,
     sampleRate: postprocess.sampleRate,
     trimSilence: postprocess.trimSilence,
+    denoise: postprocess.denoise,
     loudnessLUFS: postprocess.loudnessLUFS,
     fadeInMs: postprocess.fadeInMs,
     fadeOutMs: postprocess.fadeOutMs,
+    tailPadMs: postprocess.tailPadMs,
     text,
   });
   return crypto.createHash('sha1').update(payload, 'utf8').digest('hex');

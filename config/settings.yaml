@@ -128,6 +128,7 @@ tts:
     sampleRate: 48000
     loudnessLUFS: -16
     trimSilence: true
+    denoise: true
     sentenceGapMs: 240
     sectionGapMs: 0
 

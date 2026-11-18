@@ -106,6 +106,7 @@ export const TtsSettingsSchema = z.object({
     sampleRate: z.number().int().positive(),
     loudnessLUFS: z.number().min(-70).max(-5),
     trimSilence: z.boolean(),
+    denoise: z.boolean().default(true),
     sentenceGapMs: z.number().int().nonnegative(),
     sectionGapMs: z.number().int().nonnegative(),
   }),

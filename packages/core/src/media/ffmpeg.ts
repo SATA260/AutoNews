@@ -3,7 +3,12 @@ import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import type { Timeline } from '@aidaily/contracts';
-import { VOICE_LEVELING_FILTER } from '@aidaily/tts';
+import {
+  buildHighQualityResampleFilter,
+  levelSpeechPhrasesWav,
+  VOICE_CLEANUP_FILTER,
+  VOICE_DYNAMICS_FILTER,
+} from '@aidaily/tts';
 import { execa } from 'execa';
 
 const DEFAULT_FFMPEG_TIMEOUT_MS = 180_000;
@@ -112,6 +117,7 @@ export async function buildMasterAudioWav(opts: {
   loudnessLUFS: number;
   isSilentProvider: boolean;
   levelVoice?: boolean;
+  denoiseVoice?: boolean;
   bgm: { file: string; volumeDb: number; duckDb: number };
   rootDir: string;
   ffmpegBin?: string;
@@ -141,17 +147,25 @@ export async function buildMasterAudioWav(opts: {
         sec.audioFile,
         `口播音频文件 ${sec.key}`,
       );
-      inputArgs.push('-i', absAudio);
+      let sectionInputPath = absAudio;
+      if (opts.levelVoice && !opts.isSilentProvider) {
+        const leveledCopy = path.join(workDir, `leveled-${i}.wav`);
+        await fs.copyFile(absAudio, leveledCopy);
+        await levelSpeechPhrasesWav(leveledCopy);
+        sectionInputPath = leveledCopy;
+      }
+      inputArgs.push('-i', sectionInputPath);
 
       const delayMs = Math.max(0, Math.round(sec.startMs));
       const delayFilter = delayMs > 0 ? `,adelay=${delayMs}|${delayMs}` : '';
-      // 仅针对尚未在语音合成阶段执行均衡的外部音源启用单遍响度拉齐，避免重复放大尾部保护静音
+      // 仅针对尚未在语音合成阶段执行处理的外部音源启用降噪与响度拉齐，避免对本地克隆音频二次滤波
+      const cleanupPrefix = opts.denoiseVoice ? `${VOICE_CLEANUP_FILTER},` : '';
       const levelingPrefix =
         opts.levelVoice && !opts.isSilentProvider
-          ? `${VOICE_LEVELING_FILTER},loudnorm=I=${opts.loudnessLUFS}:TP=-1.5:LRA=5,`
+          ? `${cleanupPrefix}${VOICE_DYNAMICS_FILTER},loudnorm=I=${opts.loudnessLUFS}:TP=-1.5:LRA=8,`
           : '';
       filterParts.push(
-        `[${i}:a]${levelingPrefix}aresample=${opts.sampleRate},aformat=sample_fmts=s16:channel_layouts=stereo${delayFilter}[s${i}]`,
+        `[${i}:a]${levelingPrefix}${buildHighQualityResampleFilter(opts.sampleRate)},aformat=sample_fmts=s16:channel_layouts=stereo${delayFilter}[s${i}]`,
       );
       mixTags.push(`[s${i}]`);
     }

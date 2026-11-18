@@ -13,7 +13,7 @@ import type { TtsProvider, TtsServiceOptions } from './types.js';
 
 export const TTS_VERSION = '0.1.0';
 /** 本地语音处理方式变化时递增，用于使旧音频缓存失效。 */
-export const QWEN_AUDIO_PROCESSING_VERSION = 8;
+export const QWEN_AUDIO_PROCESSING_VERSION = 9;
 
 /** 判断指定引擎标识是否属于需要主播音色参考与统一响度后处理的本地语音克隆引擎 */
 export function isLocalVoiceCloneProvider(providerId: string): boolean {
@@ -22,6 +22,7 @@ export function isLocalVoiceCloneProvider(providerId: string): boolean {
 
 export * from './audio.js';
 export * from './cache.js';
+export * from './leveling.js';
 export * from './providers/qwen-local.js';
 export * from './providers/silent.js';
 export * from './sanitize.js';
@@ -126,6 +127,7 @@ export class TtsService {
     const providerConfig = effectiveSettings.providers[provider.id] ?? {};
     const cacheIdentity = await provider.cacheIdentity?.(providerConfig);
     const { sampleRate, trimSilence } = effectiveSettings.postprocess;
+    const denoise = effectiveSettings.postprocess.denoise ?? true;
     const resolvedOutDir = path.resolve(outDir);
 
     await fs.mkdir(resolvedOutDir, { recursive: true });
@@ -168,6 +170,7 @@ export class TtsService {
             trimSilence,
             ...(isLocalClone
               ? {
+                  denoise,
                   loudnessLUFS: effectiveSettings.postprocess.loudnessLUFS,
                   fadeInMs: 5,
                   tailPadMs: 80,
@@ -210,6 +213,7 @@ export class TtsService {
                 outFile: sectionFile,
                 sampleRate,
                 trimSilence,
+                denoise,
                 isSilentProvider: provider.id === 'silent',
                 normalizeLoudness: isLocalClone,
                 loudnessLUFS: effectiveSettings.postprocess.loudnessLUFS,
@@ -305,6 +309,7 @@ export class TtsService {
         outFile,
         sampleRate: this.settings.postprocess.sampleRate,
         trimSilence: this.settings.postprocess.trimSilence,
+        denoise: this.settings.postprocess.denoise ?? true,
         isSilentProvider: provider.id === 'silent',
         normalizeLoudness: isLocalVoiceCloneProvider(provider.id),
         loudnessLUFS: this.settings.postprocess.loudnessLUFS,

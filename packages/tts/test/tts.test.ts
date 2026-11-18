@@ -33,6 +33,7 @@ function baseSettings(provider = 'silent'): TtsSettings {
       sampleRate: 48000,
       loudnessLUFS: -16,
       trimSilence: true,
+      denoise: true,
       sentenceGapMs: 250,
       sectionGapMs: 600,
     },
@@ -553,7 +554,87 @@ describe('本地语音重试与取消', () => {
     expect(Math.abs(loudHalf - quietHalf)).toBeLessThan(2.5);
     expect(Math.abs(quietHalf - quietTailLast200ms)).toBeLessThan(1.2);
     expect(pauseGap).toBeLessThan(-60);
-  });
+  }, 15_000);
+
+  it('消除语音中的宽频嘶嘶底噪与高频电流声并保持人声饱满自然', async () => {
+    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'aidaily-tts-denoise-'));
+    tempDirs.push(tmpDir);
+    const noisyWav = path.join(tmpDir, 'noisy.wav');
+    const cleanWav = path.join(tmpDir, 'clean.wav');
+
+    // 合成两句 260Hz 人声基频，叠加宽频白噪底噪与 14.5kHz 高频电流杂音
+    await execa('ffmpeg', [
+      '-y',
+      '-f',
+      'lavfi',
+      '-i',
+      'sine=frequency=260:sample_rate=48000:duration=2.6',
+      '-f',
+      'lavfi',
+      '-i',
+      'anoisesrc=r=48000:c=white:a=0.008:d=2.6',
+      '-f',
+      'lavfi',
+      '-i',
+      'sine=frequency=14500:sample_rate=48000:duration=2.6',
+      '-filter_complex',
+      '[0:a]volume=2.5:enable=between(t\\,0.15\\,1.10),volume=0.0:enable=between(t\\,1.10\\,1.50),volume=2.5:enable=between(t\\,1.50\\,2.45),volume=0.0:enable=between(t\\,0\\,0.15)+between(t\\,2.45\\,2.60)[v];[2:a]volume=0.6[bz];[v][1:a][bz]amix=inputs=3:normalize=0',
+      '-ar',
+      '48000',
+      '-ac',
+      '1',
+      '-c:a',
+      'pcm_s16le',
+      noisyWav,
+    ]);
+
+    await normalizeSegmentToWav({
+      inFile: noisyWav,
+      outFile: cleanWav,
+      sampleRate: 48000,
+      trimSilence: false,
+      denoise: true,
+      normalizeLoudness: true,
+      loudnessLUFS: -16,
+    });
+
+    const measureBandDb = async (
+      file: string,
+      startSec: number,
+      durSec: number,
+      preFilter?: string,
+    ) => {
+      const af = preFilter ? `${preFilter},volumedetect` : 'volumedetect';
+      const res = await execa('ffmpeg', [
+        '-hide_banner',
+        '-ss',
+        String(startSec),
+        '-t',
+        String(durSec),
+        '-i',
+        file,
+        '-af',
+        af,
+        '-f',
+        'null',
+        '-',
+      ]);
+      const match = /mean_volume: ([\d.-]+) dB/.exec(res.stderr);
+      return match ? Number(match[1]) : -120;
+    };
+
+    const beforePauseDb = await measureBandDb(noisyWav, 1.18, 0.24);
+    const afterPauseDb = await measureBandDb(cleanWav, 1.18, 0.24);
+    const beforeBuzzDb = await measureBandDb(noisyWav, 0.25, 0.75, 'highpass=f=12500');
+    const afterBuzzDb = await measureBandDb(cleanWav, 0.25, 0.75, 'highpass=f=12500');
+    const voiceMidDb = await measureBandDb(cleanWav, 1.6, 0.5, 'lowpass=f=1200');
+    const voiceTailDb = await measureBandDb(cleanWav, 2.25, 0.15, 'lowpass=f=1200');
+
+    expect(afterPauseDb).toBeLessThan(beforePauseDb - 8);
+    expect(afterBuzzDb).toBeLessThan(beforeBuzzDb - 15);
+    expect(voiceMidDb).toBeGreaterThan(-24);
+    expect(Math.abs(voiceMidDb - voiceTailDb)).toBeLessThan(1.5);
+  }, 15_000);
 
   it('indextts 引擎启动等待期间收到取消后清理本地服务', async () => {
     const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'aidaily-indextts-cancel-'));

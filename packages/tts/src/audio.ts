@@ -2,6 +2,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { execa } from 'execa';
+import { levelSpeechPhrasesWav } from './leveling.js';
 
 /** 音频片段统一标准化参数 */
 export interface NormalizeSegmentOptions {
@@ -9,6 +10,7 @@ export interface NormalizeSegmentOptions {
   outFile: string;
   sampleRate: number;
   trimSilence: boolean;
+  denoise?: boolean;
   isSilentProvider?: boolean;
   normalizeLoudness?: boolean;
   loudnessLUFS?: number;
@@ -37,9 +39,28 @@ export interface ConcatSentencesResult {
 
 const DEFAULT_MEDIA_TIMEOUT_MS = 60_000;
 
-/** 统一人声均衡与压限滤镜参数（按帧独立均衡并附带静音门限，不压低句尾收音音量也不放大停顿底噪） */
-export const VOICE_LEVELING_FILTER =
-  'speechnorm=p=0.88:e=12:c=6:t=0.004:r=0.20:f=0.20,acompressor=threshold=-22dB:ratio=2.5:attack=8:release=100:makeup=2';
+/** 生成高精度 64 阶 Kaiser 窗抗混叠重采样滤镜表达式，消除升采样高频镜像失真 */
+export function buildHighQualityResampleFilter(sampleRate: number): string {
+  return `aresample=${sampleRate}:filter_size=64:phase_shift=10:cutoff=0.96:filter_type=kaiser`;
+}
+
+/** 广播级人声去杂音、去声码器脉冲电流毛刺与音色温润化滤镜链 */
+export const VOICE_CLEANUP_FILTER = [
+  'highpass=f=85:poles=2,highpass=f=85:poles=2',
+  'adeclick=w=30:o=60:t=2.5',
+  'afftdn=nr=10:nf=-40:nt=w:tn=1:gs=3',
+  'deesser=i=0.35:m=0.45:f=0.5:s=o',
+  'equalizer=f=230:t=q:w=1.1:g=1.2',
+  'equalizer=f=7500:t=q:w=1.3:g=-2.5',
+  'lowpass=f=11200:poles=2,lowpass=f=11200:poles=2',
+].join(',');
+
+/** 温和的广播人声峰值收敛滤镜参数（保留句内自然呼吸与起伏，不扭曲声波也不拉高底噪） */
+export const VOICE_DYNAMICS_FILTER =
+  'acompressor=threshold=-20dB:ratio=1.8:attack=18:release=180:makeup=1';
+
+/** 向后兼容导出的人声动态收敛滤镜常量 */
+export const VOICE_LEVELING_FILTER = VOICE_DYNAMICS_FILTER;
 
 /** 生成带合法后缀名的同目录临时文件路径，确保原子重命名且音视频工具能正确识别格式 */
 function makeSiblingTempPath(targetFile: string): string {
@@ -153,13 +174,14 @@ export async function normalizeSegmentToWav(opts: NormalizeSegmentOptions): Prom
   const convert = async (applyTrim: boolean) => {
     await withAtomicWavWrite(opts.outFile, async (tmpOut) => {
       const args = ['-y', '-i', opts.inFile];
+      const filters: string[] = [];
       if (applyTrim) {
-        args.push(
-          '-af',
+        filters.push(
           'silenceremove=start_periods=1:start_duration=0:start_threshold=-68dB:start_silence=0.05:detection=peak,areverse,silenceremove=start_periods=1:start_duration=0:start_threshold=-72dB:start_silence=0.15:detection=peak,areverse',
         );
       }
-      args.push('-ar', String(opts.sampleRate), '-ac', '1', '-c:a', 'pcm_s16le', tmpOut);
+      filters.push(buildHighQualityResampleFilter(opts.sampleRate));
+      args.push('-af', filters.join(','), '-ac', '1', '-c:a', 'pcm_s16le', tmpOut);
 
       const res = await execa(ffmpegBin, args, {
         cancelSignal: opts.signal,
@@ -183,7 +205,10 @@ export async function normalizeSegmentToWav(opts: NormalizeSegmentOptions): Prom
     try {
       const trimmedMs = await probeAudioDurationMs(opts.outFile, ffprobeBin, opts.signal);
       if (trimmedMs >= 50) {
-        if (opts.normalizeLoudness) await polishLoudness(opts);
+        if (opts.normalizeLoudness) {
+          await levelSpeechPhrasesWav(opts.outFile);
+          await polishLoudness(opts);
+        }
         return;
       }
     } catch {
@@ -192,15 +217,22 @@ export async function normalizeSegmentToWav(opts: NormalizeSegmentOptions): Prom
   }
 
   await convert(false);
-  if (opts.normalizeLoudness) await polishLoudness(opts);
+  if (opts.normalizeLoudness) {
+    await levelSpeechPhrasesWav(opts.outFile);
+    await polishLoudness(opts);
+  }
 }
 
-/** 整段音频先进行实时人声均衡与压限平滑句间高低落差，再测量并归一化整体响度、保留原声结尾并追加极短尾垫。 */
+/** 对完成分句线性均衡的音频执行可选降噪去毛刺、温和动态收敛与两遍线性响度校准，并保留自然结尾。 */
 async function polishLoudness(opts: NormalizeSegmentOptions): Promise<void> {
   const ffmpeg = opts.ffmpegBin ?? 'ffmpeg';
   const duration = await probeAudioDurationMs(opts.outFile, opts.ffprobeBin, opts.signal);
   const target = opts.loudnessLUFS ?? -16;
   const processingTimeout = Math.max(DEFAULT_MEDIA_TIMEOUT_MS, duration * 4 + 60_000);
+  const preChain =
+    opts.denoise !== false
+      ? `${VOICE_CLEANUP_FILTER},${VOICE_DYNAMICS_FILTER}`
+      : VOICE_DYNAMICS_FILTER;
   const analysis = await execa(
     ffmpeg,
     [
@@ -208,7 +240,7 @@ async function polishLoudness(opts: NormalizeSegmentOptions): Promise<void> {
       '-i',
       opts.outFile,
       '-af',
-      `${VOICE_LEVELING_FILTER},loudnorm=I=${target}:TP=-1.5:LRA=5:print_format=json`,
+      `${preChain},loudnorm=I=${target}:TP=-1.5:LRA=8:print_format=json`,
       '-f',
       'null',
       '-',
@@ -224,7 +256,9 @@ async function polishLoudness(opts: NormalizeSegmentOptions): Promise<void> {
     Number(stats[key]),
   );
   if (values.some((value) => !Number.isFinite(value))) throw new Error('语音响度测量结果无效');
-  const filter = `${VOICE_LEVELING_FILTER},loudnorm=I=${target}:TP=-1.5:LRA=5:measured_I=${values[0]}:measured_TP=${values[1]}:measured_LRA=${values[2]}:measured_thresh=${values[3]}:offset=${values[4]}:linear=true,afade=t=in:st=0:d=0.005,apad=pad_dur=0.08`;
+  const postGate =
+    opts.denoise !== false ? ',agate=threshold=0.002:ratio=2:range=0.25:attack=5:release=180' : '';
+  const filter = `${preChain},loudnorm=I=${target}:TP=-1.5:LRA=8:measured_I=${values[0]}:measured_TP=${values[1]}:measured_LRA=${values[2]}:measured_thresh=${values[3]}:offset=${values[4]}:linear=true${postGate},afade=t=in:st=0:d=0.005,apad=pad_dur=0.08,${buildHighQualityResampleFilter(opts.sampleRate)}`;
   await withAtomicWavWrite(opts.outFile, async (tmp) => {
     const result = await execa(
       ffmpeg,

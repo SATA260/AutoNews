@@ -40,6 +40,7 @@ function computeSectionDigest(section: NarrationSection, settings: Settings): st
   const providerId = settings.tts.provider;
   const providerConfig = settings.tts.providers[providerId] ?? {};
   const { sampleRate, loudnessLUFS, trimSilence } = settings.tts.postprocess;
+  const denoise = settings.tts.postprocess.denoise ?? true;
   const payload = JSON.stringify({
     key: section.key,
     paragraph: buildNarrationParagraph(section.sentences),
@@ -47,7 +48,7 @@ function computeSectionDigest(section: NarrationSection, settings: Settings): st
     subtitleTimingVersion: 2,
     providerId,
     providerConfig,
-    postprocess: { sampleRate, loudnessLUFS, trimSilence },
+    postprocess: { sampleRate, loudnessLUFS, trimSilence, denoise },
     processingVersion: isLocalVoiceCloneProvider(providerId) ? QWEN_AUDIO_PROCESSING_VERSION : 0,
   });
   return crypto.createHash('sha1').update(payload, 'utf8').digest('hex');
