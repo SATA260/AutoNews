@@ -144,7 +144,7 @@ render:
   height: 1080
   fps: 30
   pagePaddingSec: 1.0 # 每条口播念完后的画面停顿时间（秒）
-  bgm: { file: "", volumeDb: -9, duckDb: -5 }
+  bgm: { file: "", volumeDb: -12, duckDb: -5 }
 
 publish:
   mode: manual-review # manual-review | auto（auto 只在 qa 通过时自动发布）
