@@ -1,6 +1,7 @@
 import path from 'node:path';
 import type { CliBridge } from '@aidaily/cli-bridge';
 import type { TtsService } from '@aidaily/tts';
+import type { CollectorBrowserDriver } from './collector/browser-driver.js';
 import type { CoreContext } from './context.js';
 import { createCoreContext } from './context.js';
 import type { Notifier } from './notify/index.js';
@@ -67,6 +68,7 @@ export async function createCore(opts?: {
   bridge?: CliBridge;
   tts?: TtsService;
   now?: () => Date;
+  createCollectorDriver?: () => CollectorBrowserDriver;
   launchAgentsDir?: string;
   launchctlExec?: LaunchctlExecutor;
   cliScriptPath?: string;

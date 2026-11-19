@@ -8,6 +8,8 @@ import {
   PIPELINE_STAGES,
   type RunStatus,
   RunStatusSchema,
+  type ScheduleCutoffMode,
+  ScheduleCutoffModeSchema,
   ScheduleTimeSchema,
   type Stage,
   StageSchema,
@@ -131,6 +133,12 @@ function hasJsonFlag(program: Command, argv: readonly string[]): boolean {
     '--time',
     '--name',
     '--cli',
+    '--host',
+    '--bgm',
+    '--since',
+    '--cutoff',
+    '--max-age-hours',
+    '--import',
   ]);
   let skipNextValue = false;
   for (const token of argv) {
@@ -139,7 +147,10 @@ function hasJsonFlag(program: Command, argv: readonly string[]): boolean {
     }
     if (skipNextValue) {
       skipNextValue = false;
-      continue;
+      // 布尔同名标志（例如 x-login --status --json）后面紧跟另一个选项时，不能误吞下一个标志
+      if (!token.startsWith('-')) {
+        continue;
+      }
     }
     if (token === '--json' || token === '--json=true') {
       return true;
@@ -292,11 +303,15 @@ export function buildProgram(io: CliIo = DEFAULT_IO, onExitCode?: (code: number)
     }
   };
 
-  // 1. aidaily run -n <N> [--detach] [--trigger ...] [--schedule-id ...]
+  // 1. aidaily run -n <N> [--since <expr>] [--detach] [--trigger ...] [--schedule-id ...]
   program
     .command('run')
     .description('生成并运行一期 AI 每日报任务（必须通过 -n 指定新闻条数）')
     .requiredOption('-n, --items <N>', '本期新闻条数（必填正整数，无默认值）')
+    .option(
+      '--since <expr>',
+      '最早新闻时间下限（支持 12h / 24h / 48h / today / last-published / YYYY-MM-DD / ISO）',
+    )
     .option('--host <id>', '指定主播：deepseek、gpt、gemini 或 claude')
     .option('--bgm <file>', '指定曲库中的背景音乐文件名')
     .option('--detach', '在后台独立工作进程中执行并立即返回', false)
@@ -306,6 +321,7 @@ export function buildProgram(io: CliIo = DEFAULT_IO, onExitCode?: (code: number)
       async (
         opts: {
           items: string;
+          since?: string;
           detach: boolean;
           trigger: string;
           scheduleId?: string;
@@ -334,6 +350,7 @@ export function buildProgram(io: CliIo = DEFAULT_IO, onExitCode?: (code: number)
             if (opts.detach) {
               const { runId } = await core.tasks.start({
                 itemCount,
+                notBeforeAt: opts.since,
                 hostId: host?.success ? host.data : undefined,
                 bgmFile: opts.bgm,
                 trigger,
@@ -341,7 +358,7 @@ export function buildProgram(io: CliIo = DEFAULT_IO, onExitCode?: (code: number)
                 detach: true,
               });
               print(
-                { runId, itemCount, trigger, detached: true },
+                { runId, itemCount, notBeforeAt: opts.since ?? null, trigger, detached: true },
                 `已提交后台任务 ${runId}（目标 ${itemCount} 条新闻），可用 aidaily logs ${runId} -f 查看进度。`,
               );
               return 0;
@@ -356,6 +373,7 @@ export function buildProgram(io: CliIo = DEFAULT_IO, onExitCode?: (code: number)
             try {
               const res = await core.tasks.start({
                 itemCount,
+                notBeforeAt: opts.since,
                 hostId: host?.success ? host.data : undefined,
                 bgmFile: opts.bgm,
                 trigger,
@@ -806,7 +824,7 @@ export function buildProgram(io: CliIo = DEFAULT_IO, onExitCode?: (code: number)
     .command('cover')
     .description('查看本期封面文字；传入 --title / --subtitle 时修改文字并只重新生成封面图片')
     .argument('<runId>', '任务 ID')
-    .option('--title <title>', '封面主标题（可用 *星号* 包住要高亮的词）')
+    .option('--title <title>', '封面主标题（可用 *星号* 包住要高亮的词，\\n 可手动换行）')
     .option('--subtitle <subtitle>', '封面副标题（传空字符串表示不要副标题）')
     .action(async (runId: string, opts: { title?: string; subtitle?: string }, cmd: Command) => {
       const gOpts = getGlobals(cmd);
@@ -1102,11 +1120,21 @@ export function buildProgram(io: CliIo = DEFAULT_IO, onExitCode?: (code: number)
     .requiredOption('--time <HH:mm>', '每日执行时间（24 小时制 HH:mm，必填）')
     .requiredOption('-n, --items <N>', '每次抓取制作的新闻条数（正整数，必填）')
     .option('--name <name>', '自定义定时任务名称')
+    .option('--cutoff <mode>', '最早新闻时间策略 (none | since_last_published | hours)', 'none')
+    .option('--max-age-hours <H>', '当策略为 hours 时的回溯小时数（正整数）')
     .option('--bgm <file>', '指定曲库中的背景音乐文件名')
     .option('--disabled', '创建后先保持停用状态，暂不挂载到系统调度器', false)
     .action(
       async (
-        opts: { time: string; items: string; name?: string; bgm?: string; disabled: boolean },
+        opts: {
+          time: string;
+          items: string;
+          name?: string;
+          cutoff: string;
+          maxAgeHours?: string;
+          bgm?: string;
+          disabled: boolean;
+        },
         cmd: Command,
       ) => {
         const gOpts = getGlobals(cmd);
@@ -1119,12 +1147,31 @@ export function buildProgram(io: CliIo = DEFAULT_IO, onExitCode?: (code: number)
           );
         }
         const itemCount = parsePositiveInt(opts.items, '-n/--items');
+        const cutoffRes = ScheduleCutoffModeSchema.safeParse(opts.cutoff);
+        if (!cutoffRes.success) {
+          throw new CliUsageError(
+            `非法的 --cutoff 策略 "${opts.cutoff}"，仅支持 none / since_last_published / hours`,
+          );
+        }
+        const cutoffMode: ScheduleCutoffMode = cutoffRes.data;
+        const maxAgeHours =
+          opts.maxAgeHours !== undefined
+            ? parsePositiveInt(opts.maxAgeHours, '--max-age-hours')
+            : undefined;
+        if (cutoffMode === 'hours' && maxAgeHours === undefined) {
+          throw new CliUsageError('当 --cutoff 为 hours 时必须传入正整数 --max-age-hours');
+        }
+        if (cutoffMode !== 'hours' && maxAgeHours !== undefined) {
+          throw new CliUsageError('--max-age-hours 仅在 --cutoff hours 时有效');
+        }
 
         const code = await withCore(gOpts, async (core) => {
           const job = await core.scheduler.create({
             name: opts.name,
             time: timeRes.data,
             itemCount,
+            cutoffMode,
+            maxAgeHours,
             bgmFile: opts.bgm,
             enabled: !opts.disabled,
           });
@@ -1142,6 +1189,8 @@ export function buildProgram(io: CliIo = DEFAULT_IO, onExitCode?: (code: number)
     .option('--name <name>', '新的任务名称')
     .option('--time <HH:mm>', '新的每日触发时间（HH:mm）')
     .option('-n, --items <N>', '新的每期新闻条数上限')
+    .option('--cutoff <mode>', '新的最早新闻时间策略 (none | since_last_published | hours)')
+    .option('--max-age-hours <H>', '当策略为 hours 时的回溯小时数（正整数）')
     .option('--bgm <file>', '曲库文件名；传 auto 恢复自动选择')
     .option('--enable', '启用并挂载到系统调度器', false)
     .option('--disable', '停用并从系统调度器卸载', false)
@@ -1152,6 +1201,8 @@ export function buildProgram(io: CliIo = DEFAULT_IO, onExitCode?: (code: number)
           name?: string;
           time?: string;
           items?: string;
+          cutoff?: string;
+          maxAgeHours?: string;
           bgm?: string;
           enable: boolean;
           disable: boolean;
@@ -1176,6 +1227,20 @@ export function buildProgram(io: CliIo = DEFAULT_IO, onExitCode?: (code: number)
         }
         const nextItems =
           opts.items !== undefined ? parsePositiveInt(opts.items, '-n/--items') : undefined;
+        let nextCutoffMode: ScheduleCutoffMode | undefined;
+        if (opts.cutoff !== undefined) {
+          const cutoffRes = ScheduleCutoffModeSchema.safeParse(opts.cutoff);
+          if (!cutoffRes.success) {
+            throw new CliUsageError(
+              `非法的 --cutoff 策略 "${opts.cutoff}"，仅支持 none / since_last_published / hours`,
+            );
+          }
+          nextCutoffMode = cutoffRes.data;
+        }
+        const nextMaxAgeHours =
+          opts.maxAgeHours !== undefined
+            ? parsePositiveInt(opts.maxAgeHours, '--max-age-hours')
+            : undefined;
         const nextEnabled = opts.enable ? true : opts.disable ? false : undefined;
 
         const code = await withCore(gOpts, async (core) => {
@@ -1183,6 +1248,8 @@ export function buildProgram(io: CliIo = DEFAULT_IO, onExitCode?: (code: number)
             name: opts.name,
             time: nextTime,
             itemCount: nextItems,
+            cutoffMode: nextCutoffMode,
+            maxAgeHours: nextMaxAgeHours,
             bgmFile: opts.bgm === 'auto' ? null : opts.bgm,
             enabled: nextEnabled,
           });
@@ -1270,6 +1337,40 @@ export function buildProgram(io: CliIo = DEFAULT_IO, onExitCode?: (code: number)
       const code = await withCore(gOpts, async (core) => {
         const { bin, args } = core.publish.biliLoginCommand();
         return spawnInheritProcess(bin, args);
+      });
+      setExit(code);
+    });
+
+  // 22. aidaily x-login [--import <file>] [--status]
+  program
+    .command('x-login')
+    .description('管理 X (Twitter) 网页抓取登录态 Cookie（支持交互式浏览器登录或导入 Cookie 文件）')
+    .option('--import <file>', '从本地 Netscape cookies.txt 或 JSON Cookie 导出文件导入')
+    .option('--status', '仅查看当前 X Cookie 配置与有效性状态', false)
+    .action(async (opts: { import?: string; status: boolean }, cmd: Command) => {
+      const gOpts = getGlobals(cmd);
+      const print = createPrinter(io, Boolean(gOpts.json));
+
+      if (opts.status && opts.import) {
+        throw new CliUsageError('不能同时传入 --status 和 --import');
+      }
+
+      const code = await withCore(gOpts, async (core) => {
+        if (opts.status) {
+          const status = await core.sources.getXAuthStatus();
+          print(status, `${status.detail}\n凭证路径: ${status.cookiePath}`);
+          return 0;
+        }
+        if (opts.import) {
+          const absFile = path.resolve(opts.import);
+          const raw = await fs.readFile(absFile, 'utf8');
+          const status = await core.sources.importXCookies(raw);
+          print(status, `X Cookie 导入成功：${status.detail}\n已保存至: ${status.cookiePath}`);
+          return 0;
+        }
+        const status = await core.sources.loginXInteractive();
+        print(status, `X 登录完成：${status.detail}\n已保存至: ${status.cookiePath}`);
+        return 0;
       });
       setExit(code);
     });

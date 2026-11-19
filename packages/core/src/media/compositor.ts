@@ -10,6 +10,7 @@ import type {
   PagePlan,
   RenderableIssue,
   RenderableNewsItem,
+  RenderTheme,
   RunItemRecord,
   SectionRenderPlan,
   Settings,
@@ -24,6 +25,7 @@ import { execa } from 'execa';
 import { chromium } from 'playwright';
 import type { CoreContext } from '../context.js';
 import { deriveMascotMood, loadPersonas } from '../editorial/personas.js';
+import { collectEventMediaPool, loadEventArticles } from '../editorial/s3-summarize.js';
 import { PipelineError } from '../errors.js';
 import { readJsonOrNull, writeFileAtomic, writeJsonAtomic } from '../storage/files.js';
 import {
@@ -33,7 +35,12 @@ import {
 } from '../templates/registry.js';
 import { closeBrowserSafely, resolveChromiumExecutablePath } from './browser.js';
 import { renderRunCover } from './cover.js';
-import { buildMasterAudioWav, composeSectionVideosMp4, composeSlidesVideoMp4 } from './ffmpeg.js';
+import {
+  buildMasterAudioWav,
+  composeSectionVideosMp4,
+  composeSlidesVideoMp4,
+  computePageTurnSfxTimesMs,
+} from './ffmpeg.js';
 import { extractWavLipSyncFrames } from './lipsync.js';
 import { quantizeTimelineToFps } from './timeline.js';
 
@@ -72,6 +79,11 @@ interface SectionCacheRecord {
 interface SectionsProgressFile {
   template: string;
   sections: Record<string, SectionCacheRecord>;
+}
+
+/** 解析视频合成使用的模板主题外观，未配置时默认使用深色模式 */
+export function resolveRenderTheme(renderSettings: Pick<Settings['render'], 'theme'>): RenderTheme {
+  return renderSettings.theme === 'light' ? 'light' : 'dark';
 }
 
 const PNG_HEADER = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
@@ -188,8 +200,9 @@ async function stageArticleAssetIntoRunDir(opts: {
   runDir: string;
   relImagePath: string | null | undefined;
   itemIndex: number;
+  slotSuffix?: string;
 }): Promise<string | undefined> {
-  const { ctx, runDir, relImagePath, itemIndex } = opts;
+  const { ctx, runDir, relImagePath, itemIndex, slotSuffix } = opts;
   if (!relImagePath || relImagePath.includes('\0')) {
     return undefined;
   }
@@ -213,7 +226,7 @@ async function stageArticleAssetIntoRunDir(opts: {
     if (!ALLOWED_IMAGE_EXTENSIONS.has(ext)) {
       return undefined;
     }
-    const fileName = `item-${String(itemIndex + 1).padStart(2, '0')}${ext}`;
+    const fileName = `item-${String(itemIndex + 1).padStart(2, '0')}${slotSuffix ?? ''}${ext}`;
     const relDest = path.posix.join('assets', fileName);
     const absDest = path.join(runDir, relDest);
     const buf = await fs.readFile(realSrc);
@@ -336,22 +349,74 @@ export async function buildRenderableIssue(opts: {
     const ev = eventById.get(item.eventId);
     const primaryArticleId = item.finalJson.evidence[0]?.articleId ?? ev?.articleIds[0] ?? null;
     const primaryArticle = primaryArticleId ? ctx.repos.articles.getById(primaryArticleId) : null;
+    const loadedEventArticles = ev
+      ? await loadEventArticles(ctx, ev).catch(() => new Map())
+      : new Map();
+    const mediaPool = collectEventMediaPool(loadedEventArticles);
+    const mediaById = new Map(mediaPool.map((asset) => [asset.id, asset]));
 
-    const stagedImageRel = await stageArticleAssetIntoRunDir({
+    let primaryRelSource: string | null = null;
+    let fallbackRelSource: string | null = null;
+
+    if (item.imageMode === 'none') {
+      primaryRelSource = null;
+    } else if (item.imageMode === 'custom') {
+      if (item.customImagePath) {
+        primaryRelSource = path.relative(
+          ctx.paths.rootDir,
+          path.join(runDir, item.customImagePath),
+        );
+      } else if (item.selectedMediaIds?.primary) {
+        primaryRelSource = mediaById.get(item.selectedMediaIds.primary)?.imagePath ?? null;
+      }
+
+      if (!primaryRelSource) {
+        if (item.secondaryCustomImagePath) {
+          primaryRelSource = path.relative(
+            ctx.paths.rootDir,
+            path.join(runDir, item.secondaryCustomImagePath),
+          );
+        } else if (item.selectedMediaIds?.secondary) {
+          primaryRelSource = mediaById.get(item.selectedMediaIds.secondary)?.imagePath ?? null;
+        }
+      }
+    } else {
+      const blockedByPolicy =
+        item.finalJson.preferArticleImage === false ||
+        (settings.issue.minScore !== undefined &&
+          item.finalJson.preferArticleImage !== true &&
+          !item.finalJson.primaryMediaId);
+      if (!blockedByPolicy) {
+        primaryRelSource =
+          (item.finalJson.primaryMediaId
+            ? mediaById.get(item.finalJson.primaryMediaId)?.imagePath
+            : undefined) ??
+          primaryArticle?.imagePath ??
+          null;
+        if (!primaryRelSource && item.finalJson.secondaryMediaId) {
+          primaryRelSource = mediaById.get(item.finalJson.secondaryMediaId)?.imagePath ?? null;
+        }
+        if (item.finalJson.primaryMediaId && primaryArticle?.imagePath) {
+          fallbackRelSource = primaryArticle.imagePath;
+        }
+      }
+    }
+
+    // 每条新闻最多只暂存并展示一张配图；仅当主图读取失败时尝试备选主图兜底
+    let effectivePrimaryRel = await stageArticleAssetIntoRunDir({
       ctx,
       runDir,
-      relImagePath:
-        item.imageMode === 'none'
-          ? null
-          : item.imageMode === 'custom' && item.customImagePath
-            ? path.relative(ctx.paths.rootDir, path.join(runDir, item.customImagePath))
-            : item.finalJson.preferArticleImage === false ||
-                (settings.issue.minScore !== undefined &&
-                  item.finalJson.preferArticleImage !== true)
-              ? null
-              : primaryArticle?.imagePath,
+      relImagePath: primaryRelSource,
       itemIndex: i,
     });
+    if (!effectivePrimaryRel && fallbackRelSource && fallbackRelSource !== primaryRelSource) {
+      effectivePrimaryRel = await stageArticleAssetIntoRunDir({
+        ctx,
+        runDir,
+        relImagePath: fallbackRelSource,
+        itemIndex: i,
+      });
+    }
 
     const sourceDisplay = primaryArticle
       ? (sourceNameById.get(primaryArticle.sourceId) ?? primaryArticle.sourceId)
@@ -373,7 +438,7 @@ export async function buildRenderableIssue(opts: {
       source: sourceDisplay,
       sourceUrl: primaryArticle?.canonicalUrl ?? '',
       publishedAt: primaryArticle?.publishedAt ?? run.createdAt,
-      imagePath: stagedImageRel,
+      imagePath: effectivePrimaryRel,
       impact: mapScoreToImpact(ev?.score ?? 5),
       mascotMood,
     });
@@ -652,6 +717,7 @@ export async function runRenderStage(opts: {
         frameCount: qSec.frameCount,
         startMs: qSec.quantizedStartMs,
         durationMs: qSec.quantizedDurationMs,
+        speechOffsetMs: qSec.speechOffsetMs,
         speechMs: qSec.speechMs,
         mood: sectionMood,
         outMp4Path,
@@ -665,6 +731,7 @@ export async function runRenderStage(opts: {
           JSON.stringify({
             template: resolvedTemplate.name,
             adapter: adapter.id,
+            theme: resolveRenderTheme(settings.render),
             assetFingerprint,
             width: settings.render.width,
             height: settings.render.height,
@@ -688,6 +755,7 @@ export async function runRenderStage(opts: {
             index: i,
             startFrame: qSec.startFrame,
             frameCount: qSec.frameCount,
+            speechOffsetMs: qSec.speechOffsetMs,
             speechMs: qSec.speechMs,
             mood: sectionMood,
             currSlide: getSlideVisualPayload(i),
@@ -819,10 +887,13 @@ export async function runRenderStage(opts: {
           width: settings.render.width,
           height: settings.render.height,
         });
-        await page.goto(`${server.baseUrl}/?clean=1&clock=manual`, {
-          waitUntil: 'load',
-          timeout: 30_000,
-        });
+        await page.goto(
+          `${server.baseUrl}/?clean=1&clock=manual&theme=${resolveRenderTheme(settings.render)}`,
+          {
+            waitUntil: 'load',
+            timeout: 30_000,
+          },
+        );
         await renderSectionsFn({
           page,
           data: templateData,
@@ -892,6 +963,7 @@ export async function runRenderStage(opts: {
         JSON.stringify({
           template: resolvedTemplate.name,
           adapter: adapter.id,
+          theme: resolveRenderTheme(settings.render),
           width: settings.render.width,
           height: settings.render.height,
           templateData,
@@ -974,10 +1046,13 @@ export async function runRenderStage(opts: {
           width: settings.render.width,
           height: settings.render.height,
         });
-        await page.goto(`${server.baseUrl}/?clean=1&transition=none&motion=static`, {
-          waitUntil: 'load',
-          timeout: 30_000,
-        });
+        await page.goto(
+          `${server.baseUrl}/?clean=1&transition=none&motion=static&theme=${resolveRenderTheme(settings.render)}`,
+          {
+            waitUntil: 'load',
+            timeout: 30_000,
+          },
+        );
         await adapter.capture(page, templateData, pendingPlan, framesDir);
         if (signal?.aborted) {
           throw new DOMException('已取消', 'AbortError');
@@ -1033,8 +1108,32 @@ export async function runRenderStage(opts: {
     const bgmName = musicRow?.bgm_file;
     if (bgmName && (path.basename(bgmName) !== bgmName || !/\.(mp3|wav|flac|m4a)$/i.test(bgmName)))
       throw new Error('背景音乐文件名不合法');
+    const masterTimeline = quantized ? quantized.audioTimeline : timeline;
+    // 配置了翻页音效且文件存在时，在每次翻页的时间点叠加咔嗒声；文件缺失只记警告、不加音效，不影响成片
+    const pageTurnSfxSetting = settings.render.pageTurnSfx;
+    const sfxRel = pageTurnSfxSetting?.file.trim() ?? '';
+    let pageTurnSfx: { file: string; volumeDb: number; atMs: number[] } | undefined;
+    if (pageTurnSfxSetting && sfxRel) {
+      const sfxAbs = path.isAbsolute(sfxRel) ? sfxRel : path.resolve(ctx.paths.rootDir, sfxRel);
+      const sfxExists = await fs
+        .access(sfxAbs)
+        .then(() => true)
+        .catch(() => false);
+      if (sfxExists) {
+        pageTurnSfx = {
+          file: sfxAbs,
+          volumeDb: pageTurnSfxSetting.volumeDb,
+          atMs: computePageTurnSfxTimesMs(masterTimeline, pageTurnSfxSetting.leadMs),
+        };
+      } else {
+        ctx.logger.warn(
+          { runId, file: sfxRel, code: 'page_turn_sfx_missing' },
+          `找不到翻页音效文件 ${sfxRel}，本次成片不加翻页音效`,
+        );
+      }
+    }
     await buildMasterAudioWav({
-      timeline: quantized ? quantized.audioTimeline : timeline,
+      timeline: masterTimeline,
       runDir,
       outWav: masterWavFile,
       sampleRate: settings.tts.postprocess.sampleRate,
@@ -1047,6 +1146,7 @@ export async function runRenderStage(opts: {
       bgm: bgmName
         ? { ...settings.render.bgm, file: path.join('assets', 'bgm', bgmName) }
         : settings.render.bgm,
+      pageTurnSfx,
       rootDir: ctx.paths.rootDir,
       ffmpegBin,
       signal,

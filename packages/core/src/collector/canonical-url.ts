@@ -77,6 +77,7 @@ export function computeArticleId(canonicalUrl: string): string {
 export function normalizeTitle(title: string): string {
   return title
     .normalize('NFKC')
+    .replace(/[\u2010-\u2015\u2212\uFE58\uFE63\uFF0D]/g, '-')
     .toLowerCase()
     .replace(/\s+/g, ' ')
     .replace(/^[\s\p{P}\p{S}]+|[\s\p{P}\p{S}]+$/gu, '')

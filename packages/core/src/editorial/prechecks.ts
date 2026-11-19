@@ -555,6 +555,44 @@ function checkForbiddenPersonaTokens(
   }
 }
 
+const COMPANY_TEAM_SELF_REF_PATTERN =
+  /(?:我们公司|我们团队|我们研发|我们官方|我们内部|我们业务|我们旗下|咱们公司|咱们团队|咱们研发|咱们官方|我司|本司|我方|贵司|本团队|本公司)/i;
+const FIRST_PERSON_COMPANY_ASSET_PATTERN =
+  /(?:我们的|咱们的)(?:模型|产品|新模型|新产品|新功能|工具|插件|服务|平台|系统|API|接口|团队|公司|研发|业务|用户|会员|付费用户|免费额度|算力|开源|代码|权重|生态|安全防护|防护|分类器|科研计划)/i;
+const CLAUSE_FIRST_PERSON_COMPANY_ACTION_PATTERN =
+  /(?:^|[，。！？；：\s])(?:我们|咱们)(?:这次|这波|这回|这边|这里|最新|近日|今日|近期|目前|刚刚|正式|已经|已|也|还|直接|同步|正在|将会|计划|决定){0,3}(?:发布|推出|宣布|开源|开放|上线|更新|升级|下调|降价|涨价|调整|研发|打造|开发|训练|提供|新增|取消|解散|封禁|暂停|重置|限制|限流|宕机|回应|致歉|表态|整改|被起诉|被告|遭到|遭遇)/;
+const FIELD_LEADING_OWN_COMPANY_PATTERN = /^自家/;
+const EXPLICIT_OWN_COMPANY_PATTERN =
+  /(?:^|[，。！？；：\s])自家(?:公司|团队|业务|科研|销售|这次|这波)/;
+
+/** 检查口播与主播评论是否误用第一人称或内部口吻代表某家公司发言（忽略引号内的直接引语） */
+function checkCompanySpokespersonPhrases(
+  fields: Array<{ label: string; value: string }>,
+  errors: string[],
+): void {
+  for (const field of fields) {
+    const unquoted = field.value
+      .normalize('NFKC')
+      .replace(/“[^”]*”|"[^"]*"|「[^」]*」|『[^』]*』/g, '')
+      .trim();
+    if (!unquoted) {
+      continue;
+    }
+
+    const hit =
+      unquoted.match(COMPANY_TEAM_SELF_REF_PATTERN)?.[0] ??
+      unquoted.match(FIRST_PERSON_COMPANY_ASSET_PATTERN)?.[0] ??
+      unquoted.match(CLAUSE_FIRST_PERSON_COMPANY_ACTION_PATTERN)?.[0]?.trim() ??
+      unquoted.match(FIELD_LEADING_OWN_COMPANY_PATTERN)?.[0] ??
+      unquoted.match(EXPLICIT_OWN_COMPANY_PATTERN)?.[0]?.trim();
+    if (hit) {
+      errors.push(
+        `字段「${field.label}」疑似以第一人称或公司内部口吻代指新闻主体（"${hit}"）；主播仅为玩家根据模型二创的形象，不能代表任何公司发言，请改用具体公司或产品名称`,
+      );
+    }
+  }
+}
+
 /**
  * 对中文润色后的单条新闻定稿执行确定性规则检查：
  * 校验逐字引语是否在原文中真实存在、稿件里的阿拉伯数字是否有原文或依据支撑、
@@ -630,6 +668,9 @@ export function precheckPolishedItem(opts: {
   if (item.officialQuote) {
     draftFields.push({ label: 'officialQuote', value: item.officialQuote });
   }
+  if (item.imageCaption) {
+    draftFields.push({ label: 'imageCaption', value: item.imageCaption });
+  }
   if (item.metrics) {
     for (let i = 0; i < item.metrics.length; i++) {
       const m = item.metrics[i];
@@ -675,6 +716,9 @@ export function precheckPolishedItem(opts: {
     ['detail', item.detail, limits.detail],
     ['hostComment', item.hostComment, limits.hostComment],
   ];
+  if (item.imageCaption) {
+    lengthChecks.push(['imageCaption', item.imageCaption, 44]);
+  }
   for (const [label, value, maxChars] of lengthChecks) {
     const len = charLength(value);
     if (len > maxChars) {
@@ -693,8 +737,8 @@ export function precheckPolishedItem(opts: {
   }
 
   if (item.cards) {
-    if (item.cards.length > 8) {
-      errors.push(`信息卡片数量过多（${item.cards.length} > 8 张）`);
+    if (item.cards.length > 4) {
+      errors.push(`信息卡片数量过多（${item.cards.length} > 4 张），画面卡片太多观众来不及看`);
     }
     for (let i = 0; i < item.cards.length; i++) {
       const card = item.cards[i];
@@ -703,11 +747,11 @@ export function precheckPolishedItem(opts: {
       }
       const titleLen = charLength(card.title);
       const bodyLen = charLength(card.body);
-      if (titleLen > 16) {
-        errors.push(`第 ${i + 1} 张信息卡片小标题超出字数上限（${titleLen} > 16 字）`);
+      if (titleLen > 8) {
+        errors.push(`第 ${i + 1} 张信息卡片小标题超出字数上限（${titleLen} > 8 字）`);
       }
-      if (bodyLen > 80) {
-        errors.push(`第 ${i + 1} 张信息卡片正文超出字数上限（${bodyLen} > 80 字）`);
+      if (bodyLen > 28) {
+        errors.push(`第 ${i + 1} 张信息卡片正文超出字数上限（${bodyLen} > 28 字）`);
       }
     }
   }
@@ -727,18 +771,18 @@ export function precheckPolishedItem(opts: {
       item.keyPoints.some((point) => charLength(point) > 15)
     )
       errors.push('核心要点须为二到三条，每条不超过十五字');
-    if (!item.cards || item.cards.length < 2 || item.cards.length > 8) {
-      errors.push('信息卡片须为二到八张');
+    if (!item.cards || item.cards.length < 2 || item.cards.length > 4) {
+      errors.push('信息卡片须为二到四张');
     } else if (
       item.cards.some(
         (card) =>
           charLength(card.title) < 2 ||
-          charLength(card.title) > 12 ||
+          charLength(card.title) > 8 ||
           charLength(card.body) < 10 ||
-          charLength(card.body) > 56,
+          charLength(card.body) > 28,
       )
     ) {
-      errors.push('每张信息卡片小标题须为二到十二字，正文须为十到五十六字');
+      errors.push('每张信息卡片小标题须为二到八字，正文须为十到二十八字');
     }
     const total = item.narration.reduce((sum, sentence) => sum + charLength(sentence), 0);
     if (item.narration.length < 2 || item.narration.length > 5 || total < 40 || total > 140)
@@ -780,17 +824,14 @@ export function precheckPolishedItem(opts: {
     }
   }
 
-  // 4. 检查自我描述黑名单与主播禁用词
+  // 4. 检查自我描述黑名单、主播禁用词及代表公司发言措辞
+  const personaSpeechFields: Array<{ label: string; value: string }> = [
+    { label: 'hostComment', value: item.hostComment },
+    ...item.narration.map((line, idx) => ({ label: `narration[${idx}]`, value: line })),
+  ];
   checkMetaBlacklist(draftFields, metaTextBlacklist, errors);
-  checkForbiddenPersonaTokens(
-    [
-      { label: 'hostComment', value: item.hostComment },
-      ...item.narration.map((line, idx) => ({ label: `narration[${idx}]`, value: line })),
-    ],
-    opts.forbiddenTokens,
-    opts.hostSelfName,
-    errors,
-  );
+  checkForbiddenPersonaTokens(personaSpeechFields, opts.forbiddenTokens, opts.hostSelfName, errors);
+  checkCompanySpokespersonPhrases(personaSpeechFields, errors);
 
   // 5. 校验口播分句规则
   for (let i = 0; i < item.narration.length; i++) {
@@ -908,11 +949,11 @@ export function precheckIssuePackage(opts: {
       }
     }
     if (
-      /(?:我是|来自)[^，。！？]{1,15}(?:公司|旗下|出品)的|我是(?:谷歌|google|deepmind|openai|anthropic|深度求索|deepseek)[^，。！？]{0,8}的/i.test(
+      /(?:我是|来自|代表)[^，。！？]{1,15}(?:公司|旗下|出品|团队)的|(?:我是|来自|代表)[^，。！？]{0,10}(?:谷歌|google|deepmind|openai|anthropic|深度求索|deepseek)[^，。！？]{0,8}(?:的|家的)/i.test(
         introText,
       )
     ) {
-      errors.push('开场自我介绍直接报名字即可，不用说自己是哪个公司的');
+      errors.push('开场自我介绍直接报名字即可，不用说自己是哪个公司的，也不能代表任何公司发言');
     }
     const outroTotal = pkg.outro.narration.reduce((sum, line) => sum + charLength(line), 0);
     if (pkg.outro.narration.length > 2 || outroTotal > 55) {
@@ -936,6 +977,16 @@ export function precheckIssuePackage(opts: {
     }
   }
 
+  const descIntro = pkg.publish.descriptionIntro.trim();
+  if (
+    /https?:\/\/\S+/i.test(descIntro) ||
+    /(?:【\s*(?:参考|信息|消息)?来源\s*】|(?:参考来源|信息来源|消息来源|信源)\s*[:：])/.test(
+      descIntro,
+    )
+  ) {
+    errors.push('视频简介导览（publish.descriptionIntro）中不要包含信息来源、参考链接或 URL');
+  }
+
   const fields: Array<{ label: string; value: string }> = [
     { label: 'headline', value: pkg.headline },
     { label: 'leadSummary', value: pkg.leadSummary },
@@ -953,21 +1004,18 @@ export function precheckIssuePackage(opts: {
     ...pkg.intro.narration.map((s, idx) => ({ label: `intro.narration[${idx}]`, value: s })),
     ...pkg.outro.narration.map((s, idx) => ({ label: `outro.narration[${idx}]`, value: s })),
   ];
+  const personaSpeechFields: Array<{ label: string; value: string }> = [
+    { label: 'headline', value: pkg.headline },
+    { label: 'leadSummary', value: pkg.leadSummary },
+    { label: 'intro.hostComment', value: pkg.intro.hostComment },
+    { label: 'outro.hostComment', value: pkg.outro.hostComment },
+    { label: 'outro.cta', value: pkg.outro.cta },
+    ...pkg.intro.narration.map((s, idx) => ({ label: `intro.narration[${idx}]`, value: s })),
+    ...pkg.outro.narration.map((s, idx) => ({ label: `outro.narration[${idx}]`, value: s })),
+  ];
   checkMetaBlacklist(fields, metaTextBlacklist, errors);
-  checkForbiddenPersonaTokens(
-    [
-      { label: 'headline', value: pkg.headline },
-      { label: 'leadSummary', value: pkg.leadSummary },
-      { label: 'intro.hostComment', value: pkg.intro.hostComment },
-      { label: 'outro.hostComment', value: pkg.outro.hostComment },
-      { label: 'outro.cta', value: pkg.outro.cta },
-      ...pkg.intro.narration.map((s, idx) => ({ label: `intro.narration[${idx}]`, value: s })),
-      ...pkg.outro.narration.map((s, idx) => ({ label: `outro.narration[${idx}]`, value: s })),
-    ],
-    opts.forbiddenTokens,
-    opts.hostSelfName,
-    errors,
-  );
+  checkForbiddenPersonaTokens(personaSpeechFields, opts.forbiddenTokens, opts.hostSelfName, errors);
+  checkCompanySpokespersonPhrases(personaSpeechFields, errors);
 
   return {
     passed: errors.length === 0,

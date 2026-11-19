@@ -1,4 +1,5 @@
 import {
+  type ArticleMediaAsset,
   type EventRecord,
   type Settings,
   type SummaryDraft,
@@ -18,10 +19,11 @@ export interface LoadedEventArticle {
   publishedAt: string | null;
   text: string;
   imagePath: string | null;
+  mediaAssets: ArticleMediaAsset[];
   promptInput: ArticlePromptInput;
 }
 
-/** 读取某新闻事件关联的所有原始文章信息与磁盘缓存正文 */
+/** 读取某新闻事件关联的所有原始文章信息、磁盘缓存正文与候选视觉素材 */
 export async function loadEventArticles(
   ctx: CoreContext,
   event: EventRecord,
@@ -39,6 +41,24 @@ export async function loadEventArticles(
     const src = sourceById.get(article.sourceId);
     const sourceName = src?.name ?? article.sourceId;
     const tier = src?.tier ?? 3;
+    const mediaAssets: ArticleMediaAsset[] =
+      stored?.mediaAssets && stored.mediaAssets.length > 0
+        ? stored.mediaAssets
+        : article.imagePath
+          ? [
+              {
+                id: `${article.id}-legacy`,
+                articleId: article.id,
+                kind: 'screenshot',
+                imagePath: article.imagePath,
+                sourceUrl: article.canonicalUrl,
+                captionHint: article.title,
+                contextSnippet: article.excerpt ?? '',
+                score: 50,
+              },
+            ]
+          : [];
+
     result.set(article.id, {
       id: article.id,
       title: article.title,
@@ -47,6 +67,7 @@ export async function loadEventArticles(
       publishedAt: article.publishedAt,
       text,
       imagePath: article.imagePath,
+      mediaAssets,
       promptInput: {
         id: article.id,
         lang: article.lang,
@@ -59,6 +80,25 @@ export async function loadEventArticles(
   }
 
   return result;
+}
+
+/** 汇总同事件下所有关联文章提取出的候选视觉素材，去重并按价值分降序排列 */
+export function collectEventMediaPool(
+  articlesMap: ReadonlyMap<string, LoadedEventArticle>,
+  limit = 8,
+): ArticleMediaAsset[] {
+  const byImagePath = new Map<string, ArticleMediaAsset>();
+  for (const article of articlesMap.values()) {
+    for (const asset of article.mediaAssets) {
+      const existing = byImagePath.get(asset.imagePath);
+      if (!existing || asset.score > existing.score) {
+        byImagePath.set(asset.imagePath, asset);
+      }
+    }
+  }
+  return Array.from(byImagePath.values())
+    .sort((a, b) => b.score - a.score)
+    .slice(0, limit);
 }
 
 /** 将已加载的文章集合按字符上限组装为标准 `<article>` XML 片段 */

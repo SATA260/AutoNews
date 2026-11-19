@@ -9,14 +9,35 @@ export const EvidenceSchema = z.object({
 /** 原文依据条目类型 */
 export type Evidence = z.infer<typeof EvidenceSchema>;
 
+/** 把模型给出的分数收成 1 到 10。略微超出时压到 10；明显按百分制打分时再除以 10 */
+function normalizeTenPointScore(value: number): number {
+  let score = value;
+  if (score > 10 && score <= 100) {
+    score = score >= 20 ? score / 10 : 10;
+  }
+  if (score > 10) {
+    score = 10;
+  }
+  if (score < 1) {
+    score = 1;
+  }
+  return Math.round(score * 10) / 10;
+}
+
+/** 选题分数：允许模型偶尔按百分制打分，保存前统一折成 1 到 10 */
+const TenPointScoreSchema = z.number().transform((value) => normalizeTenPointScore(value));
+
 /** 将多篇报道同一事件的文章合并后得到的新闻候选事件 */
 export const SelectedEventCandidateSchema = z.object({
   title: z.string().min(1),
-  articleIds: z.array(z.string().min(1)).min(1),
+  articleIds: z.preprocess(
+    (value) => (typeof value === 'string' && value.trim() ? [value.trim()] : value),
+    z.array(z.string().min(1)).min(1),
+  ),
   category: z.string().min(1),
   entity: z.string().min(1),
-  score: z.number().min(1).max(10),
-  publicAppeal: z.number().min(1).max(10),
+  score: TenPointScoreSchema,
+  publicAppeal: TenPointScoreSchema,
   reason: z.string().min(1),
   duplicateOfHistory: z.boolean(),
 });
@@ -50,6 +71,7 @@ export const SummaryDraftSchema = z.object({
   availability: AvailabilitySchema,
   availabilityNote: z.string().min(1),
   evidence: z.array(EvidenceSchema).min(1),
+  eventOccurredAt: z.string().optional(),
 });
 /** 事实摘要草稿类型 */
 export type SummaryDraft = z.infer<typeof SummaryDraftSchema>;
@@ -62,20 +84,43 @@ export const MetricPairSchema = z.object({
 /** 关键数据指标类型 */
 export type MetricPair = z.infer<typeof MetricPairSchema>;
 
-/** 新闻信息卡片语义图标标识 */
+/**
+ * 新闻信息卡片语义图标标识（与视频模板的预置图标清单一致）。
+ * 最后两项 grid、clipboard-check 是旧版名称，只为兼容历史数据保留，新内容不再使用。
+ */
 export const InfoCardIconSchema = z.enum([
   'rocket',
-  'cpu',
-  'trending-down',
-  'zap',
-  'grid',
+  'smartphone',
+  'cloud',
   'gift',
-  'clipboard-check',
-  'users',
+  'brain',
+  'cpu',
+  'gauge',
+  'zap',
+  'database',
   'code',
+  'unlock',
+  'flask',
+  'trophy',
+  'banknote',
+  'coins',
+  'candlestick',
+  'trending-up',
+  'trending-down',
+  'building',
+  'users',
+  'user-minus',
+  'handshake',
+  'quote',
   'shield',
+  'gavel',
+  'landmark',
+  'alert',
   'globe',
+  'calendar',
   'sparkles',
+  'grid',
+  'clipboard-check',
 ]);
 /** 新闻信息卡片语义图标类型 */
 export type InfoCardIcon = z.infer<typeof InfoCardIconSchema>;
@@ -105,7 +150,9 @@ export function createPolishedItemSchema(keyPointsMax = 3) {
     summary: z.string().min(1),
     highlight: z.string().max(18).optional(),
     preferArticleImage: z.boolean().optional(),
-    imageCaption: z.string().max(36).optional(),
+    primaryMediaId: z.string().optional(),
+    secondaryMediaId: z.string().optional(),
+    imageCaption: z.string().max(44).optional(),
     cards: z.array(InfoCardSchema).max(8).optional(),
     keyPoints: z.array(z.string().min(1)).max(Math.max(1, keyPointsMax)),
     detail: z.string().min(1),
@@ -235,6 +282,14 @@ export const RunItemStatusSchema = z.enum([
 /** 单条新闻处理状态类型 */
 export type RunItemStatus = z.infer<typeof RunItemStatusSchema>;
 
+/** 单条新闻人工从候选图池中选定的主图与副图编号 */
+export const SelectedMediaOverrideSchema = z.object({
+  primary: z.string().nullable().optional(),
+  secondary: z.string().nullable().optional(),
+});
+/** 人工选定的候选图配置类型 */
+export type SelectedMediaOverride = z.infer<typeof SelectedMediaOverrideSchema>;
+
 /** 某期任务中单条新闻的完整处理记录 */
 export const RunItemRecordSchema = z.object({
   id: z.string().min(1),
@@ -247,6 +302,8 @@ export const RunItemRecordSchema = z.object({
   finalJson: PolishedItemSchema.nullable(),
   imageMode: z.enum(['auto', 'custom', 'none']).optional(),
   customImagePath: z.string().nullable().optional(),
+  secondaryCustomImagePath: z.string().nullable().optional(),
+  selectedMediaIds: SelectedMediaOverrideSchema.nullable().optional(),
   customImageCaption: z.string().nullable().optional(),
   updatedAt: z.string(),
 });

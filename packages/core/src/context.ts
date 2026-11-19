@@ -7,6 +7,10 @@ import type { CallRecord } from '@aidaily/model-runtime';
 import { TtsService } from '@aidaily/tts';
 import type { Logger } from 'pino';
 import pino from 'pino';
+import {
+  type CollectorBrowserDriver,
+  createPlaywrightCollectorDriver,
+} from './collector/browser-driver.js';
 import { resolveModelApiKey } from './config/api-credentials.js';
 import { loadSettings, loadSources } from './config/loader.js';
 import { NoopNotifier, type Notifier } from './notify/index.js';
@@ -109,6 +113,8 @@ export interface CoreContext {
   modelApi: ModelApi;
   tts: TtsService;
   now: () => Date;
+  /** 按需创建采集阶段使用的浏览器抓取与局部截图驱动 */
+  createCollectorDriver: () => CollectorBrowserDriver;
   /** 从磁盘重新读取并校验运行配置和信源清单（两份配置均通过校验后才替换内存引用） */
   reloadConfig: () => Promise<void>;
 }
@@ -122,6 +128,7 @@ export async function createCoreContext(opts?: {
   bridge?: CliBridge;
   tts?: TtsService;
   now?: () => Date;
+  createCollectorDriver?: () => CollectorBrowserDriver;
 }): Promise<CoreContext> {
   const rootDir = opts?.rootDir ?? findRepoRoot();
   const paths = resolveRepoPaths(rootDir);
@@ -153,6 +160,8 @@ export async function createCoreContext(opts?: {
   const notifier = opts?.notifier ?? new NoopNotifier();
   const fetchImpl = opts?.fetchImpl ?? globalThis.fetch;
   const now = opts?.now ?? (() => new Date());
+  const createCollectorDriver =
+    opts?.createCollectorDriver ?? (() => createPlaywrightCollectorDriver());
   const logCall = createLlmCallRecorder(paths, repos);
   const bridge =
     opts?.bridge ??
@@ -195,6 +204,7 @@ export async function createCoreContext(opts?: {
     modelApi,
     tts,
     now,
+    createCollectorDriver,
     /** 重新读取最新配置与信源列表，全部校验成功后原子更新内存快照与命令行桥接配置 */
     async reloadConfig() {
       const [nextSettings, nextSources] = await Promise.all([

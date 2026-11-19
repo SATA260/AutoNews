@@ -2,7 +2,7 @@
 
 import Image from 'next/image';
 import { useRouter } from 'next/navigation';
-import { useState, useTransition } from 'react';
+import { useEffect, useState, useTransition } from 'react';
 import { updateCoverAction } from '@/app/actions';
 import { buildArtifactUrl } from '@/components/run-detail/artifact-url';
 
@@ -13,9 +13,24 @@ const SOURCE_TEXT: Record<'manual' | 'package' | 'fallback', string> = {
   fallback: '由头条导语自动截取',
 };
 
-/** 统计封面文字字数：按完整字符计，不计用于高亮的星号 */
+/** 统计封面文字字数：按完整字符计，不计用于高亮的星号与换行符 */
 function coverLength(text: string): number {
-  return Array.from(text.trim().replace(/\*/g, '')).length;
+  return Array.from(
+    text
+      .trim()
+      .replace(/\\n/g, '')
+      .replace(/[*\r\n]/g, ''),
+  ).length;
+}
+
+/** 计算封面主标题的非空行数，用于校验手动换行次数 */
+function countTitleLines(text: string): number {
+  return text
+    .replace(/\r\n?/g, '\n')
+    .replace(/\\n/g, '\n')
+    .split('\n')
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0).length;
 }
 
 /** 封面编辑卡片：预览当前封面，修改主标题与副标题后只重新生成封面图片 */
@@ -40,6 +55,11 @@ export function CoverEditor({
   const [feedback, setFeedback] = useState<{ ok: boolean; text: string } | null>(null);
   const [pending, startTransition] = useTransition();
 
+  useEffect(() => {
+    setTitle(cover?.title ?? '');
+    setSubtitle(cover?.subtitle ?? '');
+  }, [cover?.title, cover?.subtitle]);
+
   if (!cover) {
     return (
       <section className="rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
@@ -50,8 +70,10 @@ export function CoverEditor({
   }
 
   const titleCount = coverLength(title);
+  const titleLines = countTitleLines(title);
   const subtitleCount = coverLength(subtitle);
   const titleOver = titleCount > cover.limits.titleMax;
+  const titleTooManyLines = titleLines > 3;
   const subtitleOver = subtitleCount > cover.limits.subtitleMax;
   const isDirty = title !== cover.title || subtitle !== cover.subtitle;
   // 用封面生成时间作为图片地址参数，保证重新出图后浏览器显示新图
@@ -104,20 +126,29 @@ export function CoverEditor({
         <form onSubmit={handleSubmit} className="space-y-4 lg:col-span-2">
           <label className="block space-y-1">
             <span className="flex items-center justify-between text-xs font-medium text-slate-700">
-              主标题（大字）
-              <span className={titleOver ? 'text-rose-600' : 'text-slate-400'}>
+              主标题（大字，支持按回车手动换行）
+              <span className={titleOver || titleTooManyLines ? 'text-rose-600' : 'text-slate-400'}>
                 {titleCount}/{cover.limits.titleMax}
+                {titleLines > 1 ? ` · ${titleLines}/3 行` : ''}
               </span>
             </span>
-            <input
+            <textarea
+              rows={2}
               value={title}
               onChange={(e) => setTitle(e.target.value)}
               disabled={!editable || pending}
-              className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm disabled:bg-slate-50"
+              placeholder={'例如：英伟达\n*停发*H200'}
+              className="w-full resize-none rounded-lg border border-slate-300 px-3 py-2 text-sm leading-snug disabled:bg-slate-50"
             />
             <span className="block text-[11px] text-slate-500">
-              用一对 *星号* 包住要高亮的词，如 GPT-6.2 *翻车了*
+              用一对 *星号* 包住要高亮的词，按回车可手动控制换行位置（最多 3 行，如
+              英伟达↵*停发*H200）
             </span>
+            {titleTooManyLines ? (
+              <span className="block text-[11px] text-rose-600">
+                封面主标题最多分 3 行（当前 {titleLines} 行）
+              </span>
+            ) : null}
           </label>
           <label className="block space-y-1">
             <span className="flex items-center justify-between text-xs font-medium text-slate-700">
@@ -136,14 +167,22 @@ export function CoverEditor({
           <button
             type="submit"
             disabled={
-              !editable || pending || !isDirty || !title.trim() || titleOver || subtitleOver
+              !editable ||
+              pending ||
+              !isDirty ||
+              !title.trim() ||
+              titleOver ||
+              titleTooManyLines ||
+              subtitleOver
             }
             className="rounded-lg bg-slate-900 px-4 py-2 text-xs font-medium text-white disabled:opacity-40"
           >
             {pending ? '正在重新生成封面…' : '保存并重新生成封面'}
           </button>
           {!editable ? (
-            <p className="text-xs text-slate-500">只有待审核、投稿失败或已发布的任务可以修改封面。</p>
+            <p className="text-xs text-slate-500">
+              只有待审核、投稿失败或已发布的任务可以修改封面。
+            </p>
           ) : (
             <p className="text-xs text-slate-500">只重新生成封面图片，不会重新合成视频。</p>
           )}

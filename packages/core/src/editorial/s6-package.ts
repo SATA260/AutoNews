@@ -14,7 +14,7 @@ import { lockRunBgm } from '../media/bgm.js';
 import { inTransaction } from '../storage/db.js';
 import { writeFileAtomic } from '../storage/files.js';
 import { invokeStageLlm } from './llm.js';
-import { getRunPersona } from './personas.js';
+import { formatPersonaForPrompt, getRunPersona } from './personas.js';
 import { precheckIssuePackage } from './prechecks.js';
 import { renderPromptTemplate } from './prompts.js';
 import { resolveContentLimits } from './s4-polish.js';
@@ -97,7 +97,7 @@ export async function runPackageStage(
 
   const persona = await getRunPersona(ctx, runId);
   const basePrompt = await renderPromptTemplate('s6-package.md', {
-    personaJson: persona ? JSON.stringify(persona, null, 2) : '无特定角色',
+    personaJson: formatPersonaForPrompt(persona, '无特定角色', { includeReactions: false }),
     date: dateStr,
     dateDisplay,
     issueNumber,

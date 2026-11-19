@@ -13,9 +13,10 @@ const LIMITS = {
   progressLabel: 12,
   title: 48,
   summary: 100,
-  cardsMaxCount: 8,
-  cardTitle: 16,
-  cardBody: 80,
+  // 画面最多同时展示 4 张卡片，正文建议不超过 28 字（超出时只会有提示，不会报错）
+  cardsMaxCount: 4,
+  cardTitle: 8,
+  cardBody: 28,
   keyPointsCount: 3,
   keyPoint: 32,
   imageCaption: 44,

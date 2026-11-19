@@ -17,7 +17,7 @@ export interface FetchFeedResult {
 }
 
 /** 支持响应取消信号的异步短暂等待函数 */
-async function sleepWithAbort(ms: number, signal?: AbortSignal): Promise<void> {
+export async function sleepWithAbort(ms: number, signal?: AbortSignal): Promise<void> {
   if (ms <= 0) {
     return;
   }

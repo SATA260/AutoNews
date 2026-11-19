@@ -127,18 +127,18 @@ button {
 .deck-canvas {
   width: 1920px;
   height: 1080px;
-  padding: 28px 64px 32px;
+  padding: 14px 28px 0;
   background-color: var(--bg-canvas);
   display: flex;
   flex-direction: column;
-  gap: 14px;
+  gap: 8px;
   position: relative;
   overflow: hidden;
 }
 
 .deck-canvas.has-subtitles {
-  padding: 14px 64px 48px;
-  gap: 8px;
+  padding: 10px 28px 0;
+  gap: 6px;
 }
 
 /* 顶部双层响应式章节进度导航栏 */
@@ -146,17 +146,17 @@ button {
   position: relative;
   z-index: 12;
   background: transparent;
-  height: 104px;
+  height: 96px;
   flex-shrink: 0;
   display: flex;
   flex-direction: column;
   justify-content: space-between;
-  gap: 10px;
+  gap: 8px;
   padding: 0;
 }
 
 .deck-header-meta {
-  height: 30px;
+  height: 28px;
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -249,7 +249,7 @@ button {
 }
 
 .deck-chapter-bar {
-  height: 64px;
+  height: 60px;
   width: 100%;
   display: flex;
   align-items: stretch;
@@ -361,25 +361,27 @@ button {
   color: var(--ink-muted);
 }
 
-/* 正文卡片舞台与翻页过渡 */
+/* 正文卡片舞台与翻页过渡（底边延伸至画面底部，含字幕时底部在信息板内留出干净字幕区） */
 .deck-slide-body {
   flex: 1;
   min-height: 0;
   position: relative;
-  border-radius: 16px;
+  border-radius: 16px 16px 0 0;
   border: 1px solid var(--line);
+  border-bottom: none;
   background: var(--sheet-underlay);
   box-shadow: var(--card-shadow);
   overflow: hidden;
 }
 
-/* 视频画布下方居中同步口播字幕槽 */
+/* 视频画布底部居中同步口播字幕槽（悬浮在信息显示板底部预留空区内） */
 .deck-subtitle-dock {
-  position: relative;
+  position: absolute;
+  left: 28px;
+  right: 28px;
+  bottom: 44px;
   z-index: 25;
   height: 96px;
-  width: 100%;
-  flex-shrink: 0;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -393,9 +395,9 @@ button {
   border-radius: 20px;
   overflow-wrap: anywhere;
   white-space: pre-line;
-  background: rgba(15, 18, 24, 0.9);
-  border: 1.5px solid rgba(255, 255, 255, 0.18);
-  box-shadow: 0 10px 26px rgba(10, 12, 16, 0.22);
+  background: rgba(11, 13, 18, 0.92);
+  border: 1.5px solid rgba(255, 255, 255, 0.2);
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.36);
   color: #ffffff;
   font-size: 40px;
   font-weight: 800;
@@ -443,12 +445,12 @@ button {
 .page-sheet-inner {
   width: 100%;
   height: 100%;
-  padding: 30px 48px 28px;
+  padding: 22px 32px 24px;
   overflow: hidden;
 }
 
 .deck-canvas.has-subtitles .page-sheet-inner {
-  padding: 22px 48px 18px;
+  padding: 18px 32px 158px;
 }
 
 .page-exit-dim {
@@ -459,7 +461,7 @@ button {
   opacity: 0;
 }
 
-/* 样式一（默认）：平稳纸张滑移过渡 */
+/* 样式二：平稳纸张滑移过渡 */
 .mode-glide.dir-next .page-sheet.is-entering {
   z-index: 4;
   border-left: 1px solid var(--line);
@@ -533,7 +535,7 @@ button {
   }
 }
 
-/* 样式二：柔和书页翻折过渡 */
+/* 样式三：柔和书页翻折过渡 */
 .mode-flip.dir-next .page-sheet.is-exiting {
   z-index: 4;
   transform-origin: 0% 50%;
@@ -605,41 +607,24 @@ button {
   }
 }
 
-/* 样式三：平滑叠化过渡 */
+/* 样式一（默认）：平滑渐变过渡（旧页垫底不动，新页纯透明度渐显，无位移） */
 .mode-fade.dir-next .page-sheet.is-exiting,
 .mode-fade.dir-prev .page-sheet.is-exiting {
   z-index: 2;
 }
 
-.mode-fade.dir-next .page-sheet.is-entering {
-  z-index: 4;
-  animation: fadeSlideInNext 0.4s cubic-bezier(0.22, 1, 0.36, 1) both;
-}
-
+.mode-fade.dir-next .page-sheet.is-entering,
 .mode-fade.dir-prev .page-sheet.is-entering {
   z-index: 4;
-  animation: fadeSlideInPrev 0.4s cubic-bezier(0.22, 1, 0.36, 1) both;
+  animation: pageCrossFadeIn 0.6s cubic-bezier(0.37, 0, 0.63, 1) both;
 }
 
-@keyframes fadeSlideInNext {
+@keyframes pageCrossFadeIn {
   0% {
     opacity: 0;
-    transform: translate3d(24px, 0, 0);
   }
   100% {
     opacity: 1;
-    transform: translate3d(0, 0, 0);
-  }
-}
-
-@keyframes fadeSlideInPrev {
-  0% {
-    opacity: 0;
-    transform: translate3d(-24px, 0, 0);
-  }
-  100% {
-    opacity: 1;
-    transform: translate3d(0, 0, 0);
   }
 }
 
@@ -735,7 +720,7 @@ button {
   flex-direction: column;
   height: 100%;
   min-height: 0;
-  padding-right: 236px;
+  padding-right: 156px;
   overflow: hidden;
 }
 
@@ -816,13 +801,14 @@ button {
 
 /* News Page Layout: Centered Headline + Rich Multi-Card Grid (Optional Split Image) */
 .news-editorial-layout {
+  position: relative;
   width: 100%;
   height: 100%;
   display: flex;
   flex-direction: column;
   gap: 14px;
   padding: 0;
-  overflow: hidden;
+  overflow: visible;
 }
 
 .deck-canvas.has-subtitles .news-editorial-layout {
@@ -830,7 +816,7 @@ button {
 }
 
 .news-editorial-layout.has-mascot {
-  padding-right: 232px;
+  padding-right: 160px;
 }
 
 .news-editorial-layout.no-mascot {
@@ -838,6 +824,8 @@ button {
 }
 
 .news-slide-top {
+  position: relative;
+  z-index: 1;
   display: flex;
   flex-direction: column;
   gap: 8px;
@@ -903,39 +891,49 @@ button {
   flex: 1;
   min-height: 0;
   display: grid;
-  grid-template-columns: minmax(0, 56fr) minmax(0, 44fr);
+  grid-template-columns: minmax(0, 54fr) minmax(0, 46fr);
   gap: 24px;
-  overflow: hidden;
+  overflow: visible;
 }
 
 .news-cards-pane {
+  position: relative;
+  z-index: 1;
   height: 100%;
   min-height: 0;
   display: flex;
   flex-direction: column;
   justify-content: center;
   overflow: hidden;
+  transform: translate3d(calc(var(--spotlight-p, 0) * -14px), 0, 0);
 }
 
+/* 图片从右向左动态展开时用于柔和压暗底层标题与卡片的遮罩层 */
+.image-spotlight-scrim {
+  position: absolute;
+  inset: -24px -36px -166px -36px;
+  z-index: 6;
+  pointer-events: none;
+  background: var(--paper);
+  opacity: calc(var(--spotlight-p, 0) * 0.94);
+}
+
+/* 信息卡片网格：行高跟着内容走，整组在区域内垂直居中，同一行的卡片等高；预留内边距防止高亮描边和投影被外框裁掉 */
 .news-cards-grid {
   width: 100%;
-  height: 100%;
-  max-height: 620px;
+  height: auto;
+  max-height: 100%;
   margin: auto 0;
+  padding: 10px 8px 22px;
   display: grid;
-  gap: 18px;
-  grid-auto-rows: minmax(0, 1fr);
+  gap: 20px;
+  grid-auto-rows: auto;
+  align-content: center;
   overflow: hidden;
 }
 
-.news-cards-grid.is-single-row {
-  height: auto;
-  min-height: 290px;
-  max-height: 360px;
-}
-
 .news-cards-grid.cols-1 {
-  grid-template-columns: minmax(0, 760px);
+  grid-template-columns: minmax(0, 820px);
   justify-content: center;
 }
 
@@ -952,29 +950,44 @@ button {
 }
 
 .news-cards-grid.is-split-cards {
-  max-height: 100%;
-  gap: 14px;
+  padding: 8px 6px 16px;
+  gap: 16px;
+}
+
+.news-cards-grid.is-split-cards.cols-1 {
+  grid-template-columns: minmax(0, 1fr);
 }
 
 .news-info-card {
-  height: 100%;
-  min-height: 0;
+  /* 高亮强度（0~1），由播放进度逐帧算出，用来平滑过渡边框、阴影和图标徽章的颜色 */
+  --card-focus: 0;
+  min-height: 210px;
   background: var(--card-surface);
-  border: 1px solid var(--card-border);
-  border-radius: 16px;
-  box-shadow: var(--card-soft-shadow);
-  padding: 24px 24px;
+  border: 1.5px solid
+    color-mix(in srgb, var(--card-accent) calc(var(--card-focus) * 100%), var(--card-border));
+  border-radius: 18px;
+  box-shadow:
+    var(--card-soft-shadow),
+    0 0 0 calc(var(--card-focus) * 3px) color-mix(in srgb, var(--card-accent) 18%, transparent),
+    0 calc(var(--card-focus) * 14px) calc(var(--card-focus) * 32px)
+    color-mix(in srgb, var(--card-accent) 16%, transparent);
+  padding: 26px 28px 24px;
   display: flex;
   flex-direction: column;
-  gap: 14px;
+  gap: 16px;
   overflow: hidden;
   --card-accent: var(--card-accent-coral);
 }
 
+.news-info-card.is-pending {
+  pointer-events: none;
+}
+
 .news-cards-grid.is-split-cards .news-info-card {
-  padding: 16px 20px;
-  border-radius: 14px;
-  gap: 10px;
+  min-height: 0;
+  padding: 18px 22px;
+  border-radius: 16px;
+  gap: 12px;
 }
 
 .news-info-card[data-accent="coral"] {
@@ -996,32 +1009,49 @@ button {
 .info-card-head {
   display: flex;
   align-items: center;
-  gap: 10px;
-  color: var(--card-accent);
+  gap: 14px;
   flex-shrink: 0;
+  min-width: 0;
 }
 
+/* 左上角图标徽章：浅色强调底 + 强调色图标；高亮时变成实心强调色、图标反白 */
 .info-card-icon {
+  width: 48px;
+  height: 48px;
+  border-radius: 12px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  color: var(--card-accent);
   flex-shrink: 0;
+  background: color-mix(
+    in srgb,
+    var(--card-accent) calc(14% + var(--card-focus) * 86%),
+    transparent
+  );
+  color: color-mix(in srgb, var(--card-surface) calc(var(--card-focus) * 100%), var(--card-accent));
+}
+
+.news-cards-grid.is-split-cards .info-card-icon {
+  width: 40px;
+  height: 40px;
+  border-radius: 10px;
 }
 
 .info-card-title {
   margin: 0;
-  font-size: 27px;
+  min-width: 0;
+  font-size: 28px;
   font-weight: 800;
   line-height: 1.2;
-  color: var(--card-accent);
+  letter-spacing: 0.01em;
+  color: var(--ink);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
 
 .news-cards-grid.is-split-cards .info-card-title {
-  font-size: 24px;
+  font-size: 25px;
 }
 
 .info-card-body {
@@ -1029,9 +1059,23 @@ button {
   font-weight: 500;
   color: var(--ink-secondary);
   letter-spacing: 0.01em;
+  /* 避免末行只剩一两个字；中文与英文、数字之间自动留出细间距（浏览器不支持时自动忽略） */
+  text-wrap: pretty;
+  text-autospace: normal;
+  line-break: strict;
+}
+
+/* 正文里的关键数字：强调色加粗、等宽数字，并且和单位一起不折行 */
+.card-figure {
+  color: var(--card-accent);
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
 }
 
 .news-source-footer {
+  position: relative;
+  z-index: 1;
   margin-top: auto;
   padding-top: 10px;
   border-top: 1.5px solid var(--line);
@@ -1054,44 +1098,61 @@ button {
   font-family: var(--font-mono);
 }
 
-/* 右侧官方配图引用栏（看板娘安全通道已在父级容器预留） */
+/* 右侧官方配图引用栏（锚定右缘，支持随播放进度从右向左展开铺满整块信息板） */
 .news-reference-col {
+  position: relative;
   height: 100%;
   min-height: 0;
   display: flex;
   flex-direction: column;
   justify-content: center;
   padding-right: 0;
-  overflow: hidden;
+  overflow: visible;
+}
+
+.news-reference-col.is-spotlight-active {
+  z-index: 12;
 }
 
 .official-plate-figure {
+  --spotlight-p: 0;
+  --expand-left-px: 0px;
+  --expand-top-px: 0px;
+  --expand-bottom-px: 0px;
   margin: 0;
-  width: 100%;
-  height: 100%;
+  position: absolute;
+  right: 0;
+  left: calc(-1 * var(--expand-left-px) * var(--spotlight-p));
+  top: calc(-1 * var(--expand-top-px) * var(--spotlight-p));
+  bottom: calc(-1 * var(--expand-bottom-px) * var(--spotlight-p));
   display: flex;
   flex-direction: column;
-  gap: 14px;
-  overflow: hidden;
+  gap: calc(14px - var(--spotlight-p) * 4px);
+  overflow: visible;
+}
+
+.official-plate-figure.is-manual-toggleable {
+  cursor: pointer;
+  transition:
+    left 0.48s cubic-bezier(0.65, 0, 0.35, 1),
+    top 0.48s cubic-bezier(0.65, 0, 0.35, 1),
+    bottom 0.48s cubic-bezier(0.65, 0, 0.35, 1);
 }
 
 .official-plate-frame {
   flex: 1;
   min-height: 0;
   background: var(--plate);
-  border: 1px solid var(--line);
-  border-radius: 6px;
-  padding: 20px;
+  border: 1.5px solid
+    color-mix(in srgb, var(--host-accent, #167cb8) calc(var(--spotlight-p, 0) * 52%), var(--line));
+  border-radius: calc(8px + var(--spotlight-p, 0) * 8px);
+  box-shadow: 0 calc(var(--spotlight-p, 0) * 18px) calc(var(--spotlight-p, 0) * 48px)
+    rgba(0, 0, 0, calc(var(--spotlight-p, 0) * 0.36));
+  padding: calc(16px - var(--spotlight-p, 0) * 4px);
   display: flex;
   align-items: center;
   justify-content: center;
   overflow: hidden;
-}
-
-.official-plate-frame.is-two-up {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 16px;
 }
 
 .official-media-slot {
@@ -1115,9 +1176,14 @@ button {
 .official-plate-caption {
   height: 32px;
   flex-shrink: 0;
-  font-size: 19px;
+  font-size: calc(19px + var(--spotlight-p, 0) * 3px);
   font-weight: 600;
-  color: var(--ink-muted);
+  color: color-mix(
+    in srgb,
+    var(--ink-secondary) calc(var(--spotlight-p, 0) * 100%),
+    var(--ink-muted)
+  );
+  text-align: left;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -1198,7 +1264,7 @@ button {
   display: flex;
   flex-direction: column;
   gap: 18px;
-  padding: 0 236px 0 0;
+  padding: 0 156px 0 0;
   overflow: hidden;
 }
 
@@ -1312,13 +1378,13 @@ button {
   padding-top: 6px;
 }
 
-/* 右下角大尺寸贴底破框看板娘舞台（300 × 420） */
+/* 右下角贴底破框看板娘舞台（280 × 290，高个角色仅展示大腿中部及以上） */
 .corner-mascot-dock {
   position: absolute;
-  right: 28px;
+  right: -4px;
   bottom: 0px;
-  width: 300px;
-  height: 420px;
+  width: 280px;
+  height: 290px;
   pointer-events: none;
   z-index: 20;
   display: flex;
@@ -1396,9 +1462,9 @@ button {
 
 .corner-mascot-dock.is-tall-presenter .corner-mascot-img {
   width: 100%;
-  height: 98%;
-  object-fit: contain;
-  object-position: bottom center;
+  height: 100%;
+  object-fit: cover;
+  object-position: top center;
 }
 
 .corner-mascot-monogram {

@@ -148,6 +148,9 @@ export function formatRunDetailText(
     `当前阶段: ${detail.currentStage ?? '-'}`,
     `条数 / 尝试次数: ${detail.itemCount} 条 / 第 ${detail.attempt} 次`,
     `触发方式: ${detail.trigger}${detail.scheduleId ? ` (${detail.scheduleId})` : ''}`,
+    ...(detail.notBeforeAt
+      ? [`最早新闻时间下限: ${formatTimestampInTz(detail.notBeforeAt, timezone)}`]
+      : []),
     `创建时间: ${formatTimestampInTz(detail.createdAt, timezone)}`,
     `开始时间: ${formatTimestampInTz(detail.startedAt, timezone)}`,
     `结束时间: ${formatTimestampInTz(detail.finishedAt, timezone)}`,
@@ -237,12 +240,12 @@ export function formatSourcesTable(sources: SourceHealth[], timezone: string): s
     return '暂无信源配置。';
   }
   return renderTable(
-    ['ID', '名称', '启用', '池/级别', '健康', '连续失败', '最近抓取', '最近错误'],
+    ['ID', '名称', '启用', '池/级别/协议', '健康', '连续失败', '最近抓取', '最近错误'],
     sources.map((s) => [
       s.source.id,
       s.source.name,
       s.source.enabled ? '是' : '否',
-      `${s.source.pool}/${s.source.tier}`,
+      `${s.source.pool}/T${s.source.tier}/${s.source.kind}`,
       s.healthy ? '正常' : '异常',
       String(s.state?.consecutiveFailures ?? 0),
       formatTimestampInTz(s.state?.lastFetchedAt, timezone),
@@ -270,18 +273,40 @@ export function formatSourceTestText(res: SourceTestResult): string {
   return lines.join('\n');
 }
 
+/** 将定时任务的新闻时间过滤策略转换为简洁展示文本 */
+function formatScheduleCutoffLabel(job: ScheduleJob): string {
+  if (job.cutoffMode === 'since_last_published') {
+    return '上次发布后';
+  }
+  if (job.cutoffMode === 'hours') {
+    return `近 ${job.maxAgeHours ?? '-'}h`;
+  }
+  return '默认窗口';
+}
+
 /** 格式化定时任务清单表格 */
 export function formatSchedulesTable(jobs: ScheduleJob[], timezone: string): string {
   if (jobs.length === 0) {
     return '暂无定时任务。请使用 `aidaily schedule create --time <HH:mm> -n <条数>` 新建。';
   }
   return renderTable(
-    ['任务 ID', '名称', '每日时间', '条数', '启用', '系统安装', '下次触发时间', '最近运行'],
+    [
+      '任务 ID',
+      '名称',
+      '每日时间',
+      '条数',
+      '时间下限',
+      '启用',
+      '系统安装',
+      '下次触发时间',
+      '最近运行',
+    ],
     jobs.map((j) => [
       j.id,
       j.name,
       j.time,
       String(j.itemCount),
+      formatScheduleCutoffLabel(j),
       j.enabled ? '启用' : '停用',
       j.installed ? '已挂载' : '未挂载',
       formatTimestampInTz(j.nextRunAt, timezone),

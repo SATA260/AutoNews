@@ -4,6 +4,7 @@ import { collectSources } from '../collector/index.js';
 import type { CoreContext } from '../context.js';
 import { PipelineError } from '../errors.js';
 import { inTransaction } from '../storage/db.js';
+import { emitRunEvent } from '../workflow/events.js';
 import { chooseHost, loadPersonas } from './personas.js';
 import { runRefillRound } from './refill.js';
 import { selectCandidateEvents } from './selection-core.js';
@@ -19,8 +20,8 @@ export interface SelectCheckpoint {
 
 /**
  * 执行新闻聚类选题与占用阶段：
- * 先幂等清理本期既往选题与占用的文章，从默认时效候选池筛选主选与替补事件并锁定文章；
- * 若候选事件不足目标条数，自动触发多轮备用源与放宽时间窗补充，仍不足时以 `insufficient_items` 失败退出。
+ * 先幂等清理本期既往选题与占用的文章，在默认时效或设定的最早时间限制内筛选主选与替补事件并锁定文章；
+ * 若候选事件不足目标条数，在严守最早时间限制的前提下触发备用信源补充，设定硬性时间下限时宁少勿滥绝不越界回溯。
  */
 export async function runSelectStage(
   ctx: CoreContext,
@@ -33,6 +34,9 @@ export async function runSelectStage(
     throw new Error(`未找到任务记录: ${runId}`);
   }
   const itemCount = run.itemCount;
+  const notBeforeAt = run.notBeforeAt ?? null;
+  const notBeforeMs = notBeforeAt ? Date.parse(notBeforeAt) : Number.NaN;
+  const hasCutoff = !Number.isNaN(notBeforeMs);
 
   // 幂等重跑前置清理：先释放本期旧的文章占用并清空旧事件与条目
   inTransaction(ctx.db, () => {
@@ -40,9 +44,12 @@ export async function runSelectStage(
     ctx.repos.events.deleteByRun(runId);
   });
 
-  const sinceIso = new Date(
-    ctx.now().getTime() - settings.issue.freshnessHours * 3600_000,
-  ).toISOString();
+  const defaultSinceMs = ctx.now().getTime() - settings.issue.freshnessHours * 3600_000;
+  const maxLookbackMs = ctx.now().getTime() - settings.issue.refill.maxLookbackHours * 3600_000;
+  const sinceIso = hasCutoff
+    ? new Date(notBeforeMs).toISOString()
+    : new Date(defaultSinceMs).toISOString();
+  const initialIncludeExpired = hasCutoff && notBeforeMs < maxLookbackMs;
   const targetCount = itemCount * settings.issue.reserveFactor;
 
   let initialSelection = await selectCandidateEvents({
@@ -50,7 +57,8 @@ export async function runSelectStage(
     runId,
     settings,
     sinceIso,
-    includeExpired: false,
+    notBeforeAt,
+    includeExpired: initialIncludeExpired,
     targetCount,
     itemCount,
     signal,
@@ -73,7 +81,8 @@ export async function runSelectStage(
       runId,
       settings,
       sinceIso,
-      includeExpired: false,
+      notBeforeAt,
+      includeExpired: initialIncludeExpired,
       targetCount,
       itemCount,
       signal,
@@ -168,6 +177,14 @@ export async function runSelectStage(
     if (signal?.aborted) {
       throw new DOMException('已取消', 'AbortError');
     }
+    // 已设定的最早时间已卡死或比默认时效更紧时，仅首轮允许启用备用信源抓取，后续轮次不再向更早时间扩窗
+    if (
+      hasCutoff &&
+      notBeforeMs >= defaultSinceMs &&
+      (round > 1 || !settings.issue.refill.useBackupSources)
+    ) {
+      break;
+    }
     refillRoundsUsed = round;
     const refillRes = await runRefillRound({
       ctx,
@@ -176,6 +193,7 @@ export async function runSelectStage(
       neededCount: itemCount - allEvents.length,
       itemCount,
       settings,
+      notBeforeAt,
       usedArticleIds,
       existingEventCount: allEvents.length,
       signal,
@@ -184,7 +202,24 @@ export async function runSelectStage(
     allItems.push(...refillRes.addedItems);
   }
 
-  if (settings.issue.minScore === undefined && allEvents.length < itemCount) {
+  if (hasCutoff) {
+    if (allEvents.length === 0) {
+      throw new PipelineError(
+        'insufficient_items',
+        `在设定的最早新闻时间（${notBeforeAt}）之后未找到符合条件的新闻事件，请适当放宽最早时间后再试`,
+      );
+    }
+    if (allEvents.length < itemCount) {
+      emitRunEvent(ctx, {
+        runId,
+        level: 'info',
+        stage: 'select',
+        type: 'cutoff_partial_selection',
+        message: `在设定的最早时间之后共选出 ${allEvents.length} 条可用事件（少于上限 ${itemCount} 条），坚持宁缺毋滥原则不回溯更早旧闻`,
+        data: { notBeforeAt, selectedCount: allEvents.length, itemCount },
+      });
+    }
+  } else if (settings.issue.minScore === undefined && allEvents.length < itemCount) {
     throw new PipelineError(
       'insufficient_items',
       `候选新闻事件不足：目标 ${itemCount} 条，经 ${refillRoundsUsed} 轮补充后仍仅有 ${allEvents.length} 条`,

@@ -134,7 +134,7 @@ export const DataInspectorDrawer: React.FC<DataInspectorDrawerProps> = ({
           body: '补充参数规模、上下文长度、延迟表现或其他关键技术指标。',
         },
         {
-          icon: 'grid',
+          icon: 'cloud',
           title: '平台与入口',
           body: '说明支持的访问平台、客户端、开发接口或开源仓库地址。',
         },

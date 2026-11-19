@@ -3,7 +3,13 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
-import { loadSettings, loadSources, updateSettingsFile, updateSourcesFile } from '../src/index.js';
+import {
+  loadSettings,
+  loadSources,
+  resolveRenderTheme,
+  updateSettingsFile,
+  updateSourcesFile,
+} from '../src/index.js';
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..', '..');
 const tempDirs: string[] = [];
@@ -80,5 +86,30 @@ describe('config loader and comment-preserving writer', () => {
     const badYaml = path.join(tmpDir, 'broken.yaml');
     await fs.writeFile(badYaml, 'version: 1\n  bad_indent: [1, 2', 'utf8');
     await expect(updateSettingsFile(badYaml, { timezone: 'UTC' })).rejects.toThrow(/语法错误/);
+  });
+
+  it('defaults video template theme to dark and validates light/dark theme settings', async () => {
+    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'aidaily-cfg-theme-'));
+    tempDirs.push(tmpDir);
+    const settingsPath = path.join(tmpDir, 'settings.yaml');
+    await fs.copyFile(path.join(REPO_ROOT, 'config', 'settings.yaml'), settingsPath);
+
+    const loaded = await loadSettings(settingsPath);
+    expect(loaded.render.theme).toBe('dark');
+    expect(resolveRenderTheme(loaded.render)).toBe('dark');
+    expect(resolveRenderTheme({})).toBe('dark');
+    expect(resolveRenderTheme({ theme: 'light' })).toBe('light');
+
+    const switched = await updateSettingsFile(settingsPath, {
+      render: { theme: 'light' },
+    });
+    expect(switched.render.theme).toBe('light');
+    expect(resolveRenderTheme(switched.render)).toBe('light');
+
+    await expect(
+      updateSettingsFile(settingsPath, {
+        render: { theme: 'sepia' as unknown as 'dark' },
+      }),
+    ).rejects.toThrow(/更新配置校验失败/);
   });
 });

@@ -226,9 +226,28 @@ export function createArticlesRepo(db: DatabaseSync) {
       return rows.map(mapArticle);
     },
 
-    /** 按发布时间窗口筛选可供选题使用的候选文章列表 */
-    listCandidates(sinceIso: string, includeExpired = false): Article[] {
+    /** 按发布时间窗口筛选可供选题使用的候选文章列表（开启严格下限校验时不再用采集时间覆盖明确更早的发布时间） */
+    listCandidates(
+      sinceIso: string,
+      includeExpired = false,
+      opts?: { strictNotBefore?: boolean },
+    ): Article[] {
       const allowedStatuses = includeExpired ? "('new', 'expired')" : "('new')";
+      if (opts?.strictNotBefore) {
+        const rows = db
+          .prepare(`
+            SELECT * FROM articles
+            WHERE status IN ${allowedStatuses}
+              AND extract_status IN ('ok', 'feed_only')
+              AND (
+                (published_at IS NOT NULL AND published_at >= ?)
+                OR (published_at IS NULL AND first_seen_at >= ?)
+              )
+            ORDER BY COALESCE(published_at, first_seen_at) DESC
+          `)
+          .all(sinceIso, sinceIso) as unknown as ArticleRow[];
+        return rows.map(mapArticle);
+      }
       const rows = db
         .prepare(`
           SELECT * FROM articles
@@ -239,6 +258,94 @@ export function createArticlesRepo(db: DatabaseSync) {
         `)
         .all(sinceIso) as unknown as ArticleRow[];
       return rows.map(mapArticle);
+    },
+
+    /** 查询指定时间范围内已入库的最新文章样本，用于判断二手报道是否源自早于最早时间的一手旧闻 */
+    listRecentForOriginCheck(sinceIso: string, beforeIso: string, limit = 300): Article[] {
+      const safeLimit = clampLimit(limit, 500);
+      const rows = db
+        .prepare(`
+          SELECT * FROM articles
+          WHERE published_at IS NOT NULL
+            AND published_at >= ?
+            AND published_at < ?
+          ORDER BY published_at DESC
+          LIMIT ?
+        `)
+        .all(sinceIso, beforeIso, safeLimit) as unknown as ArticleRow[];
+      return rows.map(mapArticle);
+    },
+
+    /** 查询指定时间点之后已消费播出的近期文章记录，用于辅助防止跨期重复选题 */
+    listRecentConsumed(sinceIso: string, limit = 300): Article[] {
+      const safeLimit = clampLimit(limit, 500);
+      const rows = db
+        .prepare(`
+          SELECT * FROM articles
+          WHERE status = 'consumed'
+            AND COALESCE(published_at, first_seen_at) >= ?
+          ORDER BY COALESCE(published_at, first_seen_at) DESC
+          LIMIT ?
+        `)
+        .all(sinceIso, safeLimit) as unknown as ArticleRow[];
+      return rows.map(mapArticle);
+    },
+
+    /** 检查指定信源是否存在尚处于回溯窗口内但此前详情抽取失败的待选文章 */
+    hasRecentFailedForSource(sourceId: string, sinceIso: string): boolean {
+      const row = db
+        .prepare(`
+          SELECT 1 AS found FROM articles
+          WHERE source_id = ?
+            AND status = 'new'
+            AND extract_status = 'failed'
+            AND COALESCE(published_at, first_seen_at) >= ?
+          LIMIT 1
+        `)
+        .get(sourceId, sinceIso) as { found: number } | undefined;
+      return Boolean(row?.found);
+    },
+
+    /** 对此前详情抓取失败的待选文章执行原地正文与配图元信息补全升级 */
+    upgradeFailedExtraction(article: {
+      id: string;
+      title: string;
+      titleNorm: string;
+      publishedAt: string | null;
+      excerpt: string | null;
+      contentPath: string | null;
+      contentChars: number | null;
+      imagePath: string | null;
+      extractStatus: ExtractStatus;
+    }): boolean {
+      if (article.extractStatus === 'failed') {
+        return false;
+      }
+      const res = db
+        .prepare(`
+          UPDATE articles
+          SET title = ?,
+              title_norm = ?,
+              published_at = COALESCE(?, published_at),
+              excerpt = ?,
+              content_path = ?,
+              content_chars = ?,
+              image_path = ?,
+              extract_status = ?
+          WHERE id = ? AND status = 'new' AND extract_status = 'failed'
+        `)
+        .run(
+          article.title,
+          article.titleNorm,
+          article.publishedAt,
+          article.excerpt,
+          article.contentPath,
+          article.contentChars,
+          article.imagePath,
+          article.extractStatus,
+          article.id,
+        );
+      return Number(res.changes) > 0;
     },
 
     /** 将选中的文章在事务内全部标记为被指定期次占用，避免被其他期次重复挑选 */

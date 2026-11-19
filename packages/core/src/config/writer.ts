@@ -134,6 +134,9 @@ export async function updateSourcesFile(filePath: string, sources: SourceDef[]):
         const existingNode = existingById.get(src.id);
         if (existingNode && isMap(existingNode)) {
           for (const [k, v] of Object.entries(src)) {
+            if (v === undefined) {
+              continue;
+            }
             if (existingNode.get(k) !== v) {
               existingNode.set(k, v);
             }

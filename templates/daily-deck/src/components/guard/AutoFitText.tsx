@@ -11,6 +11,8 @@ interface AutoFitTextProps {
   as?: 'h1' | 'h2' | 'h3' | 'p' | 'div';
   className?: string;
   style?: React.CSSProperties;
+  /** 可选的富文本渲染方式（例如给数字加强调）；字号测量仍以 text 为准 */
+  renderContent?: (text: string) => React.ReactNode;
 }
 
 /** 在给定字号区间内自动缩小字体并按最大行数截断，防止长文案撑破版面 */
@@ -23,6 +25,7 @@ export const AutoFitText: React.FC<AutoFitTextProps> = ({
   as = 'div',
   className = '',
   style,
+  renderContent,
 }) => {
   const ref = useRef<HTMLElement | null>(null);
   const [fontSize, setFontSize] = useState<number>(maxFontSize);
@@ -67,7 +70,7 @@ export const AutoFitText: React.FC<AutoFitTextProps> = ({
         wordBreak: 'break-word',
       }}
     >
-      {text}
+      {renderContent ? renderContent(text) : text}
     </Component>
   );
 };

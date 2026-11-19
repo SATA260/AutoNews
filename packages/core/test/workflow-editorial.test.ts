@@ -15,6 +15,8 @@ import {
   editSettingsFile,
   executeRun,
   getRunRetryOptions,
+  isEventOlderThanCutoff,
+  normalizeTitle,
   type PackageCheckpoint,
   type PipelineError,
   readJsonOrNull,
@@ -22,6 +24,7 @@ import {
   resumeRun,
   retryRunItem,
   retryRunItems,
+  selectCandidateEvents,
   updateSettingsFile,
   updateSourcesFile,
 } from '../src/index.js';
@@ -1454,4 +1457,686 @@ describe('editorial workflow, TTS timeline, interruption recovery, and retry eng
       await core.close();
     }
   }, 180_000);
+
+  it('enforces notBeforeAt across selection, refill, origin checks, and partial convergence without falling back to older news', async () => {
+    const { rootDir, scriptFile } = await setupWorkflowWorkspace();
+    const now = new Date('2026-11-16T12:00:00.000Z');
+    const cutoffIso = '2026-11-16T06:00:00.000Z';
+
+    // 校验跨时区纯日期宽限规则：北京时间 2026-11-16 00:00 (= 2026-11-15T16:00Z)，2026-11-15 日期事件允许保留，2026-11-14 事件必定判旧
+    expect(isEventOlderThanCutoff('2026-11-15', '2026-11-15T16:00:00.000Z')).toBe(false);
+    expect(isEventOlderThanCutoff('2026-11-14', '2026-11-15T16:00:00.000Z')).toBe(true);
+    expect(isEventOlderThanCutoff('2026-11-16T05:59:59Z', cutoffIso)).toBe(true);
+    expect(isEventOlderThanCutoff('2026-11-16T06:00:00Z', cutoffIso)).toBe(false);
+
+    const freshArticle = {
+      slug: 'fresh-only',
+      title: 'Anthropic 发布代码生成模型微调版本',
+      pubDate: 'Mon, 16 Nov 2026 09:00:00 GMT',
+      body: 'Anthropic 今天上线全新代码推理模型升级，大幅降低函数重构延迟并全面开放接口访问。',
+    };
+    const delayedRewrite = {
+      slug: 'delayed-rewrite',
+      title: 'DeepSeek 正式发布开源新一代推理优化框架实测',
+      pubDate: 'Mon, 16 Nov 2026 08:30:00 GMT',
+      body: '多家媒体回顾并整理报道 DeepSeek 此前已发布的开源新一代推理优化框架性能表现。',
+    };
+    const exactRepost = {
+      slug: 'exact-repost',
+      title: 'DeepSeek 正式发布开源新一代推理优化框架！',
+      pubDate: 'Mon, 16 Nov 2026 08:45:00 GMT',
+      body: '转载汇总 DeepSeek 正式发布开源新一代推理优化框架的旧稿全文。',
+    };
+    const oldBackupCandidate = {
+      slug: 'old-backup',
+      title: '早期行业峰会筹备消息',
+      pubDate: 'Sat, 14 Nov 2026 12:00:00 GMT',
+      body: '上周预热的一则普通算力峰会日程公告，发布于设定时间门槛之前。',
+    };
+
+    const freshId = computeArticleId('https://primary.example.com/fresh-only');
+    const delayedId = computeArticleId('https://primary.example.com/delayed-rewrite');
+    const exactRepostId = computeArticleId('https://primary.example.com/exact-repost');
+
+    await fs.writeFile(
+      scriptFile,
+      JSON.stringify({
+        rules: [
+          {
+            stage: 'select',
+            contains: [
+              '最早时间之前已入库的相关来源参考',
+              'DeepSeek 正式发布开源新一代推理优化框架',
+              'DeepSeek 正式发布开源新一代推理优化框架实测',
+              freshId,
+            ],
+            actions: [
+              {
+                output: {
+                  events: [
+                    {
+                      title: freshArticle.title,
+                      articleIds: [freshId],
+                      category: '大模型',
+                      entity: 'Anthropic',
+                      score: 9,
+                      publicAppeal: 8.5,
+                      reason: '全新代码生成模型微调版本',
+                      duplicateOfHistory: false,
+                    },
+                    {
+                      title: delayedRewrite.title,
+                      articleIds: [delayedId],
+                      category: '大模型',
+                      entity: 'DeepSeek',
+                      score: 8,
+                      publicAppeal: 7.5,
+                      reason: '对昨日旧发布的滞后二手实测回顾',
+                      duplicateOfHistory: true,
+                    },
+                  ],
+                },
+              },
+            ],
+          },
+          {
+            stage: 'select',
+            contains: [
+              '最早时间之前已入库的相关来源参考',
+              'DeepSeek 正式发布开源新一代推理优化框架',
+              'DeepSeek 正式发布开源新一代推理优化框架实测',
+            ],
+            actions: [
+              {
+                output: {
+                  events: [
+                    {
+                      title: delayedRewrite.title,
+                      articleIds: [delayedId],
+                      category: '大模型',
+                      entity: 'DeepSeek',
+                      score: 8,
+                      publicAppeal: 7.5,
+                      reason: '对昨日旧发布的滞后二手实测回顾',
+                      duplicateOfHistory: true,
+                    },
+                  ],
+                },
+              },
+            ],
+          },
+        ],
+      }),
+      'utf8',
+    );
+
+    const mockFetch = makeFeedMockFetch(
+      [freshArticle, delayedRewrite, exactRepost],
+      [oldBackupCandidate],
+    );
+    const core = await createCore({ rootDir, fetchImpl: mockFetch, now: () => now });
+    try {
+      // 预先入库早于截止时间的一手源报道，验证：
+      // 1) 同标题复发稿（exactRepost）在进模型前被精确去重跳过；
+      // 2) 滞后二手实测（delayedRewrite）不会被相似度硬删除，而是携带前期参考进入模型并由模型识别为同一旧闻后剔除
+      core.context.repos.articles.insertIfAbsent({
+        id: 'art-origin-old',
+        sourceId: 'primary-feed',
+        canonicalUrl: 'https://primary.example.com/origin-v3',
+        title: 'DeepSeek 正式发布开源新一代推理优化框架',
+        titleNorm: 'deepseek 正式发布开源新一代推理优化框架',
+        lang: 'zh',
+        publishedAt: '2026-11-15T10:00:00.000Z',
+        firstSeenAt: '2026-11-15T10:05:00.000Z',
+        excerpt: 'DeepSeek 于昨日正式推出开源新一代推理优化框架。',
+        contentPath: null,
+        contentChars: 300,
+        imagePath: null,
+        extractStatus: 'feed_only',
+      });
+
+      // 1. 当设定最早时间为 11-16 06:00，请求最多 3 条但仅 1 条真正达标时，应宁少勿滥以 1 条顺利完结
+      const runId = createRun(core.context, {
+        itemCount: 3,
+        notBeforeAt: cutoffIso,
+        trigger: 'manual-cli',
+      });
+      await executeRun(core.context, runId, { stageOverrides: STUB_RENDER_QA });
+
+      expect(core.context.repos.runs.getById(runId)?.status).toBe('awaiting_review');
+      const items = core.context.repos.runItems.listByRun(runId);
+      const passed = items.filter((item) => item.status === 'passed');
+      expect(passed).toHaveLength(1);
+      expect(passed[0]?.finalJson?.evidence[0]?.articleId).toBe(freshId);
+
+      const llmCalls = await core.tasks.getLlmCalls(runId);
+      const selectCallLogs = await Promise.all(
+        llmCalls
+          .filter((c) => c.stage === 'select')
+          .map((c) => core.tasks.getLlmCallLog(runId, c.id)),
+      );
+      const selectPrompts = selectCallLogs
+        .map((entry) => (entry as { prompt?: string } | null)?.prompt ?? '')
+        .filter((text) => text.length > 0);
+      expect(selectPrompts.length).toBeGreaterThanOrEqual(1);
+      expect(selectPrompts[0]).toContain('最早时间之前已入库的相关来源参考');
+      expect(selectPrompts[0]).toContain('DeepSeek 正式发布开源新一代推理优化框架');
+      expect(selectPrompts[0]).toContain('DeepSeek 正式发布开源新一代推理优化框架实测');
+      expect(selectPrompts[0]).not.toContain(exactRepostId);
+      expect(selectPrompts[0]).not.toContain(exactRepost.title);
+
+      // 2. 当设定更晚的严格截止时间导致 0 条满足条件时，拒绝越界并将状态收敛为 failed (insufficient_items)
+      core.context.repos.articles.releaseByRun(runId);
+      const strictRunId = createRun(core.context, {
+        itemCount: 2,
+        notBeforeAt: '2026-11-16T11:30:00.000Z',
+        trigger: 'manual-cli',
+      });
+      await expect(
+        executeRun(core.context, strictRunId, { stageOverrides: STUB_RENDER_QA }),
+      ).rejects.toMatchObject({ code: 'insufficient_items' });
+      expect(core.context.repos.runs.getById(strictRunId)?.status).toBe('failed');
+    } finally {
+      await core.close();
+    }
+  }, 60_000);
+
+  it('normalizes Unicode hyphens and includes recently consumed articles in selection dedup and prompt history even when published_history is absent', async () => {
+    expect(normalizeTitle('GPT\u20116.2 Astra and GPT\u20116.2 Sol')).toBe(
+      'gpt-6.2 astra and gpt-6.2 sol',
+    );
+
+    const { rootDir } = await setupWorkflowWorkspace();
+    const now = new Date('2026-11-19T02:00:00.000Z');
+    const capturedPrompts: string[] = [];
+    const fixtureKey = 'consumed-dedup-key';
+
+    const core = await createCore({
+      rootDir,
+      now: () => now,
+      fetchImpl: async (input, init) => {
+        const url = input.toString();
+        if (url.includes('gateway.test')) {
+          const payload = JSON.parse(init?.body as string) as {
+            messages?: Array<{ content?: string }>;
+          };
+          const userPrompt = payload.messages?.map((m) => m.content ?? '').join('\n') ?? '';
+          capturedPrompts.push(userPrompt);
+          return Response.json({
+            id: 'select-consumed-test',
+            choices: [
+              {
+                finish_reason: 'stop',
+                message: {
+                  content: JSON.stringify({
+                    events: [
+                      {
+                        title: 'Google Releases Gemini 4 Neon',
+                        articleIds: ['art-fresh-neon'],
+                        category: '模型发布',
+                        entity: 'Google',
+                        score: 9,
+                        publicAppeal: 9,
+                        reason: '主流大模型更新',
+                        duplicateOfHistory: false,
+                      },
+                    ],
+                  }),
+                },
+              },
+            ],
+          });
+        }
+        return new Response('Not found', { status: 404 });
+      },
+    });
+
+    try {
+      await fs.writeFile(path.join(core.context.paths.secretsDir, 'fixture-key'), fixtureKey, {
+        mode: 0o600,
+      });
+      await core.config.updateSettings({
+        ai: {
+          providers: {
+            fixture: {
+              adapter: 'openai-compatible',
+              protocol: 'chat-completions',
+              baseUrl: 'https://mock.gateway.test/v1',
+              apiKeyFile: 'fixture-key',
+            },
+          },
+          stages: { select: { cli: 'fixture', model: 'fixture-model' } },
+        },
+      });
+
+      const oldRunId = createRun(core.context, { itemCount: 1, trigger: 'manual-cli' });
+      const consumedUrl = 'https://primary.example.com/introducing-gpt-6-2';
+      core.context.repos.articles.insertIfAbsent({
+        id: 'art-consumed-gpt',
+        sourceId: 'primary-feed',
+        canonicalUrl: consumedUrl,
+        title: 'Introducing GPT-6.2 Astra and Sol',
+        titleNorm: normalizeTitle('Introducing GPT-6.2 Astra and Sol'),
+        lang: 'en',
+        publishedAt: '2026-11-17T18:00:00.000Z',
+        firstSeenAt: '2026-11-18T01:00:00.000Z',
+        excerpt: 'OpenAI releases GPT-6.2 Astra and Sol.',
+        contentPath: null,
+        contentChars: 500,
+        imagePath: null,
+        extractStatus: 'ok',
+      });
+      core.context.repos.articles.markReserved(['art-consumed-gpt'], oldRunId);
+      core.context.repos.articles.markConsumed(['art-consumed-gpt'], oldRunId);
+
+      // 新入库一条标题使用 U+2011 不换行连字符且高度重合的待选文章（应当在送入大模型前即被确定性去重拦截）
+      core.context.repos.articles.insertIfAbsent({
+        id: 'art-dup-hyphen',
+        sourceId: 'backup-feed',
+        canonicalUrl: 'https://backup.example.com/introducing-gpt-6-2-unicode',
+        title: 'Introducing GPT\u20116.2 Astra and Sol!',
+        titleNorm: normalizeTitle('Introducing GPT\u20116.2 Astra and Sol!'),
+        lang: 'en',
+        publishedAt: '2026-11-18T12:00:00.000Z',
+        firstSeenAt: '2026-11-18T12:10:00.000Z',
+        excerpt: 'Reprint using non-breaking hyphen.',
+        contentPath: null,
+        contentChars: 500,
+        imagePath: null,
+        extractStatus: 'ok',
+      });
+
+      // 新入库一条全新重大事件文章（应当保留送入大模型并被选中）
+      core.context.repos.articles.insertIfAbsent({
+        id: 'art-fresh-neon',
+        sourceId: 'primary-feed',
+        canonicalUrl: 'https://primary.example.com/introducing-gemini-4-neon',
+        title: 'Introducing Gemini 4 Neon',
+        titleNorm: normalizeTitle('Introducing Gemini 4 Neon'),
+        lang: 'en',
+        publishedAt: '2026-11-18T21:35:00.000Z',
+        firstSeenAt: '2026-11-19T00:10:00.000Z',
+        excerpt: 'Google releases Gemini 4 Neon with high intelligence per dollar.',
+        contentPath: null,
+        contentChars: 600,
+        imagePath: null,
+        extractStatus: 'ok',
+      });
+
+      const runId = createRun(core.context, { itemCount: 2, trigger: 'manual-cli' });
+      const result = await selectCandidateEvents({
+        ctx: core.context,
+        runId,
+        settings: core.context.settings,
+        sinceIso: '2026-11-18T00:00:00.000Z',
+        includeExpired: false,
+        targetCount: 4,
+        itemCount: 2,
+      });
+
+      expect(result.consideredArticleIds).toEqual(['art-fresh-neon']);
+      expect(result.selected).toHaveLength(1);
+      expect(result.selected[0]?.allArticleIds).toEqual(['art-fresh-neon']);
+      expect(capturedPrompts).toHaveLength(1);
+      expect(capturedPrompts).toHaveLength(1);
+      expect(capturedPrompts[0]).toContain('Introducing GPT-6.2 Astra and Sol');
+      expect(capturedPrompts[0]).not.toContain('art-dup-hyphen');
+    } finally {
+      await core.close();
+    }
+  });
+
+  it('does not drop codename/version model releases (Neon vs Hydrogen, X 5 BBB vs AAA) and delegates reworded duplicates to LLM event judgment', async () => {
+    const { rootDir } = await setupWorkflowWorkspace();
+    const now = new Date('2026-11-19T07:07:00.000Z');
+    const notBeforeAt = '2026-11-18T15:00:00.000Z';
+    const capturedPrompts: string[] = [];
+    const fixtureKey = 'neon-hydrogen-regression-key';
+
+    await updateSourcesFile(path.join(rootDir, 'config', 'sources.yaml'), [
+      {
+        id: 'deepmind-blog',
+        name: 'Google DeepMind',
+        lang: 'en',
+        tier: 1,
+        kind: 'rss',
+        pool: 'primary',
+        url: 'https://deepmind.google/blog/rss.xml',
+        enabled: true,
+      },
+      {
+        id: 'google-gemini',
+        name: 'Google Gemini Blog',
+        lang: 'en',
+        tier: 1,
+        kind: 'rss',
+        pool: 'primary',
+        url: 'https://blog.google/gemini/rss.xml',
+        enabled: true,
+      },
+      {
+        id: 'artificial-analysis',
+        name: 'Artificial Analysis',
+        lang: 'en',
+        tier: 2,
+        kind: 'html-list',
+        pool: 'primary',
+        url: 'https://artificialanalysis.ai/',
+        enabled: true,
+      },
+      {
+        id: 'primary-feed',
+        name: '主力资讯',
+        lang: 'zh',
+        tier: 1,
+        kind: 'rss',
+        pool: 'primary',
+        url: 'https://primary.example.com/rss.xml',
+        enabled: true,
+      },
+    ]);
+
+    const neonDeepmindId = 'b898a1b2127c5756e1c018cc6a81581a6294cda6';
+    const neonGeminiBlogId = 'b2c084a41275137173e812609f66e708e4fc8ea8';
+    const hydrogenId = 'a8d5fa7d24b3647f4501b383397b571abdcb6905';
+
+    const core = await createCore({
+      rootDir,
+      now: () => now,
+      fetchImpl: async (input, init) => {
+        const url = input.toString();
+        if (url.includes('gateway.test')) {
+          const payload = JSON.parse(init?.body as string) as {
+            messages?: Array<{ content?: string }>;
+          };
+          const userPrompt = payload.messages?.map((m) => m.content ?? '').join('\n') ?? '';
+          capturedPrompts.push(userPrompt);
+          return Response.json({
+            id: 'select-neon-regression',
+            choices: [
+              {
+                finish_reason: 'stop',
+                message: {
+                  content: JSON.stringify({
+                    events: [
+                      {
+                        title: 'Introducing Gemini 4 Neon',
+                        articleIds: [neonDeepmindId],
+                        category: '模型发布',
+                        entity: 'Google DeepMind',
+                        score: 9.4,
+                        publicAppeal: 9.2,
+                        reason: '全新代号模型正式发布，与此前 Gemini 4 Hydrogen 为不同代号产品',
+                        duplicateOfHistory: false,
+                      },
+                      {
+                        title: 'Introducing X 5 BBB',
+                        articleIds: ['art-x5-bbb'],
+                        category: '模型发布',
+                        entity: 'X Lab',
+                        score: 8.6,
+                        publicAppeal: 8.4,
+                        reason: '同系列新型号发布',
+                        duplicateOfHistory: false,
+                      },
+                      {
+                        title: 'OpenAI 正式推出全新推理模型',
+                        articleIds: ['art-openai-reword'],
+                        category: '模型发布',
+                        entity: 'OpenAI',
+                        score: 8.0,
+                        publicAppeal: 7.8,
+                        reason: '与近期已播出的 OpenAI 正式发布全新推理模型 为同一事件换词重复',
+                        duplicateOfHistory: true,
+                      },
+                    ],
+                  }),
+                },
+              },
+            ],
+          });
+        }
+        return new Response('Not found', { status: 404 });
+      },
+    });
+
+    try {
+      await fs.writeFile(path.join(core.context.paths.secretsDir, 'fixture-key'), fixtureKey, {
+        mode: 0o600,
+      });
+      await core.config.updateSettings({
+        ai: {
+          providers: {
+            fixture: {
+              adapter: 'openai-compatible',
+              protocol: 'chat-completions',
+              baseUrl: 'https://mock.gateway.test/v1',
+              apiKeyFile: 'fixture-key',
+            },
+          },
+          stages: { select: { cli: 'fixture', model: 'fixture-model' } },
+        },
+      });
+
+      // 历史已播库：Introducing X 5 AAA 与 OpenAI 正式发布全新推理模型
+      core.context.repos.history.insert({
+        eventId: 'ev-hist-x5-aaa',
+        runId: '20261115-1000-aaaa',
+        title: 'Introducing X 5 AAA',
+        titleNorm: normalizeTitle('Introducing X 5 AAA'),
+        entity: 'X Lab',
+        articleUrls: ['https://primary.example.com/x5-aaa'],
+        publishedAt: '2026-11-15T10:00:00.000Z',
+      });
+      core.context.repos.history.insert({
+        eventId: 'ev-hist-openai-reason',
+        runId: '20261117-1000-bbbb',
+        title: 'OpenAI 正式发布全新推理模型',
+        titleNorm: normalizeTitle('OpenAI 正式发布全新推理模型'),
+        entity: 'OpenAI',
+        articleUrls: ['https://primary.example.com/openai-reasoning-launch'],
+        publishedAt: '2026-11-17T10:00:00.000Z',
+      });
+
+      // 11 月 12 日的 Gemini 4 Hydrogen：原故障态为 expired + failed，从未进入 published_history
+      core.context.repos.articles.insertIfAbsent({
+        id: hydrogenId,
+        sourceId: 'deepmind-blog',
+        canonicalUrl: 'https://deepmind.google/blog/introducing-gemini-4-hydrogen',
+        title: 'Introducing Gemini 4 Hydrogen',
+        titleNorm: normalizeTitle('Introducing Gemini 4 Hydrogen'),
+        lang: 'en',
+        publishedAt: '2026-11-12T18:00:50.000Z',
+        firstSeenAt: '2026-11-12T18:05:00.000Z',
+        excerpt: 'Introducing Gemini 4 Hydrogen.',
+        contentPath: null,
+        contentChars: 0,
+        imagePath: null,
+        extractStatus: 'failed',
+      });
+      core.context.repos.articles.expireOlderThan('2026-11-15T00:00:00.000Z');
+
+      // 同日仅精确到日期（UTC 00:00:00Z）的文章：跨时区宽限下不应被当成确凿早于 15:00Z 的前期参考
+      core.context.repos.articles.insertIfAbsent({
+        id: 'art-aa-same-day-date-only',
+        sourceId: 'artificial-analysis',
+        canonicalUrl: 'https://artificialanalysis.ai/articles/gemini-4-neon',
+        title: 'Google continues to accelerate its release cadence with Gemini 4 Neon',
+        titleNorm: normalizeTitle(
+          'Google continues to accelerate its release cadence with Gemini 4 Neon',
+        ),
+        lang: 'en',
+        publishedAt: '2026-11-18T00:00:00.000Z',
+        firstSeenAt: '2026-11-18T12:00:00.000Z',
+        excerpt: 'Same-day benchmark note.',
+        contentPath: null,
+        contentChars: 500,
+        imagePath: null,
+        extractStatus: 'ok',
+      });
+
+      // 两篇 Neon 官方正式稿（DeepMind + Google Gemini Blog）
+      core.context.repos.articles.insertIfAbsent({
+        id: neonDeepmindId,
+        sourceId: 'deepmind-blog',
+        canonicalUrl: 'https://deepmind.google/blog/introducing-gemini-4-neon',
+        title: 'Introducing Gemini 4 Neon',
+        titleNorm: normalizeTitle('Introducing Gemini 4 Neon'),
+        lang: 'en',
+        publishedAt: '2026-11-18T21:35:43.000Z',
+        firstSeenAt: '2026-11-19T00:05:00.000Z',
+        excerpt: 'DeepMind introduces Gemini 4 Neon with major speed and cost improvements.',
+        contentPath: null,
+        contentChars: 800,
+        imagePath: null,
+        extractStatus: 'ok',
+      });
+      core.context.repos.articles.insertIfAbsent({
+        id: neonGeminiBlogId,
+        sourceId: 'google-gemini',
+        canonicalUrl:
+          'https://blog.google/innovation-and-ai/models-and-research/gemini-models/introducing-gemini-4-neon',
+        title: 'Introducing Gemini 4 Neon',
+        titleNorm: normalizeTitle('Introducing Gemini 4 Neon'),
+        lang: 'en',
+        publishedAt: '2026-11-18T21:00:00.000Z',
+        firstSeenAt: '2026-11-19T00:05:00.000Z',
+        excerpt: 'Google Gemini Blog introduces Gemini 4 Neon.',
+        contentPath: null,
+        contentChars: 800,
+        imagePath: null,
+        extractStatus: 'ok',
+      });
+
+      // 同模板不同代号候选：Introducing X 5 BBB
+      core.context.repos.articles.insertIfAbsent({
+        id: 'art-x5-bbb',
+        sourceId: 'primary-feed',
+        canonicalUrl: 'https://primary.example.com/x5-bbb',
+        title: 'Introducing X 5 BBB',
+        titleNorm: normalizeTitle('Introducing X 5 BBB'),
+        lang: 'en',
+        publishedAt: '2026-11-18T20:00:00.000Z',
+        firstSeenAt: '2026-11-19T00:05:00.000Z',
+        excerpt: 'X Lab introduces X 5 BBB model.',
+        contentPath: null,
+        contentChars: 500,
+        imagePath: null,
+        extractStatus: 'ok',
+      });
+
+      // 精确重复候选（应被进模型前确定性跳过）与同题换词候选（应进模型由大模型按事件语义标 duplicateOfHistory=true）
+      core.context.repos.articles.insertIfAbsent({
+        id: 'art-openai-exact',
+        sourceId: 'primary-feed',
+        canonicalUrl: 'https://primary.example.com/openai-exact-mirror',
+        title: 'OpenAI 正式发布全新推理模型！',
+        titleNorm: normalizeTitle('OpenAI 正式发布全新推理模型！'),
+        lang: 'zh',
+        publishedAt: '2026-11-18T20:30:00.000Z',
+        firstSeenAt: '2026-11-19T00:05:00.000Z',
+        excerpt: '同题完全一致的转载稿。',
+        contentPath: null,
+        contentChars: 500,
+        imagePath: null,
+        extractStatus: 'ok',
+      });
+      core.context.repos.articles.insertIfAbsent({
+        id: 'art-openai-reword',
+        sourceId: 'primary-feed',
+        canonicalUrl: 'https://primary.example.com/openai-reworded',
+        title: 'OpenAI 正式推出全新推理模型',
+        titleNorm: normalizeTitle('OpenAI 正式推出全新推理模型'),
+        lang: 'zh',
+        publishedAt: '2026-11-18T20:40:00.000Z',
+        firstSeenAt: '2026-11-19T00:05:00.000Z',
+        excerpt: '对昨日已播的 OpenAI 全新推理模型发布换词复述，无新进展。',
+        contentPath: null,
+        contentChars: 500,
+        imagePath: null,
+        extractStatus: 'ok',
+      });
+
+      const runId1 = createRun(core.context, {
+        itemCount: 5,
+        notBeforeAt,
+        trigger: 'manual-cli',
+      });
+      const res1 = await selectCandidateEvents({
+        ctx: core.context,
+        runId: runId1,
+        settings: core.context.settings,
+        sinceIso: notBeforeAt,
+        notBeforeAt,
+        includeExpired: true,
+        targetCount: 10,
+        itemCount: 5,
+      });
+
+      expect(capturedPrompts).toHaveLength(1);
+      const prompt1 = capturedPrompts[0] ?? '';
+      expect(prompt1).toContain(neonDeepmindId);
+      expect(prompt1).toContain('Introducing Gemini 4 Neon');
+      expect(prompt1).toContain('art-x5-bbb');
+      expect(prompt1).toContain('art-openai-reword');
+      expect(prompt1).not.toContain('art-openai-exact');
+      expect(prompt1).not.toContain(
+        'Google continues to accelerate its release cadence with Gemini 4 Neon',
+      );
+      expect(prompt1).not.toContain('Introducing Gemini 4 Hydrogen');
+
+      expect(res1.consideredArticleIds).toContain(neonDeepmindId);
+      expect(res1.consideredArticleIds).toContain(neonGeminiBlogId);
+      expect(res1.selected.map((item) => item.candidate.title)).toEqual([
+        'Introducing Gemini 4 Neon',
+        'Introducing X 5 BBB',
+      ]);
+      expect(res1.selected[0]?.allArticleIds).toEqual(
+        expect.arrayContaining([neonDeepmindId, neonGeminiBlogId]),
+      );
+
+      // 更严苛场景：即使 Hydrogen 正文抽取成功、已消费并写入 published_history，Neon 仍必须正常进入候选并入选
+      core.context.db
+        .prepare("UPDATE articles SET extract_status = 'ok', status = 'consumed' WHERE id = ?")
+        .run(hydrogenId);
+      core.context.repos.history.insert({
+        eventId: 'ev-hist-hydrogen',
+        runId: '20261113-1000-hhhh',
+        title: 'Introducing Gemini 4 Hydrogen',
+        titleNorm: normalizeTitle('Introducing Gemini 4 Hydrogen'),
+        entity: 'Google DeepMind',
+        articleUrls: ['https://deepmind.google/blog/introducing-gemini-4-hydrogen'],
+        publishedAt: '2026-11-13T10:00:00.000Z',
+      });
+
+      const runId2 = createRun(core.context, {
+        itemCount: 5,
+        notBeforeAt,
+        trigger: 'manual-cli',
+      });
+      const res2 = await selectCandidateEvents({
+        ctx: core.context,
+        runId: runId2,
+        settings: core.context.settings,
+        sinceIso: notBeforeAt,
+        notBeforeAt,
+        includeExpired: true,
+        targetCount: 10,
+        itemCount: 5,
+      });
+
+      expect(capturedPrompts).toHaveLength(2);
+      expect(capturedPrompts[1]).toContain(neonDeepmindId);
+      expect(capturedPrompts[1]).toContain('Introducing Gemini 4 Hydrogen');
+      expect(res2.selected.map((item) => item.candidate.title)).toEqual([
+        'Introducing Gemini 4 Neon',
+        'Introducing X 5 BBB',
+      ]);
+      expect(res2.selected[0]?.allArticleIds).toEqual(
+        expect.arrayContaining([neonDeepmindId, neonGeminiBlogId]),
+      );
+    } finally {
+      await core.close();
+    }
+  });
 });

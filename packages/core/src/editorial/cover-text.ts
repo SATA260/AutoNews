@@ -1,8 +1,8 @@
 import { COVER_TEXT_LIMITS, type CoverText, type IssuePackage } from '@aidaily/contracts';
 
-/** 统计封面文字字数：按完整字符计，不计用于高亮的星号 */
+/** 统计封面文字字数：按完整字符计，不计用于高亮的星号与手动换行符 */
 export function coverTextLength(text: string): number {
-  return Array.from(text.replace(/\*/g, '')).length;
+  return Array.from(text.replace(/\\n/g, '').replace(/[*\r\n]/g, '')).length;
 }
 
 /** 去掉首尾空白并把连续空白合并成一个空格 */
@@ -10,18 +10,33 @@ function normalizeLine(text: string): string {
   return text.replace(/[\s\u3000]+/g, ' ').trim();
 }
 
-/** 整理封面文字的空白字符，返回可直接保存的新对象 */
-export function normalizeCoverText(text: CoverText): CoverText {
-  return { title: normalizeLine(text.title), subtitle: normalizeLine(text.subtitle) };
+/** 整理封面主标题：保留手动换行符（同步把转义的 `\n` 统一为真实换行），按行清理首尾和多余空格并去掉空行 */
+function normalizeCoverTitle(text: string): string {
+  return text
+    .replace(/\r\n?/g, '\n')
+    .replace(/\\n/g, '\n')
+    .split('\n')
+    .map((line) => line.replace(/[ \t\f\v\u00A0\u3000]+/g, ' ').trim())
+    .filter((line) => line.length > 0)
+    .join('\n');
 }
 
-/** 检查封面文字是否符合字数与高亮星号规则，返回中文问题列表（为空表示通过） */
+/** 整理封面文字的空白字符（主标题保留手动换行），返回可直接保存的新对象 */
+export function normalizeCoverText(text: CoverText): CoverText {
+  return { title: normalizeCoverTitle(text.title), subtitle: normalizeLine(text.subtitle) };
+}
+
+/** 检查封面文字是否符合字数、行数与高亮星号规则，返回中文问题列表（为空表示通过） */
 export function checkCoverText(text: CoverText): string[] {
   const errors: string[] = [];
-  const title = normalizeLine(text.title);
+  const title = normalizeCoverTitle(text.title);
   const subtitle = normalizeLine(text.subtitle);
-  if (!title.replace(/\*/g, '')) {
+  if (!title.replace(/[*\n]/g, '')) {
     errors.push('封面主标题不能为空');
+  }
+  const titleLines = title.split('\n').filter((line) => line.length > 0);
+  if (titleLines.length > 3) {
+    errors.push(`封面主标题最多分 3 行（当前为 ${titleLines.length} 行）`);
   }
   const titleLen = coverTextLength(title);
   if (titleLen > COVER_TEXT_LIMITS.titleMax) {

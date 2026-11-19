@@ -47,7 +47,7 @@ export interface CornerMascotProps {
 }
 
 /**
- * 右下角大尺寸看板娘舞台（300 × 420 贴底站立）：
+ * 右下角看板娘舞台（280 × 290，展示大腿中部及以上）：
  * 优先渲染支持实时口型与微表情的 Live2D 模型，在无模型或无头测试环境下自动平滑回退到静态立绘。
  */
 export const CornerMascot = forwardRef<MascotImperativeHandle, CornerMascotProps>(
@@ -108,7 +108,8 @@ export const CornerMascot = forwardRef<MascotImperativeHandle, CornerMascotProps
       return null;
     }
 
-    const isTallPresenter = mascotId === 'gpt' || mascotId === 'gemini' || mascotId === 'claude';
+    const isTallPresenter =
+      mascotId === 'gpt' || mascotId === 'gemini' || mascotId === 'claude' || mascotId === 'grok';
 
     return (
       <div

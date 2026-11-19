@@ -74,7 +74,7 @@ async function readImageBytesWithLimit(res: Response, maxBytes: number): Promise
 
 /**
  * 下载新闻配图并原子写入本地图片目录：
- * 只接受常见 `image/*` 响应且大小严格限制在 5MB 以内；任意下载失败均静默返回 null，不影响文章入库。
+ * 只接受常见 `image/*` 响应（跳过矢量图标）且大小严格限制在 5MB 以内；任意下载失败均静默返回 null，不影响文章入库。
  */
 export async function downloadArticleImage(opts: {
   articleId: string;
@@ -82,6 +82,7 @@ export async function downloadArticleImage(opts: {
   imagesDir: string;
   rootDir: string;
   fetchImpl: typeof fetch;
+  fileSuffix?: string;
   timeoutMs?: number;
   signal?: AbortSignal;
 }): Promise<string | null> {
@@ -119,7 +120,7 @@ export async function downloadArticleImage(opts: {
     }
 
     const ext = resolveImageExtension(res.headers.get('content-type'));
-    if (!ext) {
+    if (!ext || ext === 'svg') {
       await res.body?.cancel().catch(() => undefined);
       return null;
     }
@@ -129,7 +130,8 @@ export async function downloadArticleImage(opts: {
       return null;
     }
 
-    const destFile = path.join(opts.imagesDir, `${opts.articleId}.${ext}`);
+    const safeSuffix = opts.fileSuffix ? `-${opts.fileSuffix.replace(/[^a-zA-Z0-9_-]/g, '')}` : '';
+    const destFile = path.join(opts.imagesDir, `${opts.articleId}${safeSuffix}.${ext}`);
     await writeFileAtomic(destFile, data);
     return path.relative(opts.rootDir, destFile);
   } catch (err) {

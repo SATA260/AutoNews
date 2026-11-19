@@ -4,6 +4,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import {
   type Article,
+  type ArticleMediaAsset,
   type HostMascotId,
   HostMascotIdSchema,
   type ItemVersion,
@@ -18,12 +19,15 @@ import {
   type RunEvent,
   type RunStatus,
   type RunSummary,
+  type SelectedMediaOverride,
   SettingsSchema,
   type Stage,
   type Trigger,
 } from '@aidaily/contracts';
+import { TZDate } from '@date-fns/tz';
 import type { CoreContext } from '../context.js';
 import type { EditSubStep } from '../editorial/item-pipeline.js';
+import { collectEventMediaPool, loadEventArticles } from '../editorial/s3-summarize.js';
 import { listBgmFiles } from '../media/bgm.js';
 import {
   listNarrationSectionViews,
@@ -56,9 +60,26 @@ export interface RunArticleWithContent extends Article {
   contentText: string | null;
 }
 
+/** 任务候选视觉素材及其在当期任务目录中的安全访问相对路径 */
+export interface RunItemMediaCandidate extends ArticleMediaAsset {
+  artifactRelPath: string;
+}
+
+/** 修改单条新闻配图或候选图槽位的输入参数（每条新闻固定最多展示 1 张配图） */
+export interface SetItemImageInput {
+  mode: 'auto' | 'none' | 'custom';
+  data?: Uint8Array;
+  secondaryData?: Uint8Array;
+  selectedPrimaryMediaId?: string;
+  selectedSecondaryMediaId?: string;
+  clearSecondary?: boolean;
+  caption?: string;
+}
+
 /** 启动单期生成任务的可选参数 */
 export interface TaskStartOptions {
   itemCount: number;
+  notBeforeAt?: string | null;
   hostId?: HostMascotId;
   bgmFile?: string;
   trigger?: Trigger;
@@ -91,12 +112,12 @@ export interface TaskWatchOptions {
 export interface TaskService {
   /** 列出可用于新任务的背景音乐。 */
   listBgm(): Promise<string[]>;
-  /** 修改配图。待试听、待审核、已驳回、发布失败和已完成的任务都可以改 */
-  setItemImage(
-    runId: string,
-    itemId: string,
-    input: { mode: 'auto' | 'none' | 'custom'; data?: Uint8Array; caption?: string },
-  ): Promise<void>;
+  /** 查询最近一次成功投稿或本地完结发版的时间戳（无历史记录时返回 null） */
+  getLatestPublishedAt(): Promise<string | null>;
+  /** 读取某期任务各条新闻可用的多模态候选素材列表，并将文件暂存到任务目录以供页面安全预览 */
+  getRunMediaCandidates(runId: string): Promise<Record<string, RunItemMediaCandidate[]>>;
+  /** 修改配图或主副候选图选择。待试听、待审核、已驳回、发布失败和已完成的任务都可以改 */
+  setItemImage(runId: string, itemId: string, input: SetItemImageInput): Promise<void>;
   /** 修改背景音乐。待试听、待审核、已驳回、发布失败和已完成的任务都可以改 */
   setBgm(runId: string, bgmFile: string): Promise<void>;
   /** 读取每一段当前的语音文本、字幕文本和音频，供页面编辑 */
@@ -280,6 +301,177 @@ async function startDetachedRetry(
   });
 }
 
+/** 查询最近一次成功发版或投稿提交的 UTC 时间戳 */
+export function getLatestPublishedAt(ctx: CoreContext): string | null {
+  const histRow = ctx.db.prepare('SELECT MAX(published_at) AS ts FROM published_history').get() as
+    | { ts: string | null }
+    | undefined;
+  if (histRow?.ts) {
+    return histRow.ts;
+  }
+  const runRow = ctx.db
+    .prepare(
+      "SELECT COALESCE(finished_at, created_at) AS ts FROM runs WHERE status = 'published' ORDER BY COALESCE(finished_at, created_at) DESC LIMIT 1",
+    )
+    .get() as { ts: string | null } | undefined;
+  return runRow?.ts ?? null;
+}
+
+/** 解析在指定时区下的 YYYY-MM-DD HH:mm(:ss) 本地时间并转换为毫秒时间戳，校验日历有效性 */
+function parseLocalDateTimeInTz(
+  year: number,
+  month: number,
+  day: number,
+  hour: number,
+  minute: number,
+  second: number,
+  timezone: string,
+  rawLabel: string,
+): number {
+  if (month < 1 || month > 12 || day < 1 || day > 31 || hour > 23 || minute > 59 || second > 59) {
+    throw new RangeError(`最早新闻时间「${rawLabel}」日期或时刻超出合法范围`);
+  }
+  const tzDate = new TZDate(year, month - 1, day, hour, minute, second, 0, timezone);
+  if (
+    tzDate.getFullYear() !== year ||
+    tzDate.getMonth() !== month - 1 ||
+    tzDate.getDate() !== day ||
+    tzDate.getHours() !== hour ||
+    tzDate.getMinutes() !== minute
+  ) {
+    throw new RangeError(`最早新闻时间「${rawLabel}」不是有效的日历时间`);
+  }
+  return tzDate.getTime();
+}
+
+/**
+ * 将网页、命令行或定时任务传入的最早新闻时间表达式统一解析为 UTC ISO 字符串：
+ * 支持 `last-published`、`today`、`12h`/`24h`/`48h`、`YYYY-MM-DD`、`YYYY-MM-DD HH:mm` 及带时区 ISO 字符串。
+ */
+export function resolveNotBeforeInput(
+  ctx: CoreContext,
+  raw: string | null | undefined,
+  opts?: { trigger?: Trigger; scheduleId?: string },
+): string | null {
+  const trimmed = raw?.trim() ?? '';
+  const nowMs = ctx.now().getTime();
+  const tz = ctx.settings.timezone;
+
+  if (!trimmed || trimmed === 'none') {
+    if (opts?.trigger === 'schedule' && opts.scheduleId) {
+      const schedule = ctx.repos.schedules.getById(opts.scheduleId);
+      if (!schedule) {
+        return null;
+      }
+      if (schedule.cutoffMode === 'since_last_published') {
+        return getLatestPublishedAt(ctx);
+      }
+      if (
+        schedule.cutoffMode === 'hours' &&
+        typeof schedule.maxAgeHours === 'number' &&
+        schedule.maxAgeHours > 0
+      ) {
+        return new Date(nowMs - schedule.maxAgeHours * 3600_000).toISOString();
+      }
+    }
+    return null;
+  }
+
+  let parsedMs: number;
+  const lower = trimmed.toLowerCase();
+
+  if (lower === 'last-published' || lower === 'since_last_published') {
+    const latest = getLatestPublishedAt(ctx);
+    if (!latest) {
+      throw new RangeError(
+        '尚无历史已发布记录，无法使用「上次发布后」作为最早时间，请改选具体时间或近 24 小时',
+      );
+    }
+    parsedMs = Date.parse(latest);
+  } else if (lower === 'today') {
+    const tzNow = new TZDate(nowMs, tz);
+    parsedMs = new TZDate(
+      tzNow.getFullYear(),
+      tzNow.getMonth(),
+      tzNow.getDate(),
+      0,
+      0,
+      0,
+      0,
+      tz,
+    ).getTime();
+  } else if (/^([1-9]\d*)h$/i.test(trimmed)) {
+    const hours = Number.parseInt(trimmed.slice(0, -1), 10);
+    if (!Number.isSafeInteger(hours) || hours <= 0 || hours > 24 * 365) {
+      throw new RangeError(`相对小时参数超出有效范围: ${trimmed}`);
+    }
+    parsedMs = nowMs - hours * 3600_000;
+  } else {
+    const dateOnlyMatch = /^(\d{4})-(\d{2})-(\d{2})$/.exec(trimmed);
+    const localDtMatch =
+      /^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2})(?::(\d{2})(?:\.\d{1,3})?)?$/.exec(trimmed);
+    if (dateOnlyMatch) {
+      parsedMs = parseLocalDateTimeInTz(
+        Number(dateOnlyMatch[1]),
+        Number(dateOnlyMatch[2]),
+        Number(dateOnlyMatch[3]),
+        0,
+        0,
+        0,
+        tz,
+        trimmed,
+      );
+    } else if (localDtMatch) {
+      parsedMs = parseLocalDateTimeInTz(
+        Number(localDtMatch[1]),
+        Number(localDtMatch[2]),
+        Number(localDtMatch[3]),
+        Number(localDtMatch[4]),
+        Number(localDtMatch[5]),
+        Number(localDtMatch[6] ?? 0),
+        tz,
+        trimmed,
+      );
+    } else if (/[zZ]$|[+-]\d{2}:?\d{2}$/.test(trimmed)) {
+      parsedMs = Date.parse(trimmed);
+    } else {
+      throw new RangeError(
+        `无法识别的最早时间格式「${trimmed}」，支持 12h / 24h / 48h / today / last-published / YYYY-MM-DD / YYYY-MM-DD HH:mm 或 ISO 时间`,
+      );
+    }
+  }
+
+  if (!Number.isFinite(parsedMs)) {
+    throw new RangeError(`最早新闻时间无效: ${trimmed}`);
+  }
+  if (parsedMs > nowMs + 60_000) {
+    throw new RangeError('最早新闻时间不能晚于当前时间');
+  }
+  return new Date(parsedMs).toISOString();
+}
+
+/** 校验上传图片字节流并原子写入任务自定义素材目录，返回相对任务目录的路径 */
+async function saveCustomUploadedImage(runDir: string, bytes: Uint8Array): Promise<string> {
+  if (bytes.length < 12 || bytes.length > 10 * 1024 * 1024) {
+    throw new Error('图片大小须在 10 MB 以内');
+  }
+  const data = Buffer.from(bytes);
+  const extension = data.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))
+    ? 'png'
+    : data[0] === 255 && data[1] === 216 && data[2] === 255
+      ? 'jpg'
+      : data.subarray(0, 4).toString('ascii') === 'RIFF' &&
+          data.subarray(8, 12).toString('ascii') === 'WEBP'
+        ? 'webp'
+        : null;
+  if (!extension) {
+    throw new Error('图片必须是 PNG、JPEG 或 WebP');
+  }
+  const relative = path.posix.join('custom-assets', `${crypto.randomUUID()}.${extension}`);
+  await writeFileAtomic(path.join(runDir, relative), data);
+  return relative;
+}
+
 /** 创建任务管理服务，供命令行和网页后台管理任务、监听事件和读取产物 */
 export function createTaskService(ctx: CoreContext): TaskService {
   return {
@@ -287,7 +479,59 @@ export function createTaskService(ctx: CoreContext): TaskService {
     async listBgm() {
       return listBgmFiles(ctx);
     },
-    /** 保存图片后更新条目设置。 */
+    /** 查询最近一次成功发版或投稿的时间戳 */
+    async getLatestPublishedAt() {
+      return getLatestPublishedAt(ctx);
+    },
+    /** 读取各条新闻的多模态候选配图与截图列表，并复制到当期任务安全访问目录 */
+    async getRunMediaCandidates(runId) {
+      if (!ctx.repos.runs.getById(runId)) {
+        throw new Error(`未找到任务记录: ${runId}`);
+      }
+      const events = ctx.repos.events.listByRun(runId);
+      const eventById = new Map(events.map((ev) => [ev.id, ev]));
+      const items = ctx.repos.runItems.listByRun(runId);
+      const runDir = ctx.paths.runDir(runId);
+      const result: Record<string, RunItemMediaCandidate[]> = {};
+
+      for (const item of items) {
+        const ev = eventById.get(item.eventId);
+        if (!ev) {
+          result[item.id] = [];
+          continue;
+        }
+        const articles = await loadEventArticles(ctx, ev).catch(() => new Map());
+        const pool = collectEventMediaPool(articles);
+        const candidates: RunItemMediaCandidate[] = [];
+        for (const asset of pool) {
+          const safeSrc = resolveRealPathInsideDir(
+            ctx.paths.rootDir,
+            ctx.paths.imagesDir,
+            asset.imagePath,
+          );
+          if (!safeSrc) {
+            continue;
+          }
+          const ext = path.extname(safeSrc).toLowerCase() || '.png';
+          const safeId = asset.id.replace(/[^a-zA-Z0-9._-]/g, '_');
+          const relDest = path.posix.join('candidates', `${safeId}${ext}`);
+          const absDest = path.join(runDir, relDest);
+          const alreadyStaged = await fs
+            .stat(absDest)
+            .then((st) => st.isFile() && st.size > 0)
+            .catch(() => false);
+          if (!alreadyStaged) {
+            const buf = await fs.readFile(safeSrc);
+            await writeFileAtomic(absDest, buf);
+          }
+          candidates.push({ ...asset, artifactRelPath: relDest });
+        }
+        result[item.id] = candidates;
+      }
+
+      return result;
+    },
+    /** 保存唯一配图选择或本地上传图片并更新条目设置（每条新闻仅展示 1 张图片）。 */
     async setItemImage(runId, itemId, input) {
       const runStatus = ctx.repos.runs.getById(runId)?.status;
       if (!runStatus || !MEDIA_ADJUSTABLE_RUN_STATUSES.includes(runStatus))
@@ -296,36 +540,91 @@ export function createTaskService(ctx: CoreContext): TaskService {
       if (!item || item.runId !== runId || item.status !== 'passed')
         throw new Error('未找到本期已通过的新闻条目');
       if (!['auto', 'none', 'custom'].includes(input.mode)) throw new Error('图片模式无效');
-      const caption = input.caption?.trim() ?? '';
-      if (Array.from(caption).length > 36) throw new Error('图片说明最多 36 字');
-      let relative: string | null = null;
-      if (input.mode === 'custom') {
-        const bytes = input.data;
-        if (!bytes || bytes.length < 12 || bytes.length > 10 * 1024 * 1024)
-          throw new Error('图片大小须在 10 MB 以内');
-        const data = Buffer.from(bytes);
-        const extension = data.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))
-          ? 'png'
-          : data[0] === 255 && data[1] === 216 && data[2] === 255
-            ? 'jpg'
-            : data.subarray(0, 4).toString('ascii') === 'RIFF' &&
-                data.subarray(8, 12).toString('ascii') === 'WEBP'
-              ? 'webp'
-              : null;
-        if (!extension) throw new Error('图片必须是 PNG、JPEG 或 WebP');
-        relative = path.join('custom-assets', `${crypto.randomUUID()}.${extension}`);
-        await writeFileAtomic(path.join(ctx.paths.runDir(runId), relative), data);
+
+      const nextCaption =
+        input.caption !== undefined
+          ? input.caption.trim() || null
+          : (item.customImageCaption ?? null);
+      if (nextCaption && Array.from(nextCaption).length > 44) {
+        throw new Error('图片说明最多 44 字');
       }
+
+      const runDir = ctx.paths.runDir(runId);
+      const writtenCustomFiles: string[] = [];
+      let nextCustomPrimary: string | null = null;
+      let nextSelectedIds: SelectedMediaOverride | null = null;
+
+      if (input.mode === 'custom') {
+        const events = ctx.repos.events.listByRun(runId);
+        const ev = events.find((e) => e.id === item.eventId);
+        const loadedArticles = ev
+          ? await loadEventArticles(ctx, ev).catch(() => new Map())
+          : new Map();
+        const validMediaIds = new Set(collectEventMediaPool(loadedArticles).map((m) => m.id));
+
+        nextCustomPrimary = item.customImagePath ?? null;
+        const baseSelectedPrimary =
+          item.selectedMediaIds?.primary ??
+          (item.imageMode === 'auto' &&
+          item.finalJson?.primaryMediaId &&
+          validMediaIds.has(item.finalJson.primaryMediaId)
+            ? item.finalJson.primaryMediaId
+            : undefined);
+
+        let selectedPrimary = nextCustomPrimary ? undefined : baseSelectedPrimary;
+
+        // 每条新闻仅保留单张配图；若旧调用方未传主图只传了副图参数则将其视为唯一主图
+        const uploadedData =
+          input.data ?? (!input.selectedPrimaryMediaId ? input.secondaryData : undefined);
+        const candidateMediaId =
+          input.selectedPrimaryMediaId !== undefined
+            ? input.selectedPrimaryMediaId
+            : !input.data &&
+                input.selectedSecondaryMediaId !== undefined &&
+                input.selectedSecondaryMediaId.trim()
+              ? input.selectedSecondaryMediaId
+              : undefined;
+
+        if (uploadedData) {
+          const uploadedPrimary = await saveCustomUploadedImage(runDir, uploadedData);
+          writtenCustomFiles.push(uploadedPrimary);
+          nextCustomPrimary = uploadedPrimary;
+          selectedPrimary = undefined;
+        } else if (candidateMediaId !== undefined) {
+          const trimmedId = candidateMediaId.trim();
+          if (!trimmedId || !validMediaIds.has(trimmedId)) {
+            throw new Error(`未找到该新闻对应的候选配图: ${candidateMediaId}`);
+          }
+          selectedPrimary = trimmedId;
+          nextCustomPrimary = null;
+        }
+
+        if (!nextCustomPrimary && !selectedPrimary) {
+          throw new Error('请选择或上传至少一张配图');
+        }
+
+        nextSelectedIds = selectedPrimary ? { primary: selectedPrimary } : null;
+      }
+
       try {
         inTransaction(ctx.db, () => {
           const result = ctx.db
             .prepare(
-              `UPDATE run_items SET image_mode = ?, custom_image_path = ?, custom_image_caption = ?, updated_at = ? WHERE id = ? AND run_id = ? AND EXISTS (SELECT 1 FROM runs WHERE id = ? AND status IN (${MEDIA_ADJUSTABLE_RUN_STATUSES.map(() => '?').join(', ')}))`,
+              `UPDATE run_items
+               SET image_mode = ?,
+                   custom_image_path = ?,
+                   secondary_custom_image_path = NULL,
+                   selected_media_ids = ?,
+                   custom_image_caption = ?,
+                   updated_at = ?
+               WHERE id = ? AND run_id = ?
+                 AND EXISTS (SELECT 1 FROM runs WHERE id = ? AND status IN (${MEDIA_ADJUSTABLE_RUN_STATUSES.map(() => '?').join(', ')}))`,
             )
             .run(
               input.mode,
-              relative,
-              caption || null,
+              nextCustomPrimary,
+              nextSelectedIds ? JSON.stringify(nextSelectedIds) : null,
+              nextCaption,
               ctx.now().toISOString(),
               itemId,
               runId,
@@ -337,10 +636,9 @@ export function createTaskService(ctx: CoreContext): TaskService {
           ctx.repos.runStages.markStaleFrom(runId, ['render', 'qa']);
         });
       } catch (error) {
-        if (relative)
-          await fs
-            .rm(path.join(ctx.paths.runDir(runId), relative), { force: true })
-            .catch(() => undefined);
+        for (const rel of writtenCustomFiles) {
+          await fs.rm(path.join(runDir, rel), { force: true }).catch(() => undefined);
+        }
         throw error;
       }
     },
@@ -401,9 +699,15 @@ export function createTaskService(ctx: CoreContext): TaskService {
       // 每次启动新任务前重新读取磁盘配置与信源清单，防止常驻服务持有旧内存配置生成过期快照
       await ctx.reloadConfig();
 
+      const resolvedNotBeforeAt = resolveNotBeforeInput(ctx, opts.notBeforeAt, {
+        trigger,
+        scheduleId: opts.scheduleId,
+      });
+
       const runId = inTransaction(ctx.db, () => {
         const createdId = createRun(ctx, {
           itemCount: opts.itemCount,
+          notBeforeAt: resolvedNotBeforeAt,
           hostId: opts.hostId,
           bgmFile: opts.bgmFile,
           trigger,
@@ -633,6 +937,7 @@ export function createTaskService(ctx: CoreContext): TaskService {
         status: run.status,
         currentStage: run.currentStage,
         itemCount: run.itemCount,
+        notBeforeAt: run.notBeforeAt ?? null,
         hostId: run.hostId,
         bgmFile: run.bgmFile,
         mediaDirty: run.mediaDirty,

@@ -5,7 +5,7 @@ import type { DeckTransitionStyle } from '../../bridge/videoSynthBridge';
 export const PAGE_TURN_DURATION_MS: Record<DeckTransitionStyle, number> = {
   glide: 520,
   flip: 540,
-  fade: 400,
+  fade: 600,
   none: 0,
 };
 
@@ -28,6 +28,12 @@ function easeOutEditorial(t: number): number {
   return 1 - (1 - clamped) ** 3.4;
 }
 
+/** 对称的缓入缓出曲线，让渐变的开始和结束都柔和（与 CSS 渐变动画的曲线保持一致） */
+export function easeInOutSine(t: number): number {
+  const clamped = Math.min(1, Math.max(0, t));
+  return 0.5 - Math.cos(Math.PI * clamped) / 2;
+}
+
 /** 在虚拟时钟手动步进模式下计算离场页与入场页的精确内联变换样式 */
 function computeVirtualTurnStyles(
   style: DeckTransitionStyle,
@@ -38,24 +44,24 @@ function computeVirtualTurnStyles(
   exiting: React.CSSProperties;
   dimOpacity: number;
 } {
-  const e = easeOutEditorial(rawProgress);
-
   if (style === 'fade') {
-    const offsetPx = (direction === 'next' ? 24 : -24) * (1 - e);
+    // 纯透明度交叉渐变：旧页不透明地垫在下面，新页从透明渐显到完全不透明
     return {
       entering: {
         zIndex: 4,
-        opacity: e,
-        transform: `translate3d(${offsetPx.toFixed(2)}px, 0, 0)`,
+        opacity: Number(easeInOutSine(rawProgress).toFixed(4)),
+        transform: 'none',
       },
       exiting: {
         zIndex: 2,
         opacity: 1,
-        transform: 'translate3d(0, 0, 0)',
+        transform: 'none',
       },
       dimOpacity: 0,
     };
   }
+
+  const e = easeOutEditorial(rawProgress);
 
   if (style === 'flip') {
     if (direction === 'next') {

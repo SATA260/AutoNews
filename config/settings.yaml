@@ -1,6 +1,12 @@
 version: 1
 timezone: Asia/Shanghai
 
+collector:
+  xCookieFile: storage/secrets/x-cookies.json
+  maxImagesPerArticle: 4
+  captureWebTables: true
+  captureTweetScreenshots: true
+
 issue:
   # 每期条数 N 不在全局设默认值，在新建定时任务或手动触发时显式填写
   reserveFactor: 2 # 兼容旧任务配置
@@ -20,7 +26,6 @@ editorial:
   maxRevisions: 2 # 核查打回润色的最大轮数
   sourceMaxChars: 20000 # 单个事件送入模型的原文总字数上限
   historyDedupDays: 14
-  titleSimilarityThreshold: 0.6
   metaTextBlacklist: [ "已依据", "以下是", "根据您提供", "作为AI", "总结如下", "```" ]
 
 contentLimits:
@@ -71,7 +76,7 @@ clis:
     bin: biliup
 
 tts:
-  provider: indextts # 默认使用项目内 IndexTTS2.5 本地语音克隆模型
+  provider: qwen-local # 默认使用项目内 IndexTTS2.5 本地语音克隆模型
   providers:
     silent: { charsPerSecond: 4.5 }
     indextts:
@@ -140,11 +145,20 @@ template:
   cover: { dir: templates/cover-card } # 视频封面模板；删掉这一行则直接用视频第一帧作封面
 
 render:
+  theme: dark # 视频模板外观主题：dark（深色模式）| light（浅色模式）
   width: 1920
   height: 1080
   fps: 30
   pagePaddingSec: 1.0 # 每条口播念完后的画面停顿时间（秒）
   bgm: { file: "", volumeDb: -12, duckDb: -5 }
+  # 切换下一条时的鼠标点击音效：file 留空关闭；volumeDb 音量；leadMs 比切页起点提前多少毫秒发声；postDelayMs 切页后等待多少毫秒再开始播报
+  pageTurnSfx:
+    {
+      file: "assets/sfx/page-click.wav",
+      volumeDb: -9,
+      leadMs: 60,
+      postDelayMs: 1000
+    }
 
 publish:
   mode: manual-review # manual-review | auto（auto 只在 qa 通过时自动发布）
@@ -156,9 +170,13 @@ publish:
     titleMax: 80
     descMax: 2000
     tagsMax: 12
-    defaultTags: [ AI, 人工智能, 科技资讯, AI每日报 ]
+    defaultTags:
+      - AI
+      - 人工智能
+      - 科技资讯
+      - AI每日报
     aiDeclaration: true # 强制开启 B 站平台 AI 生成内容声明标识
-    aiDisclaimerText: "本视频由 AI 辅助整理与配音，内容均经原文核查，参考来源见简介。"
+    aiDisclaimerText: "本视频由 AI 辅助整理与配音，内容均经原文核查。"
 
 # 定时任务（执行时间 + 每期条数）不在配置文件设默认值，统一在 SQLite schedules 表中手动新建管理
 

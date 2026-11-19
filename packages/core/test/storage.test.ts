@@ -91,12 +91,12 @@ describe('M1 sqlite storage, paths, and transactions', () => {
       runMigrations(db);
       expect(
         db
-          .prepare('SELECT host_id, host_manual, media_dirty FROM runs WHERE id = ?')
+          .prepare('SELECT host_id, host_manual, media_dirty, not_before_at FROM runs WHERE id = ?')
           .get('old-run'),
-      ).toMatchObject({ host_id: 'gpt', host_manual: 0, media_dirty: 0 });
+      ).toMatchObject({ host_id: 'gpt', host_manual: 0, media_dirty: 0, not_before_at: null });
       expect(
         db.prepare('SELECT version FROM schema_migrations ORDER BY version').all(),
-      ).toHaveLength(3);
+      ).toHaveLength(4);
     } finally {
       db.close();
     }
@@ -154,12 +154,75 @@ describe('M1 sqlite storage, paths, and transactions', () => {
       name: '早报任务',
       time: '08:00',
       itemCount: 6,
+      cutoffMode: 'hours',
+      maxAgeHours: 24,
       enabled: true,
       now,
     });
     expect(sched.time).toBe('08:00');
+    expect(sched.cutoffMode).toBe('hours');
+    expect(sched.maxAgeHours).toBe(24);
     expect(repos.schedules.list()).toHaveLength(1);
     expect(repos.schedules.remove('sched-1')).toBe(true);
+
+    // 验证严格最早时间过滤：即使晚于下限才初次抓到，明确发布时间更早的文章也必须被排除
+    repos.articles.insertIfAbsent({
+      id: 'art-old',
+      sourceId: 'openai-news',
+      canonicalUrl: 'https://openai.com/news/old',
+      title: 'Old Post',
+      titleNorm: 'old post',
+      lang: 'en',
+      publishedAt: '2026-11-15T10:00:00.000Z',
+      firstSeenAt: '2026-11-16T02:00:00.000Z',
+      excerpt: 'Old',
+      contentPath: 'storage/articles/art-old.json',
+      contentChars: 500,
+      imagePath: null,
+      extractStatus: 'ok',
+    });
+    repos.articles.insertIfAbsent({
+      id: 'art-undated-old',
+      sourceId: 'openai-news',
+      canonicalUrl: 'https://openai.com/news/undated-old',
+      title: 'Undated Old Post',
+      titleNorm: 'undated old post',
+      lang: 'en',
+      publishedAt: null,
+      firstSeenAt: '2026-11-15T22:00:00.000Z',
+      excerpt: 'Undated old',
+      contentPath: 'storage/articles/art-undated-old.json',
+      contentChars: 500,
+      imagePath: null,
+      extractStatus: 'ok',
+    });
+    repos.articles.insertIfAbsent({
+      id: 'art-fresh',
+      sourceId: 'openai-news',
+      canonicalUrl: 'https://openai.com/news/fresh',
+      title: 'Fresh Post',
+      titleNorm: 'fresh post',
+      lang: 'en',
+      publishedAt: '2026-11-16T04:00:00.000Z',
+      firstSeenAt: '2026-11-16T04:05:00.000Z',
+      excerpt: 'Fresh',
+      contentPath: 'storage/articles/art-fresh.json',
+      contentChars: 500,
+      imagePath: null,
+      extractStatus: 'ok',
+    });
+
+    const strictList = repos.articles.listCandidates('2026-11-16T00:00:00.000Z', false, {
+      strictNotBefore: true,
+    });
+    expect(strictList.map((a) => a.id)).toEqual(['art-fresh']);
+
+    const recentOrigins = repos.articles.listRecentForOriginCheck(
+      '2026-11-01T00:00:00.000Z',
+      '2026-11-16T00:00:00.000Z',
+      10,
+    );
+    expect(recentOrigins.map((a) => a.id)).toContain('art-old');
 
     await core.close();
   });

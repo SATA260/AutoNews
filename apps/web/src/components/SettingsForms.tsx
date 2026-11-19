@@ -509,6 +509,7 @@ export function WorkflowSettingsForm({ settings }: { settings: Settings }) {
     ttsProvider: settings.tts.provider,
     pauseAfterNarrate: settings.tts.pauseAfterNarrate,
     activeTemplate: settings.template.active,
+    renderTheme: settings.render.theme ?? 'dark',
     pagePaddingSec: settings.render.pagePaddingSec,
     bgmVolumeDb: settings.render.bgm.volumeDb,
     publish: settings.publish,
@@ -714,6 +715,19 @@ export function WorkflowSettingsForm({ settings }: { settings: Settings }) {
                   {name}
                 </option>
               ))}
+            </select>
+          </label>
+        </div>
+        <div>
+          <label className="block text-xs font-medium text-slate-700">
+            视频模板外观主题
+            <select
+              name="renderTheme"
+              defaultValue={settings.render.theme ?? 'dark'}
+              className="mt-1 w-full rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-xs font-normal"
+            >
+              <option value="dark">深色模式（dark）</option>
+              <option value="light">浅色模式（light）</option>
             </select>
           </label>
         </div>

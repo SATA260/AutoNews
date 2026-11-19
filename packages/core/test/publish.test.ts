@@ -290,7 +290,7 @@ describe('Bilibili publishing, AI declaration, consumption, and uncertain recove
     expect(() => normalizeBvid('invalid-id')).toThrow();
     expect(parseBvidFromOutput('uploaded: BV1ab411c7mD done', '')).toBe('BV1ab411c7mD');
 
-    const desc = buildBilibiliDescription({
+    const baseDescOpts = {
       packageData: {
         order: ['i1'],
         headlineItemId: 'i1',
@@ -305,7 +305,7 @@ describe('Bilibili publishing, AI declaration, consumption, and uncertain recove
         sections: [
           {
             key: 'intro',
-            kind: 'intro',
+            kind: 'intro' as const,
             audioFile: 'a.wav',
             startMs: 0,
             speechMs: 3000,
@@ -314,7 +314,7 @@ describe('Bilibili publishing, AI declaration, consumption, and uncertain recove
           },
           {
             key: 'item-01',
-            kind: 'item',
+            kind: 'item' as const,
             itemId: 'i1',
             audioFile: 'b.wav',
             startMs: 65_000,
@@ -330,7 +330,7 @@ describe('Bilibili publishing, AI declaration, consumption, and uncertain recove
           runId: 'r1',
           eventId: 'e1',
           position: 1,
-          status: 'passed',
+          status: 'passed' as const,
           revision: 0,
           dropReason: null,
           finalJson: {
@@ -349,37 +349,17 @@ describe('Bilibili publishing, AI declaration, consumption, and uncertain recove
           updatedAt: '2026-11-16T00:00:00.000Z',
         },
       ],
-      articlesById: new Map([
-        [
-          'a1',
-          {
-            id: 'a1',
-            sourceId: 's1',
-            canonicalUrl: 'https://example.com/very-long-source-url-that-gets-trimmed-first',
-            title: 'Source',
-            titleNorm: 'source',
-            lang: 'en',
-            publishedAt: null,
-            firstSeenAt: '2026-11-16T00:00:00.000Z',
-            excerpt: null,
-            contentPath: null,
-            contentChars: 500,
-            imagePath: null,
-            extractStatus: 'ok',
-            status: 'reserved',
-            reservedByRun: 'r1',
-          },
-        ],
-      ]),
-      eventsArticleIdsByEventId: new Map([['e1', ['a1']]]),
-      sourceNameById: new Map([['s1', '测试信源']]),
+    };
+
+    const desc = buildBilibiliDescription({
+      ...baseDescOpts,
       publishConfig: {
         cli: 'biliup',
         cookieFile: 'storage/secrets/c.json',
         tid: 231,
         copyright: 1,
         titleMax: 80,
-        descMax: 120,
+        descMax: 200,
         tagsMax: 4,
         defaultTags: ['AI', 'AI每日报'],
         aiDeclaration: true,
@@ -387,11 +367,32 @@ describe('Bilibili publishing, AI declaration, consumption, and uncertain recove
       },
     });
 
-    expect(Array.from(desc).length).toBeLessThanOrEqual(120);
+    expect(Array.from(desc).length).toBeLessThanOrEqual(200);
+    expect(desc).toContain('导览简介：今日大事汇总');
     expect(desc).toContain('00:00 开场导览');
     expect(desc).toContain('01:05 01 测试新闻条目');
     expect(desc).toContain('本视频含 AI 生成内容声明。');
-    expect(desc).not.toContain('https://example.com/');
+    expect(desc).not.toContain('参考来源');
+    expect(desc).not.toContain('https://');
+
+    const truncatedDesc = buildBilibiliDescription({
+      ...baseDescOpts,
+      publishConfig: {
+        cli: 'biliup',
+        cookieFile: 'storage/secrets/c.json',
+        tid: 231,
+        copyright: 1,
+        titleMax: 80,
+        descMax: 52,
+        tagsMax: 4,
+        defaultTags: ['AI', 'AI每日报'],
+        aiDeclaration: true,
+        aiDisclaimerText: '本视频含 AI 生成内容声明。',
+      },
+    });
+
+    expect(Array.from(truncatedDesc).length).toBeLessThanOrEqual(52);
+    expect(truncatedDesc).toContain('本视频含 AI 生成内容声明。');
 
     const tags = buildBilibiliTags(['AI', 'OpenAI', '大模型', 'Claude', 'Gemini'], {
       cli: 'biliup',
@@ -427,11 +428,11 @@ describe('Bilibili publishing, AI declaration, consumption, and uncertain recove
       );
 
       const after = await core.publish.updateCover(runId, {
-        title: 'GPT-6.2 *翻车了*',
+        title: '英伟达\n*停发*H200',
         subtitle: '成本砍到三分之一',
       });
       expect(after.source).toBe('manual');
-      expect(after.text).toEqual({ title: 'GPT-6.2 *翻车了*', subtitle: '成本砍到三分之一' });
+      expect(after.text).toEqual({ title: '英伟达\n*停发*H200', subtitle: '成本砍到三分之一' });
 
       const jpg = await fs.readFile(
         path.join(core.context.paths.runDir(runId), 'output', 'cover.jpg'),
@@ -493,7 +494,9 @@ describe('Bilibili publishing, AI declaration, consumption, and uncertain recove
     const draft = await core.publish.getDraft(runId);
     expect(draft.aiDeclaration).toBe(true);
     expect(draft.description).toContain('00:05 01 OpenAI 新推理架构');
-    expect(draft.description).toContain('https://openai.com/news/release-one');
+    expect(draft.description).not.toContain('参考来源');
+    expect(draft.description).not.toContain('OpenAI 官方博客');
+    expect(draft.description).not.toContain('https://openai.com/news/release-one');
 
     const edited = await core.publish.updateDraft(runId, {
       title: '人工修订标题：OpenAI 推理大提速',

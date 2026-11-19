@@ -1,5 +1,11 @@
 # 配置示例。真正生效的是 config/settings.yaml。
-# 这里只标出配音相关的可选项，避免把本机密钥写进示例。
+# 这里只标出配音与采集相关的可选项，避免把本机密钥写进示例。
+
+collector:
+  xCookieFile: storage/secrets/x-cookies.json
+  maxImagesPerArticle: 4
+  captureWebTables: true
+  captureTweetScreenshots: true
 
 tts:
   provider: qwen-local
@@ -14,3 +20,9 @@ tts:
     denoise: true
     sentenceGapMs: 250
     sectionGapMs: 600
+
+render:
+  # 视频模板外观主题：dark（深色模式）| light（浅色模式）
+  theme: dark
+  # 切换下一条时的鼠标点击音效：file 留空关闭；volumeDb 音量；leadMs 比切页起点提前多少毫秒发声；postDelayMs 切页后等待多少毫秒再开始播报
+  pageTurnSfx: { file: "assets/sfx/page-click.wav", volumeDb: -9, leadMs: 60, postDelayMs: 1000 }

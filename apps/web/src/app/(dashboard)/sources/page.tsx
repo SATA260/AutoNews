@@ -1,3 +1,4 @@
+import type { SourceKind } from '@aidaily/contracts';
 import { SourceActions } from '@/components/SourceActions';
 import { getCore } from '@/lib/core';
 import { formatTimestamp } from '@/lib/format';
@@ -5,20 +6,51 @@ import { formatTimestamp } from '@/lib/format';
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
 
+const KIND_TEXT: Record<SourceKind, string> = {
+  rss: 'RSS 订阅',
+  'html-list': '官方列表页',
+  'x-timeline': 'X 账号动态',
+};
+
 /** 信源管理页：展示所有主力和备用新闻源的运行健康状况，支持一键启停和实时无缓存试抓 */
 export default async function SourcesPage() {
   const core = await getCore();
   const settings = core.config.getSettings();
-  const sources = await core.sources.list();
+  const [sources, xAuth] = await Promise.all([core.sources.list(), core.sources.getXAuthStatus()]);
 
   return (
     <div className="space-y-5">
       <div>
         <h2 className="text-xl font-bold text-slate-900">新闻信源管理</h2>
         <p className="mt-1 text-xs text-slate-600">
-          共配置 {sources.length} 个国内外 AI
-          资讯源，区分主力抓取池与备用补充池，修改启停状态会保留原有注释直接更新配置。
+          共配置 {sources.length} 个国内外 AI 资讯源，支持 RSS、官网列表页与 X
+          账号动态三种协议，修改启停状态会保留原有注释直接更新配置。
         </p>
+      </div>
+
+      <div
+        className={`rounded-xl border px-4 py-3 text-xs ${
+          xAuth.configured
+            ? 'border-emerald-200 bg-emerald-50 text-emerald-900'
+            : 'border-amber-200 bg-amber-50 text-amber-900'
+        }`}
+      >
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <span className="font-semibold">
+            X (Twitter) 动态抓取登录态：{xAuth.configured ? '已配置' : '未登录'}
+          </span>
+          <span className="font-mono text-[11px] opacity-80">{xAuth.detail}</span>
+        </div>
+        {!xAuth.configured ? (
+          <p className="mt-1 text-[11px]">
+            请在终端运行 <code className="rounded bg-white/70 px-1 py-0.5">aidaily x-login</code>{' '}
+            完成扫码/登录，或使用{' '}
+            <code className="rounded bg-white/70 px-1 py-0.5">
+              aidaily x-login --import cookies.txt
+            </code>{' '}
+            导入 Cookie；未登录时会自动跳过 X 账号信源，不影响其他新闻抓取。
+          </p>
+        ) : null}
       </div>
 
       <div className="grid gap-4 md:grid-cols-2">
@@ -57,7 +89,7 @@ export default async function SourcesPage() {
                 <span>池分组：{source.pool === 'primary' ? '主力池' : '备用补充池'}</span>
                 <span>语言：{source.lang === 'zh' ? '中文' : '英文'}</span>
                 <span>优先级：Tier {source.tier}</span>
-                <span>协议：{source.kind}</span>
+                <span>协议：{KIND_TEXT[source.kind] ?? source.kind}</span>
               </div>
 
               <p className="truncate font-mono text-[11px] text-slate-500" title={source.url}>

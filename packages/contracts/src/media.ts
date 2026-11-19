@@ -98,6 +98,8 @@ export const TimelineSectionSchema = z.object({
   itemId: z.string().optional(),
   audioFile: z.string().min(1),
   startMs: z.number().nonnegative(),
+  /** 画面出现后等待多少毫秒再开始播报口播（首页为 0，其余页通常为切换音效后的等待时长） */
+  speechOffsetMs: z.number().nonnegative().optional(),
   speechMs: z.number().nonnegative(),
   pageMs: z.number().positive(),
   sentences: z.array(TimelineSentenceSchema),

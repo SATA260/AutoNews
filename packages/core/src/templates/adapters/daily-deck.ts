@@ -5,7 +5,6 @@ import type {
   BrowserPageLike,
   ContentLimits,
   InfoCard,
-  InfoCardIcon,
   MascotMood,
   PagePlan,
   RenderableIssue,
@@ -258,20 +257,17 @@ async function ensureDailyDeckBuilt(templateDir: string, signal?: AbortSignal): 
   return distDir;
 }
 
-const FALLBACK_CARD_ICONS: readonly InfoCardIcon[] = [
-  'rocket',
-  'zap',
-  'cpu',
-  'clipboard-check',
-  'globe',
-  'shield',
-];
+/** 模板单页最多展示的信息卡片张数 */
+const DAILY_DECK_MAX_VISIBLE_CARDS = 4;
 
-/** 按模板网格结构整理或从历史摘要字段自动组装单条新闻的信息卡片列表 */
+/**
+ * 按模板网格结构整理或从历史摘要字段自动组装单条新闻的信息卡片列表（最多 4 张）。
+ * 卡片没有指定图标时不在这里随意补，交给模板按标题和正文关键词自动匹配。
+ */
 function buildAdapterCards(item: RenderableNewsItem): InfoCard[] {
   if (Array.isArray(item.cards) && item.cards.length > 0) {
-    return item.cards.slice(0, 8).map((card, idx) => ({
-      icon: card.icon ?? FALLBACK_CARD_ICONS[idx % FALLBACK_CARD_ICONS.length],
+    return item.cards.slice(0, DAILY_DECK_MAX_VISIBLE_CARDS).map((card) => ({
+      ...(card.icon ? { icon: card.icon } : {}),
       title: card.title,
       body: card.body,
     }));
@@ -285,13 +281,16 @@ function buildAdapterCards(item: RenderableNewsItem): InfoCard[] {
       body: item.summary.trim().slice(0, 78),
     });
   }
-  for (let i = 0; i < item.keyPoints.length && cards.length < 6; i++) {
+  for (
+    let i = 0;
+    i < item.keyPoints.length && cards.length < DAILY_DECK_MAX_VISIBLE_CARDS - 1;
+    i++
+  ) {
     const point = item.keyPoints[i]?.trim();
     if (!point) {
       continue;
     }
     cards.push({
-      icon: FALLBACK_CARD_ICONS[(i + 1) % FALLBACK_CARD_ICONS.length],
       title: `关键看点 ${i + 1}`,
       body: point.slice(0, 78),
     });
@@ -299,28 +298,31 @@ function buildAdapterCards(item: RenderableNewsItem): InfoCard[] {
   if (
     item.detail.trim().length > 0 &&
     item.detail.trim() !== item.summary.trim() &&
-    cards.length < 7
+    cards.length < DAILY_DECK_MAX_VISIBLE_CARDS
   ) {
     cards.push({
-      icon: 'clipboard-check',
       title: '背景与详情',
       body: item.detail.trim().slice(0, 78),
     });
   }
-  if (Array.isArray(item.metrics) && item.metrics.length > 0 && cards.length < 8) {
+  if (
+    Array.isArray(item.metrics) &&
+    item.metrics.length > 0 &&
+    cards.length < DAILY_DECK_MAX_VISIBLE_CARDS
+  ) {
     const metricsSummary = item.metrics
       .map((m) => `${m.label}：${m.value}`)
       .join('；')
       .slice(0, 78);
     if (metricsSummary) {
       cards.push({
-        icon: 'cpu',
+        icon: 'gauge',
         title: '核心参数',
         body: metricsSummary,
       });
     }
   }
-  return cards.slice(0, 8);
+  return cards.slice(0, DAILY_DECK_MAX_VISIBLE_CARDS);
 }
 
 /** 将任务目录内音频或配图相对路径转换为模板本地服务可访问的链接 */
@@ -392,10 +394,17 @@ export function createDailyDeckAdapter(): TemplateAdapter {
         coverFrameCount !== undefined
           ? Math.max(1, Number((coverFrameCount / targetFps).toFixed(6)))
           : Math.max(1, Number((((introSec?.pageMs ?? 5000) as number) / 1000).toFixed(3)));
-      const coverSpeechSec = Math.max(
+      const coverSpeechStartSec = Math.max(
         0,
         Math.min(
           coverDurationSec,
+          Number(((qIntro?.speechOffsetMs ?? introSec?.speechOffsetMs ?? 0) / 1000).toFixed(3)),
+        ),
+      );
+      const coverSpeechSec = Math.max(
+        0,
+        Math.min(
+          Math.max(0, coverDurationSec - coverSpeechStartSec),
           Number((((introSec?.speechMs ?? introSec?.pageMs ?? 5000) as number) / 1000).toFixed(3)),
         ),
       );
@@ -405,10 +414,17 @@ export function createDailyDeckAdapter(): TemplateAdapter {
         outroFrameCount !== undefined
           ? Math.max(1, Number((outroFrameCount / targetFps).toFixed(6)))
           : Math.max(1, Number((((outroSec?.pageMs ?? 6000) as number) / 1000).toFixed(3)));
-      const outroSpeechSec = Math.max(
+      const outroSpeechStartSec = Math.max(
         0,
         Math.min(
           outroDurationSec,
+          Number(((qOutro?.speechOffsetMs ?? outroSec?.speechOffsetMs ?? 0) / 1000).toFixed(3)),
+        ),
+      );
+      const outroSpeechSec = Math.max(
+        0,
+        Math.min(
+          Math.max(0, outroDurationSec - outroSpeechStartSec),
           Number((((outroSec?.speechMs ?? outroSec?.pageMs ?? 6000) as number) / 1000).toFixed(3)),
         ),
       );
@@ -430,12 +446,14 @@ export function createDailyDeckAdapter(): TemplateAdapter {
         pagePaddingSec: issue.pagePaddingSec ?? 1.0,
         coverFrameCount,
         coverDurationSec,
+        coverSpeechStartSec,
         coverSpeechSec,
         coverAudioUrl: toRunAssetUrl(introSec?.audioFile),
         coverLipSync: introSec ? (lipMap[introSec.key] ?? []) : [],
         coverSubtitles: buildSectionSubtitles(introSec, coverDurationSec),
         outroFrameCount,
         outroDurationSec,
+        outroSpeechStartSec,
         outroSpeechSec,
         outroAudioUrl: toRunAssetUrl(outroSec?.audioFile),
         outroLipSync: outroSec ? (lipMap[outroSec.key] ?? []) : [],
@@ -448,10 +466,17 @@ export function createDailyDeckAdapter(): TemplateAdapter {
             itemFrameCount !== undefined
               ? Math.max(1, Number((itemFrameCount / targetFps).toFixed(6)))
               : Math.max(1, Number(((sec?.pageMs ?? 8000) / 1000).toFixed(3)));
-          const speechDurationSec = Math.max(
+          const speechStartSec = Math.max(
             0,
             Math.min(
               durationSec,
+              Number(((qItem?.speechOffsetMs ?? sec?.speechOffsetMs ?? 0) / 1000).toFixed(3)),
+            ),
+          );
+          const speechDurationSec = Math.max(
+            0,
+            Math.min(
+              Math.max(0, durationSec - speechStartSec),
               Number(((sec?.speechMs ?? sec?.pageMs ?? 8000) / 1000).toFixed(3)),
             ),
           );
@@ -477,6 +502,7 @@ export function createDailyDeckAdapter(): TemplateAdapter {
             mascotMood: item.mascotMood ?? 'neutral',
             frameCount: itemFrameCount,
             durationSec,
+            speechStartSec,
             speechDurationSec,
             audioUrl: toRunAssetUrl(sec?.audioFile),
             lipSyncFrames: sec ? (lipMap[sec.key] ?? []) : [],
@@ -717,7 +743,15 @@ export function createDailyDeckAdapter(): TemplateAdapter {
 
         const startFrame = sec.startFrame;
         const frameCount = Math.max(1, sec.frameCount);
-        const preferredRepOffset = sec.index === 0 ? Math.round(0.8 * fps) : Math.round(0.65 * fps);
+        const speechOffsetMs = sec.speechOffsetMs ?? 0;
+        // 代表帧截图时刻：封面取开头不久；新闻页取口播真正开始后进行到 85% 时（卡片已全部出齐）
+        const isNewsSection = sec.index > 0 && sec.index < totalPageCount - 1;
+        const preferredRepOffset =
+          sec.index === 0
+            ? Math.round(0.8 * fps)
+            : isNewsSection && sec.speechMs > 0
+              ? Math.round(((speechOffsetMs + sec.speechMs * 0.85) / 1000) * fps)
+              : Math.round(((speechOffsetMs + 650) / 1000) * fps);
         const repLocalFrame = Math.min(frameCount - 1, Math.max(0, preferredRepOffset));
         const sectionMood: MascotMood = sec.mood ?? 'neutral';
 

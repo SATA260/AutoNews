@@ -2,8 +2,10 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import type { SourceDef } from '@aidaily/contracts';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
+  type CollectorBrowserDriver,
   canonicalizeUrl,
   collectSources,
   computeArticleId,
@@ -11,11 +13,15 @@ import {
   createRun,
   downloadArticleImage,
   extractArticleContent,
+  fetchArticleHtml,
   type Notifier,
   type NotifyEvent,
   normalizeTitle,
   type PipelineError,
   parseFeedXml,
+  parseHtmlListPage,
+  parsePublishedAt,
+  parseXCookiesFromText,
   readStoredArticleContent,
   updateSourcesFile,
 } from '../src/index.js';
@@ -28,18 +34,7 @@ afterEach(async () => {
 });
 
 /** 创建独立的采集测试工作区并写入信源配置 */
-async function setupWorkspaceWithSources(
-  sources: Array<{
-    id: string;
-    name: string;
-    lang: 'zh' | 'en';
-    tier: 1 | 2 | 3;
-    kind: 'rss';
-    pool: 'primary' | 'backup';
-    url: string;
-    enabled: boolean;
-  }>,
-): Promise<string> {
+async function setupWorkspaceWithSources(sources: SourceDef[]): Promise<string> {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'aidaily-collect-'));
   tempDirs.push(dir);
   await fs.mkdir(path.join(dir, 'config'), { recursive: true });
@@ -801,5 +796,493 @@ describe('collector module and SourceService', () => {
     );
 
     await core.close();
+  });
+
+  it('collects html-list pages with DOM dates, prefers body benchmark charts over og:image, and captures table & embedded tweet screenshots', async () => {
+    const rootDir = await setupWorkspaceWithSources([
+      {
+        id: 'lab-newsroom',
+        name: '实验室官网新闻页',
+        lang: 'en',
+        tier: 1,
+        kind: 'html-list',
+        pool: 'primary',
+        url: 'https://lab.example.com/news',
+        listConfig: {
+          linkSelector: 'a.news-card',
+          urlPattern: '^https://lab\\.example\\.com/news/',
+          renderJs: false,
+        },
+        enabled: true,
+      },
+    ]);
+
+    const bodyPara =
+      'Our flagship reasoning model scores 84.5% on SWE-bench Verified and cuts API cost to $0.40 per million tokens across enterprise workloads. '.repeat(
+        6,
+      );
+    const articleHtml = `<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Flagship Model Benchmark Release</title>
+  <meta property="og:image" content="https://lab.example.com/static/brand-og-cover.png" />
+  <script type="application/ld+json">
+    {"@context":"https://schema.org","@type":"NewsArticle","datePublished":"2026-11-16T07:30:00Z"}
+  </script>
+</head>
+<body>
+  <article>
+    <h1>Flagship Model Benchmark Release</h1>
+    <p>${bodyPara}</p>
+    <figure>
+      <img src="https://lab.example.com/charts/swe-bench-comparison.png" alt="SWE-bench benchmark comparison chart" width="1200" height="720" />
+      <figcaption>SWE-bench Verified benchmark comparison vs peer models</figcaption>
+    </figure>
+    <table>
+      <caption>API Pricing and Benchmark Comparison</caption>
+      <thead><tr><th>Model</th><th>SWE-bench</th><th>Input Cost</th></tr></thead>
+      <tbody>
+        <tr><td>Flagship-2</td><td>84.5%</td><td>$0.40/M</td></tr>
+        <tr><td>Baseline-1</td><td>71.2%</td><td>$1.20/M</td></tr>
+      </tbody>
+    </table>
+    <p>Engineering lead discussion: <a href="https://x.com/thsottiaux/status/1990000000000000001">X post</a></p>
+  </article>
+</body>
+</html>`;
+
+    const undatedHtml = `<!doctype html>
+<html>
+<head><meta charset="utf-8" /><title>Undated Evergreen Note</title></head>
+<body><article><h1>Evergreen Note</h1><p>${bodyPara}</p></article></body>
+</html>`;
+
+    let tableRenderCount = 0;
+    let tweetRenderCount = 0;
+    const mockDriver: CollectorBrowserDriver = {
+      async fetchRenderedHtml() {
+        return '';
+      },
+      async fetchXTimeline() {
+        return [];
+      },
+      async renderDomFragmentPng() {
+        tableRenderCount += 1;
+        return { png: PNG_1X1_BYTES, width: 1200, height: 640 };
+      },
+      async renderTweetCardPng() {
+        tweetRenderCount += 1;
+        return { png: PNG_1X1_BYTES, width: 1080, height: 680 };
+      },
+      async close() {},
+    };
+
+    const core = await createCore({
+      rootDir,
+      now: () => new Date('2026-11-16T10:00:00.000Z'),
+      createCollectorDriver: () => mockDriver,
+      fetchImpl: async (input) => {
+        const url = typeof input === 'string' ? input : input.toString();
+        if (url === 'https://lab.example.com/news') {
+          return new Response(
+            `<html><body>
+              <a class="news-card" href="/news/flagship-benchmark">Flagship Model Benchmark Release</a>
+              <a class="news-card" href="/news/undated-note">Undated Evergreen Note</a>
+            </body></html>`,
+            { status: 200, headers: { 'content-type': 'text/html' } },
+          );
+        }
+        if (url === 'https://lab.example.com/news/flagship-benchmark') {
+          return new Response(articleHtml, {
+            status: 200,
+            headers: { 'content-type': 'text/html' },
+          });
+        }
+        if (url === 'https://lab.example.com/news/undated-note') {
+          return new Response(undatedHtml, {
+            status: 200,
+            headers: { 'content-type': 'text/html' },
+          });
+        }
+        if (url.startsWith('https://cdn.syndication.twimg.com/tweet-result')) {
+          return Response.json({
+            text: 'We just shipped a major throughput upgrade with 40% lower latency.',
+            created_at: 'Mon Nov 16 08:00:00 +0000 2026',
+            user: {
+              name: 'Tibo',
+              screen_name: 'thsottiaux',
+              profile_image_url_https: 'https://pbs.twimg.com/profile_images/test/avatar.jpg',
+            },
+            mediaDetails: [],
+          });
+        }
+        if (url.endsWith('.png')) {
+          return new Response(PNG_1X1_BYTES, {
+            status: 200,
+            headers: { 'content-type': 'image/png' },
+          });
+        }
+        return new Response('Not found', { status: 404 });
+      },
+    });
+
+    try {
+      const ckpt = await collectSources(core.context);
+      expect(ckpt.sourcesOk).toEqual(['lab-newsroom']);
+      expect(tableRenderCount).toBe(1);
+      expect(tweetRenderCount).toBe(1);
+
+      const datedId = computeArticleId('https://lab.example.com/news/flagship-benchmark');
+      const undatedId = computeArticleId('https://lab.example.com/news/undated-note');
+      const datedRec = core.context.repos.articles.getById(datedId);
+      const undatedRec = core.context.repos.articles.getById(undatedId);
+
+      expect(datedRec?.publishedAt).toBe('2026-11-16T07:30:00.000Z');
+      // 没有真实发布日期的文章必须保留 null，绝不能伪造抓取时间
+      expect(undatedRec?.publishedAt).toBeNull();
+
+      const stored = await readStoredArticleContent(rootDir, datedRec?.contentPath ?? null);
+      const assets = stored?.mediaAssets ?? [];
+      const kinds = new Set(assets.map((m) => m.kind));
+      expect(kinds.has('chart')).toBe(true);
+      expect(kinds.has('table_shot')).toBe(true);
+      expect(kinds.has('tweet_shot')).toBe(true);
+      const chartAsset = assets.find((m) => m.kind === 'chart');
+      const coverAsset = assets.find((m) => m.kind === 'cover');
+      expect(chartAsset?.imagePath).toBe(path.join('storage', 'images', `${datedId}.png`));
+      if (coverAsset) {
+        expect(chartAsset?.score ?? 0).toBeGreaterThan(coverAsset.score);
+      }
+      expect(datedRec?.imagePath).toBe(assets[0]?.imagePath ?? null);
+    } finally {
+      await core.close();
+    }
+  });
+
+  it('skips x-timeline gracefully without cookie, and ingests short tweets with screenshots when cookies exist', async () => {
+    const netscape = [
+      '# Netscape HTTP Cookie File',
+      '.x.com\tTRUE\t/\tTRUE\t1900000000\tauth_token\tabc123token',
+      '.x.com\tTRUE\t/\tTRUE\t1900000000\tct0\tcsrf456val',
+    ].join('\n');
+    expect(parseXCookiesFromText(netscape).some((c) => c.name === 'auth_token')).toBe(true);
+
+    const rootDir = await setupWorkspaceWithSources([
+      {
+        id: 'x-thsottiaux',
+        name: 'Tibo (X)',
+        lang: 'en',
+        tier: 1,
+        kind: 'x-timeline',
+        pool: 'primary',
+        url: 'https://x.com/thsottiaux',
+        xConfig: {
+          mode: 'user',
+          handleOrListId: 'thsottiaux',
+          includeReplies: false,
+          includeRetweets: false,
+          minChars: 20,
+        },
+        enabled: true,
+      },
+    ]);
+
+    const mockDriver: CollectorBrowserDriver = {
+      async fetchRenderedHtml() {
+        return '';
+      },
+      async fetchXTimeline() {
+        return [
+          {
+            tweetId: '1990000000000000777',
+            url: 'https://x.com/thsottiaux/status/1990000000000000777',
+            handle: 'thsottiaux',
+            authorName: 'Tibo',
+            avatarUrl: null,
+            text: 'Codex cloud tasks just shipped 2x faster parallel sandboxes for every team.',
+            publishedAt: '2026-11-16T08:45:00.000Z',
+            isReply: false,
+            isRetweet: false,
+            mediaUrls: [],
+            quotedTweet: null,
+          },
+        ];
+      },
+      async renderDomFragmentPng() {
+        return null;
+      },
+      async renderTweetCardPng() {
+        return { png: PNG_1X1_BYTES, width: 1080, height: 640 };
+      },
+      async close() {},
+    };
+
+    const core = await createCore({
+      rootDir,
+      now: () => new Date('2026-11-16T10:00:00.000Z'),
+      createCollectorDriver: () => mockDriver,
+      fetchImpl: async () => new Response('Not found', { status: 404 }),
+    });
+
+    try {
+      // 1. 无 Cookie 时跳过且不报连续失败
+      const noCookieRunId = createRun(core.context, { trigger: 'manual-cli', itemCount: 1 });
+      const firstCkpt = await collectSources(core.context, { runId: noCookieRunId });
+      expect(firstCkpt.sourcesSkipped).toContain('x-thsottiaux');
+      expect(firstCkpt.sourcesFailed).toHaveLength(0);
+      expect(core.context.repos.sourceState.get('x-thsottiaux')).toBeNull();
+
+      // 2. 导入 Netscape Cookie 后成功采集短推文并附带原帖截图
+      const imported = await core.sources.importXCookies(netscape);
+      expect(imported.configured).toBe(true);
+      const secondCkpt = await collectSources(core.context);
+      expect(secondCkpt.sourcesOk).toEqual(['x-thsottiaux']);
+      const tweetArticleId = computeArticleId(
+        'https://x.com/thsottiaux/status/1990000000000000777',
+      );
+      const tweetRec = core.context.repos.articles.getById(tweetArticleId);
+      expect(tweetRec?.extractStatus).toBe('ok');
+      const stored = await readStoredArticleContent(rootDir, tweetRec?.contentPath ?? null);
+      expect((stored?.mediaAssets ?? []).some((m) => m.kind === 'tweet_shot')).toBe(true);
+    } finally {
+      await core.close();
+    }
+  });
+
+  it('parses timezone-less English month dates in source timezone, extracts inline dates, and uses UTC for English html-list sources', async () => {
+    expect(parsePublishedAt('2026-11-18', 'UTC')).toBe('2026-11-18T00:00:00.000Z');
+    expect(parsePublishedAt('Nov 18, 2026', 'UTC')).toBe('2026-11-18T00:00:00.000Z');
+    expect(parsePublishedAt('18 November 2026', 'UTC')).toBe('2026-11-18T00:00:00.000Z');
+    expect(parsePublishedAt('Nov. 18, 2026 at 2:30 PM', 'UTC')).toBe('2026-11-18T14:30:00.000Z');
+    expect(parsePublishedAt('2026/11/13', 'Asia/Shanghai')).toBe('2026-11-12T16:00:00.000Z');
+    expect(parsePublishedAt('Wed, 18 Nov 2026 21:35:43 GMT', 'Asia/Shanghai')).toBe(
+      '2026-11-18T21:35:43.000Z',
+    );
+
+    const parsedInline = parseHtmlListPage(
+      `<html><body><a href="/zh-cn/news/news261113">DeepSeek 全家桶应用 API 发布 2026/11/13</a></body></html>`,
+      {
+        id: 'ds-inline',
+        name: 'DeepSeek',
+        lang: 'zh',
+        tier: 1,
+        kind: 'html-list',
+        pool: 'primary',
+        url: 'https://api-docs.deepseek.com/zh-cn/news/news0802',
+        listConfig: {
+          urlPattern: '^https://api-docs\\.deepseek\\.com/(?:zh-cn/)?news/news[0-9]+/?$',
+          renderJs: false,
+        },
+        enabled: true,
+      },
+      'Asia/Shanghai',
+    );
+    expect(parsedInline).toHaveLength(1);
+    expect(parsedInline[0]?.publishedAt).toBe('2026-11-12T16:00:00.000Z');
+
+    const rootDir = await setupWorkspaceWithSources([
+      {
+        id: 'en-bench',
+        name: 'English Bench',
+        lang: 'en',
+        tier: 1,
+        kind: 'html-list',
+        pool: 'primary',
+        url: 'https://bench.example.com/articles',
+        listConfig: {
+          urlPattern: '^https://bench\\.example\\.com/articles/[a-z0-9-]+$',
+          renderJs: true,
+        },
+        enabled: true,
+      },
+    ]);
+
+    const bodyPara =
+      'Gemini 4 Neon benchmark comparisons and cost numbers are now live across reasoning tests. '.repeat(
+        8,
+      );
+    let listAttempts = 0;
+    const mockDriver: CollectorBrowserDriver = {
+      async fetchRenderedHtml(url) {
+        if (url === 'https://bench.example.com/articles') {
+          listAttempts += 1;
+          if (listAttempts === 1) {
+            throw new Error('Navigation timeout');
+          }
+          return `<html><body><a href="/articles/gemini-4-neon">Gemini 4 Neon Analysis</a></body></html>`;
+        }
+        return `<!doctype html><html><head><script type="application/ld+json">{"datePublished":"Nov 18, 2026"}</script></head><body><article><h1>Gemini 4 Neon Analysis</h1><p>${bodyPara}</p></article></body></html>`;
+      },
+      async fetchXTimeline() {
+        return [];
+      },
+      async renderDomFragmentPng() {
+        return null;
+      },
+      async renderTweetCardPng() {
+        return null;
+      },
+      async close() {},
+    };
+
+    const core = await createCore({
+      rootDir,
+      now: () => new Date('2026-11-19T02:00:00.000Z'),
+      createCollectorDriver: () => mockDriver,
+      fetchImpl: async (input) => {
+        // 模拟需要浏览器渲染的英文来源详情页在裸请求时返回 403 被拒，自动走渲染回退
+        expect(input.toString()).toContain('gemini-4-neon');
+        return new Response('Forbidden', { status: 403 });
+      },
+    });
+
+    try {
+      const ckpt = await collectSources(core.context, { retryDelayMs: 5 });
+      expect(ckpt.sourcesOk).toEqual(['en-bench']);
+      expect(listAttempts).toBe(2);
+      const art = core.context.repos.articles.getById(
+        computeArticleId('https://bench.example.com/articles/gemini-4-neon'),
+      );
+      expect(art?.extractStatus).toBe('ok');
+      expect(art?.publishedAt).toBe('2026-11-18T00:00:00.000Z');
+    } finally {
+      await core.close();
+    }
+  });
+
+  it('retries transient detail HTML failures and upgrades failed articles on subsequent runs', async () => {
+    // 1. 验证 fetchArticleHtml 遇到 502 后自动重试恢复，遇到 404 不做无效重试
+    let htmlCalls = 0;
+    let notFoundCalls = 0;
+    const recovered = await fetchArticleHtml(
+      'https://example.com/transient',
+      async () => {
+        htmlCalls += 1;
+        if (htmlCalls < 3) {
+          return new Response('Bad Gateway', { status: 502 });
+        }
+        return new Response('<html><body><p>Recovered HTML</p></body></html>', {
+          status: 200,
+          headers: { 'content-type': 'text/html' },
+        });
+      },
+      { retries: 2, retryDelayMs: 5 },
+    );
+    expect(recovered).toContain('Recovered HTML');
+    expect(htmlCalls).toBe(3);
+
+    const missing = await fetchArticleHtml(
+      'https://example.com/missing',
+      async () => {
+        notFoundCalls += 1;
+        return new Response('Not Found', { status: 404 });
+      },
+      { retries: 2, retryDelayMs: 5 },
+    );
+    expect(missing).toBeNull();
+    expect(notFoundCalls).toBe(1);
+
+    // 2. 验证某篇文章初抓详情失败记为 failed 后，即使同源更新文章抬高了游标并带回 ETag，下一轮仍绕过 304 原地补全自愈
+    const rootDir = await setupWorkspaceWithSources([
+      {
+        id: 'lab-rss',
+        name: 'Lab RSS',
+        lang: 'en',
+        tier: 1,
+        kind: 'rss',
+        pool: 'primary',
+        url: 'https://lab.example.com/rss.xml',
+        enabled: true,
+      },
+    ]);
+
+    const neonUrl = 'https://lab.example.com/gemini-4-neon';
+    const newerUrl = 'https://lab.example.com/newer-post';
+    const longBody =
+      'Gemini 4 Neon delivers stronger reasoning with faster throughput and detailed developer benchmarks. '.repeat(
+        8,
+      );
+    let round = 1;
+    let conditionalHeaderSeen: string | null = null;
+
+    const core = await createCore({
+      rootDir,
+      now: () => new Date('2026-11-19T02:00:00.000Z'),
+      fetchImpl: async (input, init) => {
+        const url = input.toString();
+        if (url === 'https://lab.example.com/rss.xml') {
+          conditionalHeaderSeen = new Headers(init?.headers).get('if-none-match');
+          if (conditionalHeaderSeen) {
+            return new Response(null, { status: 304, headers: { etag: '"etag-v1"' } });
+          }
+          return new Response(
+            `<?xml version="1.0" encoding="utf-8"?>
+<rss version="2.0"><channel>
+  <item>
+    <title>Newer Lab Note</title>
+    <link>${newerUrl}</link>
+    <pubDate>Wed, 18 Nov 2026 23:00:00 GMT</pubDate>
+    <description>Brief note.</description>
+  </item>
+  <item>
+    <title>Introducing Gemini 4 Neon</title>
+    <link>${neonUrl}</link>
+    <pubDate>Wed, 18 Nov 2026 20:00:00 GMT</pubDate>
+    <description>Short RSS summary under 200 chars.</description>
+  </item>
+</channel></rss>`,
+            { status: 200, headers: { etag: '"etag-v1"' } },
+          );
+        }
+        if (url === newerUrl) {
+          return new Response(
+            buildHtmlPage({ title: 'Newer Lab Note', bodyParagraphs: [longBody] }),
+            {
+              status: 200,
+              headers: { 'content-type': 'text/html' },
+            },
+          );
+        }
+        if (url === neonUrl) {
+          if (round === 1) {
+            throw new Error('ECONNRESET');
+          }
+          return new Response(
+            buildHtmlPage({ title: 'Introducing Gemini 4 Neon', bodyParagraphs: [longBody] }),
+            { status: 200, headers: { 'content-type': 'text/html' } },
+          );
+        }
+        return new Response('Not found', { status: 404 });
+      },
+    });
+
+    try {
+      const neonId = computeArticleId(neonUrl);
+      const newerId = computeArticleId(newerUrl);
+
+      const firstCkpt = await collectSources(core.context, { retryDelayMs: 1 });
+      expect(firstCkpt.newArticleIds).toEqual([newerId]);
+      expect(core.context.repos.articles.getById(neonId)?.extractStatus).toBe('failed');
+      // 因存在临时抓取失败文章，第一轮不缓存 etag，以便下轮自愈重试
+      expect(core.context.repos.sourceState.get('lab-rss')?.etag).toBeNull();
+
+      round = 2;
+      const secondCkpt = await collectSources(core.context, { retryDelayMs: 1 });
+      expect(conditionalHeaderSeen).toBeNull();
+      expect(secondCkpt.newArticleIds).toEqual([neonId]);
+      const healed = core.context.repos.articles.getById(neonId);
+      expect(healed?.extractStatus).toBe('ok');
+      expect(healed?.contentChars).toBeGreaterThanOrEqual(400);
+      expect(core.context.repos.sourceState.get('lab-rss')?.etag).toBe('"etag-v1"');
+
+      // 全部恢复后第三轮恢复增量 304 跳过
+      round = 3;
+      const thirdCkpt = await collectSources(core.context, { retryDelayMs: 1 });
+      expect(conditionalHeaderSeen).toBe('"etag-v1"');
+      expect(thirdCkpt.newArticleIds).toEqual([]);
+    } finally {
+      await core.close();
+    }
   });
 });

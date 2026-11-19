@@ -28,7 +28,7 @@ import { PipelineError } from '../errors.js';
 import { inTransaction } from '../storage/db.js';
 import { readJsonOrNull, writeJsonAtomic } from '../storage/files.js';
 import { emitRunEvent } from '../workflow/events.js';
-import { buildTimeline } from './timeline.js';
+import { buildTimeline, resolvePageTurnPostDelayMs } from './timeline.js';
 
 /** 语音合成阶段完成后写入检查点的结果摘要 */
 export interface NarrateCheckpoint {
@@ -397,6 +397,7 @@ export async function runNarrateStage(opts: {
     runDir,
     pagePaddingSec: settings.render.pagePaddingSec,
     sectionGapMs: settings.tts.postprocess.sectionGapMs,
+    sectionLeadSilenceMs: resolvePageTurnPostDelayMs(settings.render.pageTurnSfx),
   });
 
   await writeJsonAtomic(timelineFile, timeline);
@@ -464,6 +465,7 @@ async function rebuildTimeline(
     runDir,
     pagePaddingSec: settings.render.pagePaddingSec,
     sectionGapMs: settings.tts.postprocess.sectionGapMs,
+    sectionLeadSilenceMs: resolvePageTurnPostDelayMs(settings.render.pageTurnSfx),
   });
   await writeJsonAtomic(path.join(runDir, 'timeline.json'), timeline);
   return timeline;

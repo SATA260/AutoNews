@@ -1,4 +1,10 @@
-import type { PublishRecord, PublishStatus, ScheduleJob } from '@aidaily/contracts';
+import {
+  type PublishRecord,
+  type PublishStatus,
+  type ScheduleCutoffMode,
+  ScheduleCutoffModeSchema,
+  type ScheduleJob,
+} from '@aidaily/contracts';
 import { type DatabaseSync, inTransaction } from '../db.js';
 
 /** 数据库 `schedules` 表行结构 */
@@ -7,6 +13,8 @@ interface ScheduleRow {
   name: string;
   time_expr: string;
   item_count: number;
+  cutoff_mode: string | null;
+  max_age_hours: number | null;
   bgm_file: string | null;
   enabled: number;
   last_run_id: string | null;
@@ -31,11 +39,15 @@ interface PublishRow {
 
 /** 将定时任务数据库行映射为基础定时任务对象 */
 function mapSchedule(row: ScheduleRow): Omit<ScheduleJob, 'installed' | 'nextRunAt'> {
+  const parsedMode = ScheduleCutoffModeSchema.safeParse(row.cutoff_mode);
+  const cutoffMode: ScheduleCutoffMode = parsedMode.success ? parsedMode.data : 'none';
   return {
     id: row.id,
     name: row.name,
     time: row.time_expr,
     itemCount: row.item_count,
+    cutoffMode,
+    maxAgeHours: row.max_age_hours ?? null,
     bgmFile: row.bgm_file,
     enabled: row.enabled === 1,
     lastRunId: row.last_run_id,
@@ -86,18 +98,22 @@ export function createSchedulesRepo(db: DatabaseSync) {
       name: string;
       time: string;
       itemCount: number;
+      cutoffMode?: ScheduleCutoffMode;
+      maxAgeHours?: number | null;
       bgmFile?: string | null;
       enabled: boolean;
       now: string;
     }): Omit<ScheduleJob, 'installed' | 'nextRunAt'> {
       db.prepare(`
-        INSERT INTO schedules (id, name, time_expr, item_count, bgm_file, enabled, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO schedules (id, name, time_expr, item_count, cutoff_mode, max_age_hours, bgm_file, enabled, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).run(
         input.id,
         input.name,
         input.time,
         input.itemCount,
+        input.cutoffMode ?? 'none',
+        input.maxAgeHours ?? null,
         input.bgmFile ?? null,
         input.enabled ? 1 : 0,
         input.now,
@@ -110,13 +126,15 @@ export function createSchedulesRepo(db: DatabaseSync) {
       return created;
     },
 
-    /** 更新指定定时任务的名称、执行时间、条数、启停状态或最近运行记录 */
+    /** 更新指定定时任务的名称、执行时间、条数、时效下限、启停状态或最近运行记录 */
     update(
       id: string,
       patch: {
         name?: string;
         time?: string;
         itemCount?: number;
+        cutoffMode?: ScheduleCutoffMode;
+        maxAgeHours?: number | null;
         bgmFile?: string | null;
         enabled?: boolean;
         lastRunId?: string;
@@ -138,6 +156,14 @@ export function createSchedulesRepo(db: DatabaseSync) {
       if (patch.itemCount !== undefined) {
         sets.push('item_count = ?');
         params.push(patch.itemCount);
+      }
+      if (patch.cutoffMode !== undefined) {
+        sets.push('cutoff_mode = ?');
+        params.push(patch.cutoffMode);
+      }
+      if (patch.maxAgeHours !== undefined) {
+        sets.push('max_age_hours = ?');
+        params.push(patch.maxAgeHours);
       }
       if (patch.bgmFile !== undefined) {
         sets.push('bgm_file = ?');

@@ -5,8 +5,8 @@ export const SourcePoolSchema = z.enum(['primary', 'backup']);
 /** 新闻信源分组类型 */
 export type SourcePool = z.infer<typeof SourcePoolSchema>;
 
-/** 信源抓取方式：RSS 订阅或预留的网页列表抓取 */
-export const SourceKindSchema = z.enum(['rss', 'html-list']);
+/** 信源抓取方式：RSS 订阅、网页新闻列表或 X 账号与列表时间线 */
+export const SourceKindSchema = z.enum(['rss', 'html-list', 'x-timeline']);
 /** 信源抓取方式类型 */
 export type SourceKind = z.infer<typeof SourceKindSchema>;
 
@@ -15,19 +15,83 @@ export const SourceLangSchema = z.enum(['zh', 'en']);
 /** 信源主要语言类型 */
 export type SourceLang = z.infer<typeof SourceLangSchema>;
 
-/** 单条新闻信源配置校验规则 */
-export const SourceDefSchema = z.object({
-  id: z.string().min(1),
-  name: z.string().min(1),
-  lang: SourceLangSchema,
-  tier: z.union([z.literal(1), z.literal(2), z.literal(3)]),
-  kind: SourceKindSchema,
-  pool: SourcePoolSchema,
-  url: z.string().url(),
-  enabled: z.boolean().default(true),
+/** 官方网页新闻列表解析配置 */
+export const HtmlListConfigSchema = z.object({
+  itemSelector: z.string().min(1).optional(),
+  linkSelector: z.string().min(1).optional(),
+  titleSelector: z.string().min(1).optional(),
+  dateSelector: z.string().min(1).optional(),
+  summarySelector: z.string().min(1).optional(),
+  urlPattern: z.string().min(1).optional(),
+  renderJs: z.boolean().default(false),
 });
+/** 网页新闻列表解析配置类型 */
+export type HtmlListConfig = z.infer<typeof HtmlListConfigSchema>;
+
+/** X 账号或列表时间线采集配置 */
+export const XTimelineConfigSchema = z.object({
+  mode: z.enum(['user', 'list']).default('user'),
+  handleOrListId: z.string().min(1),
+  includeReplies: z.boolean().default(false),
+  includeRetweets: z.boolean().default(false),
+  minChars: z.number().int().nonnegative().default(20),
+});
+/** X 时间线采集配置类型 */
+export type XTimelineConfig = z.infer<typeof XTimelineConfigSchema>;
+
+/** 单条新闻信源配置校验规则 */
+export const SourceDefSchema = z
+  .object({
+    id: z.string().min(1),
+    name: z.string().min(1),
+    lang: SourceLangSchema,
+    tier: z.union([z.literal(1), z.literal(2), z.literal(3)]),
+    kind: SourceKindSchema,
+    pool: SourcePoolSchema,
+    url: z.string().url(),
+    enabled: z.boolean().default(true),
+    listConfig: HtmlListConfigSchema.optional(),
+    xConfig: XTimelineConfigSchema.optional(),
+  })
+  .superRefine((src, ctx) => {
+    if (src.kind === 'x-timeline' && !src.xConfig) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['xConfig'],
+        message: 'x-timeline 信源必须提供 xConfig',
+      });
+    }
+  });
 /** 单条新闻信源配置 */
 export type SourceDef = z.infer<typeof SourceDefSchema>;
+
+/** 从文章或推文中提取出的候选视觉素材类别 */
+export const ArticleMediaKindSchema = z.enum([
+  'chart',
+  'table_shot',
+  'tweet_shot',
+  'tweet_media',
+  'screenshot',
+  'cover',
+]);
+/** 候选视觉素材类别 */
+export type ArticleMediaKind = z.infer<typeof ArticleMediaKindSchema>;
+
+/** 单张本地缓存视觉素材的结构化元信息 */
+export const ArticleMediaAssetSchema = z.object({
+  id: z.string().min(1),
+  articleId: z.string().min(1),
+  kind: ArticleMediaKindSchema,
+  imagePath: z.string().min(1),
+  sourceUrl: z.string().nullable(),
+  captionHint: z.string(),
+  contextSnippet: z.string(),
+  score: z.number(),
+  width: z.number().int().positive().optional(),
+  height: z.number().int().positive().optional(),
+});
+/** 候选视觉素材元信息类型 */
+export type ArticleMediaAsset = z.infer<typeof ArticleMediaAssetSchema>;
 
 /** 信源清单配置文件（`config/sources.yaml`）顶层校验规则 */
 export const SourcesFileSchema = z.object({

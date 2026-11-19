@@ -66,30 +66,33 @@
 
   /** 把一段纯文字追加到父节点：英文词包成不换行的整体，换行符转成强制换行 */
   function appendPlainText(parent, text) {
-    const lines = text.split(/\\n|\n/);
+    const lines = text.split(/\r\n?|\n|\\n/);
     lines.forEach((line, lineIdx) => {
       if (lineIdx > 0) parent.appendChild(document.createElement('br'));
+      let clean = line;
+      if (lineIdx < lines.length - 1) clean = clean.replace(/[ \t]+$/, '');
+      if (lineIdx > 0) clean = clean.replace(/^[ \t]+/, '');
       let last = 0;
-      for (const match of line.matchAll(LATIN_WORD)) {
+      for (const match of clean.matchAll(LATIN_WORD)) {
         const start = match.index ?? 0;
-        if (start > last) parent.appendChild(document.createTextNode(line.slice(last, start)));
+        if (start > last) parent.appendChild(document.createTextNode(clean.slice(last, start)));
         const word = document.createElement('span');
         word.className = 'nobr';
         word.textContent = match[0];
         parent.appendChild(word);
         last = start + match[0].length;
       }
-      if (last < line.length) parent.appendChild(document.createTextNode(line.slice(last)));
+      if (last < clean.length) parent.appendChild(document.createTextNode(clean.slice(last)));
     });
   }
 
   /**
    * 把标题文字写入标题节点：用 *星号* 包住的重点词显示为主题色，
-   * 英文词不会在连字符处被拆到两行，全程用文本节点写入，不解析任何 HTML。
+   * 支持使用换行符手动换行，英文词不会在连字符处被拆到两行，全程用文本节点写入，不解析任何 HTML。
    */
   function renderTitle(node, raw) {
     node.textContent = '';
-    const parts = raw.split(/\*([^*\n]+)\*/);
+    const parts = raw.split(/\*([^*]+)\*/);
     parts.forEach((part, idx) => {
       const text = part.replace(/\*/g, '');
       if (!text) return;
@@ -131,7 +134,7 @@
     }
   }
 
-  /** 按当前文字重新计算标题与副标题字号：副标题优先排成一行，太长时才允许两行；主标题优先两行，太长时才允许三行 */
+  /** 按当前文字重新计算标题与副标题字号：若主标题带手动换行则优先保持每行不折行；否则主标题优先两行，太长时才允许三行 */
   function layout() {
     const oneLine = fitText(el.subtitle, { max: 64, min: 50, maxLines: 1, step: 2 });
     if (!oneLine && !fitText(el.subtitle, { max: 54, min: 40, maxLines: 2, step: 2 })) {
@@ -139,10 +142,32 @@
     }
     const box = el.title.parentElement;
     const maxHeight = box ? box.clientHeight : undefined;
-    const twoLines = fitText(el.title, { max: 210, min: 120, maxLines: 2, step: 4, maxHeight });
-    if (!twoLines) {
-      const threeLines = fitText(el.title, { max: 150, min: 90, maxLines: 3, step: 4, maxHeight });
-      if (!threeLines) warnings.push('主标题文字过长，最小字号下仍放不下');
+    const manualLines = el.title.querySelectorAll('br').length + 1;
+    el.title.classList.toggle('is-manual-lines', manualLines >= 2);
+    if (manualLines >= 2) {
+      const exactManual = fitText(el.title, {
+        max: 210,
+        min: 80,
+        maxLines: manualLines,
+        step: 4,
+        maxHeight,
+      });
+      if (!exactManual) {
+        const fallbackThree = fitText(el.title, {
+          max: 150,
+          min: 80,
+          maxLines: 3,
+          step: 4,
+          maxHeight,
+        });
+        if (!fallbackThree) warnings.push('主标题文字过长，最小字号下仍放不下');
+      }
+    } else {
+      const twoLines = fitText(el.title, { max: 210, min: 120, maxLines: 2, step: 4, maxHeight });
+      if (!twoLines) {
+        const threeLines = fitText(el.title, { max: 150, min: 90, maxLines: 3, step: 4, maxHeight });
+        if (!threeLines) warnings.push('主标题文字过长，最小字号下仍放不下');
+      }
     }
   }
 

@@ -1,14 +1,16 @@
-import type {
-  EventRecord,
-  EventRole,
-  ItemVersion,
-  ItemVersionKind,
-  LlmCallRecord,
-  LlmCallStatus,
-  LlmStage,
-  PolishedItem,
-  RunItemRecord,
-  RunItemStatus,
+import {
+  type EventRecord,
+  type EventRole,
+  type ItemVersion,
+  type ItemVersionKind,
+  type LlmCallRecord,
+  type LlmCallStatus,
+  type LlmStage,
+  type PolishedItem,
+  type RunItemRecord,
+  type RunItemStatus,
+  type SelectedMediaOverride,
+  SelectedMediaOverrideSchema,
 } from '@aidaily/contracts';
 import { type DatabaseSync, inTransaction } from '../db.js';
 
@@ -40,6 +42,8 @@ interface RunItemRow {
   final_json: string | null;
   image_mode: 'auto' | 'custom' | 'none';
   custom_image_path: string | null;
+  secondary_custom_image_path: string | null;
+  selected_media_ids: string | null;
   custom_image_caption: string | null;
   updated_at: string;
 }
@@ -124,6 +128,19 @@ export function normalizeStoredPolishedItem(raw: unknown): PolishedItem | null {
   };
 }
 
+/** 安全反序列化条目选定候选图 JSON 配置 */
+function parseSelectedMediaIds(raw: string | null): SelectedMediaOverride | null {
+  if (!raw) {
+    return null;
+  }
+  try {
+    const parsed = SelectedMediaOverrideSchema.safeParse(JSON.parse(raw));
+    return parsed.success ? parsed.data : null;
+  } catch {
+    return null;
+  }
+}
+
 /** 将新闻条目数据库行转换为业务对象 */
 function mapRunItem(row: RunItemRow): RunItemRecord {
   return {
@@ -137,6 +154,8 @@ function mapRunItem(row: RunItemRow): RunItemRecord {
     finalJson: row.final_json ? normalizeStoredPolishedItem(JSON.parse(row.final_json)) : null,
     imageMode: row.image_mode,
     customImagePath: row.custom_image_path,
+    secondaryCustomImagePath: row.secondary_custom_image_path ?? null,
+    selectedMediaIds: parseSelectedMediaIds(row.selected_media_ids ?? null),
     customImageCaption: row.custom_image_caption,
     updatedAt: row.updated_at,
   };

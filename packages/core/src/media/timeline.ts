@@ -7,6 +7,20 @@ import {
   type TimelineSection,
 } from '@aidaily/contracts';
 
+/** 启用切页音效后，切页到下一段口播开始前的默认等待时长（毫秒） */
+export const DEFAULT_PAGE_TURN_POST_DELAY_MS = 1000;
+
+/** 根据切页音效配置算出切换后等待再开始口播的毫秒数；关闭音效时返回 0 */
+export function resolvePageTurnPostDelayMs(
+  pageTurnSfx?: { file: string; postDelayMs?: number } | null,
+): number {
+  if (!pageTurnSfx || !pageTurnSfx.file.trim()) {
+    return 0;
+  }
+  const raw = pageTurnSfx.postDelayMs ?? DEFAULT_PAGE_TURN_POST_DELAY_MS;
+  return Number.isFinite(raw) ? Math.max(0, Math.round(raw)) : DEFAULT_PAGE_TURN_POST_DELAY_MS;
+}
+
 /** 单个章节在整期统一帧网格上的起止帧号与量化毫秒信息 */
 export interface QuantizedSectionFrames {
   index: number;
@@ -15,6 +29,8 @@ export interface QuantizedSectionFrames {
   frameCount: number;
   quantizedStartMs: number;
   quantizedDurationMs: number;
+  /** 画面切入后延迟多少毫秒再开始播报口播 */
+  speechOffsetMs: number;
   speechMs: number;
 }
 
@@ -36,10 +52,17 @@ export function buildTimeline(opts: {
   runDir: string;
   pagePaddingSec: number;
   sectionGapMs: number;
+  /** 除第一页外，每页画面切入后等待多少毫秒再开始下一段口播（用于让切页音效清晰落位） */
+  sectionLeadSilenceMs?: number;
 }): Timeline {
-  const { sections, audioSections, runDir, pagePaddingSec, sectionGapMs } = opts;
+  const { sections, audioSections, runDir, pagePaddingSec, sectionGapMs, sectionLeadSilenceMs } =
+    opts;
   const audioByKey = new Map(audioSections.map((a) => [a.key, a]));
   const paddingMs = Math.max(0, Math.round(pagePaddingSec * 1000));
+  const leadSilenceMs =
+    sectionLeadSilenceMs !== undefined && Number.isFinite(sectionLeadSilenceMs)
+      ? Math.max(0, Math.round(sectionLeadSilenceMs))
+      : 0;
 
   let cursorMs = 0;
   const timelineSections: TimelineSection[] = [];
@@ -55,8 +78,12 @@ export function buildTimeline(opts: {
     }
 
     const isLast = i === sections.length - 1;
+    const speechOffsetMs = i === 0 ? 0 : leadSilenceMs;
     const trailingGapMs = isLast ? 0 : Math.max(0, sectionGapMs);
-    const pageMs = Math.max(1, Math.round(audio.speechMs) + paddingMs + trailingGapMs);
+    const pageMs = Math.max(
+      1,
+      speechOffsetMs + Math.round(audio.speechMs) + paddingMs + trailingGapMs,
+    );
     const startMs = cursorMs;
     cursorMs += pageMs;
 
@@ -67,11 +94,12 @@ export function buildTimeline(opts: {
       itemId: section.itemId,
       audioFile: relAudioFile,
       startMs,
+      ...(speechOffsetMs > 0 ? { speechOffsetMs } : {}),
       speechMs: Math.round(audio.speechMs),
       pageMs,
       sentences: audio.sentences.map((s) => ({
         text: s.text,
-        startMs: startMs + Math.round(s.offsetMs),
+        startMs: startMs + speechOffsetMs + Math.round(s.offsetMs),
         durationMs: Math.round(s.durationMs),
       })),
     });
@@ -161,6 +189,14 @@ export function quantizeTimelineToFps(timeline: Timeline, fps: number): Quantize
     const audioEndMs = Math.round((endFrame * 1000) / safeFps);
     const audioPageMs = Math.max(1, audioEndMs - audioStartMs);
     const shiftMs = audioStartMs - orig.startMs;
+    const clampedSpeechOffsetMs = Math.min(
+      Math.max(0, Math.round(orig.speechOffsetMs ?? 0)),
+      Math.max(0, audioPageMs - 1),
+    );
+    const clampedSpeechMs = Math.min(
+      orig.speechMs,
+      Math.max(0, audioPageMs - clampedSpeechOffsetMs),
+    );
 
     quantizedSections.push({
       index: k,
@@ -169,17 +205,19 @@ export function quantizeTimelineToFps(timeline: Timeline, fps: number): Quantize
       frameCount,
       quantizedStartMs,
       quantizedDurationMs,
-      speechMs: Math.min(orig.speechMs, Math.round(quantizedDurationMs)),
+      speechOffsetMs: clampedSpeechOffsetMs,
+      speechMs: clampedSpeechMs,
     });
 
     audioSections.push({
       ...orig,
       startMs: audioStartMs,
+      ...(clampedSpeechOffsetMs > 0 ? { speechOffsetMs: clampedSpeechOffsetMs } : {}),
       pageMs: audioPageMs,
-      speechMs: Math.min(orig.speechMs, audioPageMs),
+      speechMs: clampedSpeechMs,
       sentences: orig.sentences.map((s) => ({
         ...s,
-        startMs: Math.max(audioStartMs, s.startMs + shiftMs),
+        startMs: Math.max(audioStartMs + clampedSpeechOffsetMs, s.startMs + shiftMs),
       })),
     });
   }

@@ -6,6 +6,11 @@ export const AiStageNameSchema = z.enum(['select', 'summarize', 'polish', 'factc
 /** AI 处理环节名称类型 */
 export type AiStageName = z.infer<typeof AiStageNameSchema>;
 
+/** 视频合成使用的模板外观主题枚举（浅色或深色） */
+export const RenderThemeSchema = z.enum(['light', 'dark']);
+/** 视频模板外观主题类型 */
+export type RenderTheme = z.infer<typeof RenderThemeSchema>;
+
 /** 单个 AI 处理环节使用的调用名称、模型名与超时重试配置 */
 export const StageAiConfigSchema = z.object({
   cli: z.string().min(1),
@@ -124,10 +129,26 @@ export const TemplateEntrySchema = z.object({
 /** 视频模板配置项类型 */
 export type TemplateEntry = z.infer<typeof TemplateEntrySchema>;
 
+/** 新闻采集与视觉素材提取运行参数配置 */
+export const CollectorSettingsSchema = z.object({
+  xCookieFile: z.string().min(1).default('storage/secrets/x-cookies.json'),
+  maxImagesPerArticle: z.number().int().min(1).max(8).default(4),
+  captureWebTables: z.boolean().default(true),
+  captureTweetScreenshots: z.boolean().default(true),
+});
+/** 采集配置类型 */
+export type CollectorSettings = z.infer<typeof CollectorSettingsSchema>;
+
 /** 系统全局配置字段 */
 const SettingsFieldsSchema = z.object({
   version: z.literal(1),
   timezone: z.string().min(1),
+  collector: CollectorSettingsSchema.default({
+    xCookieFile: 'storage/secrets/x-cookies.json',
+    maxImagesPerArticle: 4,
+    captureWebTables: true,
+    captureTweetScreenshots: true,
+  }),
   issue: z.object({
     reserveFactor: z.number().int().min(1).max(5),
     minScore: z.number().min(1).max(10).optional(),
@@ -147,7 +168,8 @@ const SettingsFieldsSchema = z.object({
     maxRevisions: z.number().int().min(0).max(5),
     sourceMaxChars: z.number().int().positive(),
     historyDedupDays: z.number().int().nonnegative(),
-    titleSimilarityThreshold: z.number().min(0).max(1),
+    /** 兼容旧配置快照保留的可选字段，当前选题不再按标题字符相似度直接删除候选 */
+    titleSimilarityThreshold: z.number().min(0).max(1).optional(),
     metaTextBlacklist: z.array(z.string()),
   }),
   contentLimits: ContentLimitsSchema,
@@ -175,6 +197,8 @@ const SettingsFieldsSchema = z.object({
       .optional(),
   }),
   render: z.object({
+    /** 视频模板外观主题（light 浅色 / dark 深色），未配置时默认使用深色模式 */
+    theme: RenderThemeSchema.optional(),
     width: z.number().int().positive(),
     height: z.number().int().positive(),
     fps: z.number().int().positive(),
@@ -184,6 +208,16 @@ const SettingsFieldsSchema = z.object({
       volumeDb: z.number(),
       duckDb: z.number(),
     }),
+    /** 切换页面音效：file 为空字符串时不加音效；leadMs 表示比翻页起点提前多少毫秒发声；postDelayMs 表示播放完切换音效后等待多少毫秒再开始下一段口播 */
+    pageTurnSfx: z
+      .object({
+        file: z.string(),
+        volumeDb: z.number().min(-40).max(0),
+        leadMs: z.number().int().min(0).max(500),
+        /** 播放切换音效后等待多少毫秒再开始下一段口播，不填默认 1000 毫秒 */
+        postDelayMs: z.number().int().min(0).max(5000).optional(),
+      })
+      .optional(),
   }),
   publish: z.object({
     mode: z.enum(['manual-review', 'auto']),

@@ -120,6 +120,11 @@ export default async function RunDetailPage({
             <h2 className="font-mono text-xl font-bold text-slate-900">{detail.id}</h2>
             <div className="flex flex-wrap gap-x-5 gap-y-1 text-xs text-slate-600">
               <span>最多播报：{detail.itemCount} 条</span>
+              {detail.notBeforeAt ? (
+                <span className="rounded bg-amber-50 px-1.5 py-0.5 font-medium text-amber-800">
+                  最早新闻下限：{formatTimestamp(detail.notBeforeAt, settings.timezone)}
+                </span>
+              ) : null}
               {detail.hostId ? <span>主播：{detail.hostId}</span> : null}
               {detail.bgmFile ? <span>背景音乐：{detail.bgmFile}</span> : null}
               <span>执行轮次：第 {detail.attempt} 轮</span>
@@ -308,9 +313,13 @@ export default async function RunDetailPage({
             }
 
             const canAdjustMedia = MEDIA_ADJUSTABLE_RUN_STATUSES.includes(detail.status);
-            const narrationSections = canAdjustMedia
-              ? await core.tasks.getNarrationSections(detail.id).catch(() => [])
-              : [];
+            const [narrationSections, candidatesByItemId, bgmFiles] = canAdjustMedia
+              ? await Promise.all([
+                  core.tasks.getNarrationSections(detail.id).catch(() => []),
+                  core.tasks.getRunMediaCandidates(detail.id).catch(() => ({})),
+                  core.tasks.listBgm(),
+                ])
+              : [[], {}, []];
             const renderStage = detail.stages.find((stage) => stage.stage === 'render');
             const renderStale = renderStage?.status === 'stale';
 
@@ -342,8 +351,15 @@ export default async function RunDetailPage({
                         id: item.id,
                         title: item.finalJson?.title ?? item.id,
                         imageMode: item.imageMode,
+                        primaryMediaId:
+                          item.imageMode === 'custom'
+                            ? (item.selectedMediaIds?.primary ?? null)
+                            : (item.finalJson?.primaryMediaId ?? null),
+                        imageCaption:
+                          item.customImageCaption ?? item.finalJson?.imageCaption ?? null,
                       }))}
-                    bgmFiles={await core.tasks.listBgm()}
+                    candidatesByItemId={candidatesByItemId}
+                    bgmFiles={bgmFiles}
                     bgmFile={detail.bgmFile}
                   />
                 ) : null}

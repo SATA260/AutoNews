@@ -6,7 +6,7 @@ import {
 } from '@aidaily/contracts';
 import type { CoreContext } from '../context.js';
 import { invokeStageLlm } from './llm.js';
-import { describePersonaRelation, getRunPersona } from './personas.js';
+import { describePersonaRelation, formatPersonaForPrompt, getRunPersona } from './personas.js';
 import { renderPromptTemplate } from './prompts.js';
 import { type LoadedEventArticle, serializeLoadedArticlesXml } from './s3-summarize.js';
 
@@ -124,7 +124,9 @@ export async function factCheckPolishedItem(opts: {
 
   const prompt = await renderPromptTemplate('s5-factcheck.md', {
     articlesXml,
-    personaJson: JSON.stringify(await getRunPersona(ctx, runId)),
+    personaJson: formatPersonaForPrompt(await getRunPersona(ctx, runId), 'null', {
+      includeReactions: false,
+    }),
     personaRelation: await describePersonaRelation(
       ctx,
       runId,

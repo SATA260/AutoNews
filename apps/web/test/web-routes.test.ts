@@ -12,6 +12,7 @@ import {
   removeModelApiConnectionAction,
   runDoctorCheckAction,
   saveModelApiConnectionAction,
+  setItemImageAction,
   startRunAction,
   updateDraftAction,
   updateStageRoutingAction,
@@ -711,5 +712,101 @@ describe('apps/web routes and Server Actions', () => {
     } finally {
       await new Promise<void>((resolve) => srv.close(() => resolve()));
     }
+  });
+
+  it('supports schedule cutoffMode, startRunAction cutoff validation, and candidate single-image selection actions', async () => {
+    const rootDir = await setupWebTestWorkspace();
+    const core = await getCore();
+
+    // 1. 测试 startRunAction 最早时间表单校验（自定义缺值、未来时间、无历史发布记录）
+    const customEmptyFd = new FormData();
+    customEmptyFd.set('itemCount', '2');
+    customEmptyFd.set('notBeforePreset', 'custom');
+    expect(await startRunAction(customEmptyFd)).toMatchObject({ ok: false });
+
+    const futureRunFd = new FormData();
+    futureRunFd.set('itemCount', '2');
+    futureRunFd.set('notBeforePreset', 'custom');
+    futureRunFd.set('notBeforeAt', '2099-05-01T08:00');
+    expect(await startRunAction(futureRunFd)).toMatchObject({ ok: false });
+
+    const noHistFd = new FormData();
+    noHistFd.set('itemCount', '2');
+    noHistFd.set('notBeforePreset', 'last-published');
+    expect(await startRunAction(noHistFd)).toMatchObject({ ok: false });
+
+    // 2. 测试 createScheduleAction 带 cutoffMode=hours 与 maxAgeHours
+    const schedFd = new FormData();
+    schedFd.set('name', '早间筛选');
+    schedFd.set('time', '08:00');
+    schedFd.set('itemCount', '5');
+    schedFd.set('cutoffMode', 'hours');
+    schedFd.set('maxAgeHours', '18');
+    schedFd.set('enabled', 'false');
+    const schedRes = await createScheduleAction(schedFd);
+    expect(schedRes.ok).toBe(true);
+    const schedules = await core.scheduler.list();
+    expect(schedules[0]).toMatchObject({ cutoffMode: 'hours', maxAgeHours: 18 });
+
+    // 3. 测试 setItemImageAction 选用与切换唯一候选配图
+    const { runId } = await seedReviewReadyRun();
+    const png1x1 = Buffer.from(
+      'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+X2ZkAAAAASUVORK5CYII=',
+      'base64',
+    );
+    await fs.mkdir(path.join(rootDir, 'storage', 'images'), { recursive: true });
+    await fs.writeFile(path.join(rootDir, 'storage', 'images', 'web-c1.png'), png1x1);
+    await fs.writeFile(path.join(rootDir, 'storage', 'images', 'web-c2.png'), png1x1);
+    await writeJsonAtomic(path.join(rootDir, 'storage', 'articles', 'art-web-1.json'), {
+      title: '模型工具调用速度升级',
+      text: 'Faster tool execution across developer endpoints.',
+      mediaAssets: [
+        {
+          id: 'c1',
+          articleId: 'art-web-1',
+          kind: 'tweet_shot',
+          imagePath: 'storage/images/web-c1.png',
+          sourceUrl: null,
+          captionHint: '主图推文',
+          contextSnippet: 'snippet 1',
+          score: 95,
+        },
+        {
+          id: 'c2',
+          articleId: 'art-web-1',
+          kind: 'table_shot',
+          imagePath: 'storage/images/web-c2.png',
+          sourceUrl: null,
+          captionHint: '跑分对比表',
+          contextSnippet: 'snippet 2',
+          score: 90,
+        },
+      ],
+    });
+    core.context.db
+      .prepare('UPDATE articles SET content_path = ? WHERE id = ?')
+      .run('storage/articles/art-web-1.json', 'art-web-1');
+
+    const pickPrimaryFd = new FormData();
+    pickPrimaryFd.set('runId', runId);
+    pickPrimaryFd.set('itemId', 'item-web-1');
+    pickPrimaryFd.set('mode', 'custom');
+    pickPrimaryFd.set('selectedPrimaryMediaId', 'c1');
+    pickPrimaryFd.set('caption', '推文官宣截图');
+    expect(await setItemImageAction(pickPrimaryFd)).toMatchObject({ ok: true });
+    expect(core.context.repos.runItems.getById('item-web-1')?.selectedMediaIds).toEqual({
+      primary: 'c1',
+    });
+
+    const switchPrimaryFd = new FormData();
+    switchPrimaryFd.set('runId', runId);
+    switchPrimaryFd.set('itemId', 'item-web-1');
+    switchPrimaryFd.set('mode', 'custom');
+    switchPrimaryFd.set('selectedPrimaryMediaId', 'c2');
+    expect(await setItemImageAction(switchPrimaryFd)).toMatchObject({ ok: true });
+
+    expect(core.context.repos.runItems.getById('item-web-1')?.selectedMediaIds).toEqual({
+      primary: 'c2',
+    });
   });
 });

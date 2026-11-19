@@ -231,6 +231,11 @@ body {
   text-shadow: 0.035em 0.035em 0 var(--accent-soft);
 }
 
+/* 手动换行时严格按用户指定位置分行，不再自动平衡拆行 */
+.title.is-manual-lines {
+  text-wrap: normal;
+}
+
 /* 标题里用 *星号* 包住的重点词，用主题色高亮 */
 .title .hl {
   color: var(--accent-deep);

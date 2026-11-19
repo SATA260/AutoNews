@@ -1,6 +1,6 @@
 'use client';
 
-import type { ScheduleJob } from '@aidaily/contracts';
+import type { ScheduleCutoffMode, ScheduleJob } from '@aidaily/contracts';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { useState, useTransition } from 'react';
@@ -11,6 +11,17 @@ import {
   updateScheduleAction,
 } from '@/app/actions';
 import { formatTimestamp } from '@/lib/format';
+
+/** 将定时任务的新闻最早时间策略格式化为简短中文标签 */
+function formatCutoffSummary(job: ScheduleJob): string {
+  if (job.cutoffMode === 'since_last_published') {
+    return '上次发布后';
+  }
+  if (job.cutoffMode === 'hours') {
+    return `近 ${job.maxAgeHours ?? '-'} 小时`;
+  }
+  return '默认窗口';
+}
 
 /** 定时任务管理交互组件（新建时执行时间与新闻条数均必须空白手动填写） */
 export function ScheduleManager({
@@ -28,6 +39,10 @@ export function ScheduleManager({
   const [createTime, setCreateTime] = useState('');
   const [createCount, setCreateCount] = useState('');
   const [createName, setCreateName] = useState('');
+  const [createCutoffMode, setCreateCutoffMode] = useState<ScheduleCutoffMode>('none');
+  const [createMaxAgeHours, setCreateMaxAgeHours] = useState('24');
+  const [editCutoffMode, setEditCutoffMode] = useState<ScheduleCutoffMode>('none');
+  const [editMaxAgeHours, setEditMaxAgeHours] = useState('24');
   const [feedback, setFeedback] = useState<{ ok: boolean; text: string } | null>(null);
   const [isPending, startTransition] = useTransition();
 
@@ -59,6 +74,8 @@ export function ScheduleManager({
         setCreateTime('');
         setCreateCount('');
         setCreateName('');
+        setCreateCutoffMode('none');
+        setCreateMaxAgeHours('24');
       },
     );
   };
@@ -98,6 +115,8 @@ export function ScheduleManager({
               setCreateTime('');
               setCreateCount('');
               setCreateName('');
+              setCreateCutoffMode('none');
+              setCreateMaxAgeHours('24');
               setModalOpen(true);
             }}
             className="rounded-lg bg-slate-900 px-4 py-2 text-xs font-medium text-white hover:bg-slate-800"
@@ -126,6 +145,7 @@ export function ScheduleManager({
               <th className="px-4 py-3">名称 / ID</th>
               <th className="px-4 py-3">每日时间</th>
               <th className="px-4 py-3">每期条数</th>
+              <th className="px-4 py-3">新闻时间下限</th>
               <th className="px-4 py-3">状态与挂载</th>
               <th className="px-4 py-3">下次执行时间</th>
               <th className="px-4 py-3">最近触发任务</th>
@@ -135,7 +155,7 @@ export function ScheduleManager({
           <tbody className="divide-y divide-slate-100 text-xs text-slate-700">
             {jobs.length === 0 ? (
               <tr>
-                <td colSpan={7} className="px-4 py-8 text-center text-slate-500">
+                <td colSpan={8} className="px-4 py-8 text-center text-slate-500">
                   暂无定时任务，点击右上角「新建定时任务」开始配置。
                 </td>
               </tr>
@@ -148,6 +168,7 @@ export function ScheduleManager({
                   </td>
                   <td className="px-4 py-3 font-mono font-semibold text-slate-900">{job.time}</td>
                   <td className="px-4 py-3">{job.itemCount} 条</td>
+                  <td className="px-4 py-3 text-slate-600">{formatCutoffSummary(job)}</td>
                   <td className="px-4 py-3">
                     <div className="flex flex-wrap gap-1.5">
                       <span
@@ -199,7 +220,11 @@ export function ScheduleManager({
                       <button
                         type="button"
                         disabled={isPending}
-                        onClick={() => setEditingJob(job)}
+                        onClick={() => {
+                          setEditCutoffMode(job.cutoffMode ?? 'none');
+                          setEditMaxAgeHours(job.maxAgeHours ? String(job.maxAgeHours) : '24');
+                          setEditingJob(job);
+                        }}
                         className="rounded border border-slate-300 px-2.5 py-1 hover:bg-slate-50"
                       >
                         编辑
@@ -286,6 +311,47 @@ export function ScheduleManager({
                   placeholder="例如：6"
                   className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm"
                 />
+              </div>
+              <div>
+                <label
+                  htmlFor="create-sched-cutoff"
+                  className="block text-xs font-medium text-slate-700"
+                >
+                  最早新闻时间策略
+                </label>
+                <select
+                  id="create-sched-cutoff"
+                  name="cutoffMode"
+                  value={createCutoffMode}
+                  onChange={(e) => setCreateCutoffMode(e.target.value as ScheduleCutoffMode)}
+                  className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm"
+                >
+                  <option value="none">不设下限（按默认新鲜度窗口）</option>
+                  <option value="since_last_published">仅限上次成功发布之后的新闻</option>
+                  <option value="hours">仅限最近 N 小时以内的新闻</option>
+                </select>
+                {createCutoffMode === 'hours' && (
+                  <div className="mt-2">
+                    <label
+                      htmlFor="create-sched-max-hours"
+                      className="block text-xs text-slate-600"
+                    >
+                      最近小时数（正整数）*
+                    </label>
+                    <input
+                      id="create-sched-max-hours"
+                      name="maxAgeHours"
+                      type="number"
+                      min={1}
+                      step={1}
+                      required
+                      value={createMaxAgeHours}
+                      onChange={(e) => setCreateMaxAgeHours(e.target.value)}
+                      placeholder="例如：24"
+                      className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm"
+                    />
+                  </div>
+                )}
               </div>
               <div>
                 <label
@@ -384,6 +450,44 @@ export function ScheduleManager({
                   required
                   className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm"
                 />
+              </div>
+              <div>
+                <label
+                  htmlFor="edit-sched-cutoff"
+                  className="block text-xs font-medium text-slate-700"
+                >
+                  最早新闻时间策略
+                </label>
+                <select
+                  id="edit-sched-cutoff"
+                  name="cutoffMode"
+                  value={editCutoffMode}
+                  onChange={(e) => setEditCutoffMode(e.target.value as ScheduleCutoffMode)}
+                  className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm"
+                >
+                  <option value="none">不设下限（按默认新鲜度窗口）</option>
+                  <option value="since_last_published">仅限上次成功发布之后的新闻</option>
+                  <option value="hours">仅限最近 N 小时以内的新闻</option>
+                </select>
+                {editCutoffMode === 'hours' && (
+                  <div className="mt-2">
+                    <label htmlFor="edit-sched-max-hours" className="block text-xs text-slate-600">
+                      最近小时数（正整数）*
+                    </label>
+                    <input
+                      id="edit-sched-max-hours"
+                      name="maxAgeHours"
+                      type="number"
+                      min={1}
+                      step={1}
+                      required
+                      value={editMaxAgeHours}
+                      onChange={(e) => setEditMaxAgeHours(e.target.value)}
+                      placeholder="例如：24"
+                      className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm"
+                    />
+                  </div>
+                )}
               </div>
               <div>
                 <label

@@ -108,11 +108,13 @@ describe('Layer 2-5: Editorial Deck, Segmented Chapter Bar, Virtual Clock & Erro
     expect(window.__NEWS_DECK__).toBeDefined();
     expect(window.__NEWS_DECK__!.getPageCount()).toBe(7);
     expect(window.__NEWS_DECK__!.getCurrentPage()).toBe(0);
-    expect(window.__NEWS_DECK__!.getState().transition).toBe('glide');
+    expect(window.__NEWS_DECK__!.getState().transition).toBe('fade');
     expect(parseTransitionStyle('shutter')).toBe('fade');
     expect(parseTransitionStyle('slide')).toBe('glide');
+    expect(parseTransitionStyle('glide')).toBe('glide');
     expect(parseTransitionStyle('flip')).toBe('flip');
-    expect(parseTransitionStyle('unknown')).toBe('glide');
+    expect(parseTransitionStyle('unknown')).toBe('fade');
+    expect(parseTransitionStyle(undefined)).toBe('fade');
     expect(screen.getByText('今日要闻')).toBeInTheDocument();
 
     // 验证顶部章节分段进度条渲染 [导览] + 5 条新闻总结胶囊 + [速览]，且已移除底部旧进度线
@@ -210,13 +212,16 @@ describe('Layer 2-5: Editorial Deck, Segmented Chapter Bar, Virtual Clock & Erro
     try {
       const { container } = render(<NewsDeck />);
 
-      // 按 T 键依次循环四种过渡样式：glide -> flip -> fade -> none -> glide
+      // 默认是平滑渐变；按 T 键依次循环四种过渡样式：fade -> glide -> flip -> none -> fade，最后再切到 glide 继续验证滑移
+      expect(window.__NEWS_DECK__!.getState().transition).toBe('fade');
+      fireEvent.keyDown(window, { key: 't' });
+      expect(window.__NEWS_DECK__!.getState().transition).toBe('glide');
       fireEvent.keyDown(window, { key: 't' });
       expect(window.__NEWS_DECK__!.getState().transition).toBe('flip');
       fireEvent.keyDown(window, { key: 't' });
-      expect(window.__NEWS_DECK__!.getState().transition).toBe('fade');
-      fireEvent.keyDown(window, { key: 't' });
       expect(window.__NEWS_DECK__!.getState().transition).toBe('none');
+      fireEvent.keyDown(window, { key: 't' });
+      expect(window.__NEWS_DECK__!.getState().transition).toBe('fade');
       fireEvent.keyDown(window, { key: 't' });
       expect(window.__NEWS_DECK__!.getState().transition).toBe('glide');
 

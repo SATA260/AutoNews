@@ -44,6 +44,8 @@ interface StartupOptions {
   theme: 'light' | 'dark';
   transition: DeckTransitionStyle;
   motion: 'animated' | 'static';
+  /** 卡片显示方式：progressive 跟着口播逐张出现，all 一开始就全部显示 */
+  reveal: 'progressive' | 'all';
 }
 
 /** 页面翻页原子状态：在同一渲染周期同步更新当前页、离场页与翻页方向 */
@@ -65,6 +67,8 @@ interface DeckSectionTiming {
   endFrame: number | null;
   startMs: number;
   durationMs: number;
+  /** 本页画面出现后延迟多少毫秒再开始播报口播 */
+  speechStartMs: number;
   speechMs: number;
   audioUrl: string | null;
   lipSyncFrames: number[];
@@ -74,10 +78,10 @@ interface DeckSectionTiming {
   mascotMood: MascotMood;
 }
 
-const TRANSITION_ORDER: readonly DeckTransitionStyle[] = ['glide', 'flip', 'fade', 'none'];
+const TRANSITION_ORDER: readonly DeckTransitionStyle[] = ['fade', 'glide', 'flip', 'none'];
 const DEFAULT_LIP_SYNC_FPS = 30;
 
-/** 从浏览器网址查询参数中读取初始播放、时钟驱动模式、主题与动效配置 */
+/** 从浏览器网址查询参数中读取初始播放、时钟驱动模式、主题、动效与卡片显示方式配置 */
 function parseStartupOptions(): StartupOptions {
   if (typeof window === 'undefined') {
     return {
@@ -86,8 +90,9 @@ function parseStartupOptions(): StartupOptions {
       clockMode: 'realtime',
       initialPage: 0,
       theme: 'light',
-      transition: 'glide',
+      transition: 'fade',
       motion: 'animated',
+      reveal: 'progressive',
     };
   }
   const params = new URLSearchParams(window.location.search);
@@ -99,8 +104,9 @@ function parseStartupOptions(): StartupOptions {
   const theme = params.get('theme') === 'dark' ? 'dark' : 'light';
   const transition = parseTransitionStyle(params.get('transition'));
   const motion = params.get('motion') === 'static' ? 'static' : 'animated';
+  const reveal = params.get('reveal') === 'all' ? 'all' : 'progressive';
 
-  return { cleanMode, autoplay, clockMode, initialPage, theme, transition, motion };
+  return { cleanMode, autoplay, clockMode, initialPage, theme, transition, motion, reveal };
 }
 
 /** 按指定秒数在预计算口型数组中执行线性插值采样（超过纯人声时长后严格闭嘴归零） */
@@ -186,7 +192,11 @@ export const NewsDeck: React.FC<NewsDeckProps> = ({ initialData }) => {
       coverFrames !== null
         ? (coverFrames * 1000) / fps
         : Math.max(1000, Math.round(issue.coverDurationSec * 1000));
-    const coverSpeechMs = Math.min(coverDurMs, Math.round(issue.coverSpeechSec * 1000));
+    const coverSpeechStartMs = Math.min(coverDurMs, Math.round(issue.coverSpeechStartSec * 1000));
+    const coverSpeechMs = Math.min(
+      Math.max(0, coverDurMs - coverSpeechStartMs),
+      Math.round(issue.coverSpeechSec * 1000),
+    );
     list.push({
       pageIndex: 0,
       pageType: 'cover',
@@ -196,6 +206,7 @@ export const NewsDeck: React.FC<NewsDeckProps> = ({ initialData }) => {
       endFrame: coverFrames !== null ? frameCursor + coverFrames : null,
       startMs: cursorMs,
       durationMs: coverDurMs,
+      speechStartMs: coverSpeechStartMs,
       speechMs: coverSpeechMs,
       audioUrl: issue.coverAudioUrl,
       lipSyncFrames: issue.coverLipSync,
@@ -215,7 +226,11 @@ export const NewsDeck: React.FC<NewsDeckProps> = ({ initialData }) => {
         itemFrames !== null
           ? (itemFrames * 1000) / fps
           : Math.max(1000, Math.round(item.durationSec * 1000));
-      const spMs = Math.min(durMs, Math.round(item.speechDurationSec * 1000));
+      const spStartMs = Math.min(durMs, Math.round(item.speechStartSec * 1000));
+      const spMs = Math.min(
+        Math.max(0, durMs - spStartMs),
+        Math.round(item.speechDurationSec * 1000),
+      );
       list.push({
         pageIndex: idx + 1,
         pageType: 'news',
@@ -225,6 +240,7 @@ export const NewsDeck: React.FC<NewsDeckProps> = ({ initialData }) => {
         endFrame: itemFrames !== null ? frameCursor + itemFrames : null,
         startMs: cursorMs,
         durationMs: durMs,
+        speechStartMs: spStartMs,
         speechMs: spMs,
         audioUrl: item.audioUrl,
         lipSyncFrames: item.lipSyncFrames,
@@ -245,7 +261,11 @@ export const NewsDeck: React.FC<NewsDeckProps> = ({ initialData }) => {
       outroFrames !== null
         ? (outroFrames * 1000) / fps
         : Math.max(1000, Math.round(issue.outroDurationSec * 1000));
-    const outroSpeechMs = Math.min(outroDurMs, Math.round(issue.outroSpeechSec * 1000));
+    const outroSpeechStartMs = Math.min(outroDurMs, Math.round(issue.outroSpeechStartSec * 1000));
+    const outroSpeechMs = Math.min(
+      Math.max(0, outroDurMs - outroSpeechStartMs),
+      Math.round(issue.outroSpeechSec * 1000),
+    );
     list.push({
       pageIndex: issue.items.length + 1,
       pageType: 'outro',
@@ -255,6 +275,7 @@ export const NewsDeck: React.FC<NewsDeckProps> = ({ initialData }) => {
       endFrame: outroFrames !== null ? frameCursor + outroFrames : null,
       startMs: cursorMs,
       durationMs: outroDurMs,
+      speechStartMs: outroSpeechStartMs,
       speechMs: outroSpeechMs,
       audioUrl: issue.outroAudioUrl,
       lipSyncFrames: issue.outroLipSync,
@@ -318,6 +339,7 @@ export const NewsDeck: React.FC<NewsDeckProps> = ({ initialData }) => {
   const mascotRef = useRef<MascotImperativeHandle | null>(null);
   const voiceAudioRef = useRef<HTMLAudioElement | null>(null);
   const bgmAudioRef = useRef<HTMLAudioElement | null>(null);
+  const pageTurnSfxRef = useRef<HTMLAudioElement | null>(null);
   const audioCtxRef = useRef<AudioContext | null>(null);
   const analyserRef = useRef<AnalyserNode | null>(null);
   const analyserBufRef = useRef<Float32Array<ArrayBuffer> | null>(null);
@@ -392,9 +414,6 @@ export const NewsDeck: React.FC<NewsDeckProps> = ({ initialData }) => {
       if (item.imageUrl) {
         urls.add(item.imageUrl);
       }
-      if (item.secondaryImageUrl) {
-        urls.add(item.secondaryImageUrl);
-      }
       if (item.customMascotUrl) {
         urls.add(item.customMascotUrl);
       }
@@ -461,7 +480,7 @@ export const NewsDeck: React.FC<NewsDeckProps> = ({ initialData }) => {
   const cycleTransitionStyle = useCallback(() => {
     setTransitionStyle((prev) => {
       const idx = TRANSITION_ORDER.indexOf(prev);
-      return TRANSITION_ORDER[(idx + 1) % TRANSITION_ORDER.length] ?? 'glide';
+      return TRANSITION_ORDER[(idx + 1) % TRANSITION_ORDER.length] ?? 'fade';
     });
   }, []);
 
@@ -505,6 +524,40 @@ export const NewsDeck: React.FC<NewsDeckProps> = ({ initialData }) => {
     startup.clockMode,
   ]);
 
+  // 实时预览时每次切换页面播放一声鼠标点击音效；逐帧渲染模式不发声，成片里的音效由后期混音统一加入
+  const lastClickedPageRef = useRef<number>(navState.currentPage);
+  useEffect(() => {
+    const prevPage = lastClickedPageRef.current;
+    lastClickedPageRef.current = currentPage;
+    if (prevPage === currentPage || startup.clockMode === 'manual' || !canPlayHtmlAudio()) {
+      return;
+    }
+    const sfxUrl = sanitized.issue.pageTurnSfxUrl;
+    if (!sfxUrl || isMuted) {
+      return;
+    }
+    let sfx = pageTurnSfxRef.current;
+    if (!sfx) {
+      sfx = new Audio();
+      sfx.preload = 'auto';
+      pageTurnSfxRef.current = sfx;
+    }
+    if (sfx.src !== new URL(sfxUrl, window.location.href).toString()) {
+      sfx.src = sfxUrl;
+    }
+    sfx.volume = dbToLinearGain(sanitized.issue.pageTurnSfxVolumeDb);
+    sfx.currentTime = 0;
+    void sfx.play().catch(() => {
+      // 浏览器尚未允许发声时静默跳过，不影响翻页
+    });
+  }, [
+    currentPage,
+    isMuted,
+    sanitized.issue.pageTurnSfxUrl,
+    sanitized.issue.pageTurnSfxVolumeDb,
+    startup.clockMode,
+  ]);
+
   // 组件卸载时彻底释放音频上下文与媒体元素
   useEffect(() => {
     return () => {
@@ -512,6 +565,8 @@ export const NewsDeck: React.FC<NewsDeckProps> = ({ initialData }) => {
       voiceAudioRef.current = null;
       bgmAudioRef.current?.pause();
       bgmAudioRef.current = null;
+      pageTurnSfxRef.current?.pause();
+      pageTurnSfxRef.current = null;
       if (audioCtxRef.current && audioCtxRef.current.state !== 'closed') {
         void audioCtxRef.current.close().catch(() => undefined);
       }
@@ -535,13 +590,14 @@ export const NewsDeck: React.FC<NewsDeckProps> = ({ initialData }) => {
 
     const sec = currentSection;
     const durationMs = sec.durationMs;
+    const speechStartMs = sec.speechStartMs;
+    const speechStartSec = speechStartMs / 1000;
     const speechSec = sec.speechMs / 1000;
-    const padSec = sanitized.issue.pagePaddingSec;
-    const padMs = Math.max(0, Math.round(padSec * 1000));
-    const postSpeechPauseMs = Math.max(padMs, Math.round(durationMs - sec.speechMs));
+    const postSpeechPauseMs = Math.max(0, Math.round(durationMs - speechStartMs - sec.speechMs));
     const effectiveChapterSec = Math.max(0.001, durationMs / 1000);
     let cancelled = false;
     let intervalId = 0;
+    let preTimerId = 0;
     let padTimerId = 0;
 
     const advanceOrFinish = () => {
@@ -558,8 +614,8 @@ export const NewsDeck: React.FC<NewsDeckProps> = ({ initialData }) => {
       }
     };
 
-    const startSilentTimerFallback = () => {
-      const startedAt = Date.now();
+    const startSilentTimerFallback = (initialElapsedMs = 0) => {
+      const startedAt = Date.now() - initialElapsedMs;
       intervalId = window.setInterval(() => {
         if (cancelled) {
           return;
@@ -568,7 +624,14 @@ export const NewsDeck: React.FC<NewsDeckProps> = ({ initialData }) => {
         const ratio = Math.min(1, elapsed / Math.max(1, durationMs));
         setSectionProgress(ratio);
         setGlobalTimeMs(sec.startMs + elapsed);
-        setMouthOpen(sampleLipSyncAtSec(sec.lipSyncFrames, elapsed / 1000, speechSec, issueFps));
+        setMouthOpen(
+          sampleLipSyncAtSec(
+            sec.lipSyncFrames,
+            (elapsed - speechStartMs) / 1000,
+            speechSec,
+            issueFps,
+          ),
+        );
         if (elapsed >= durationMs) {
           window.clearInterval(intervalId);
           advanceOrFinish();
@@ -650,7 +713,10 @@ export const NewsDeck: React.FC<NewsDeckProps> = ({ initialData }) => {
         const padStart = Date.now();
         intervalId = window.setInterval(() => {
           const pElapsedSec = (Date.now() - padStart) / 1000;
-          const clampedElapsedSec = Math.min(durationMs / 1000, speechSec + pElapsedSec);
+          const clampedElapsedSec = Math.min(
+            durationMs / 1000,
+            speechStartSec + speechSec + pElapsedSec,
+          );
           setSectionProgress(Math.min(1, clampedElapsedSec / effectiveChapterSec));
           setGlobalTimeMs(sec.startMs + Math.min(durationMs, clampedElapsedSec * 1000));
         }, 40);
@@ -665,49 +731,77 @@ export const NewsDeck: React.FC<NewsDeckProps> = ({ initialData }) => {
           return;
         }
         window.clearInterval(intervalId);
+        window.clearTimeout(preTimerId);
         startSilentTimerFallback();
       };
 
       voice.addEventListener('ended', onAudioEnded, { once: true });
       voice.addEventListener('error', onAudioError, { once: true });
 
-      if (audioCtxRef.current?.state === 'suspended') {
-        void audioCtxRef.current.resume().catch(() => undefined);
-      }
+      const startVoicePlay = () => {
+        if (cancelled) {
+          return;
+        }
+        if (audioCtxRef.current?.state === 'suspended') {
+          void audioCtxRef.current.resume().catch(() => undefined);
+        }
 
-      voice
-        .play()
-        .then(() => {
-          if (cancelled) {
-            voice?.pause();
-            return;
-          }
-          setAutoplayBlocked(false);
-          intervalId = window.setInterval(() => {
-            if (cancelled || !voice) {
+        voice
+          .play()
+          .then(() => {
+            if (cancelled) {
+              voice?.pause();
               return;
             }
-            const curSec = Math.min(durationMs / 1000, Math.max(0, voice.currentTime));
-            setSectionProgress(Math.min(1, curSec / effectiveChapterSec));
-            setGlobalTimeMs(sec.startMs + Math.min(durationMs, curSec * 1000));
-            setMouthOpen(voice.paused ? 0 : sampleRealtimeMouth(curSec));
-          }, 33);
-        })
-        .catch((err: unknown) => {
+            setAutoplayBlocked(false);
+            intervalId = window.setInterval(() => {
+              if (cancelled || !voice) {
+                return;
+              }
+              const voiceCurSec = Math.max(0, voice.currentTime);
+              const pageCurSec = Math.min(durationMs / 1000, speechStartSec + voiceCurSec);
+              setSectionProgress(Math.min(1, pageCurSec / effectiveChapterSec));
+              setGlobalTimeMs(sec.startMs + Math.min(durationMs, pageCurSec * 1000));
+              setMouthOpen(voice.paused ? 0 : sampleRealtimeMouth(voiceCurSec));
+            }, 33);
+          })
+          .catch((err: unknown) => {
+            if (cancelled) {
+              return;
+            }
+            const errName = err instanceof Error ? err.name : '';
+            if (errName === 'NotAllowedError') {
+              setAutoplayBlocked(true);
+              return;
+            }
+            startSilentTimerFallback(speechStartMs);
+          });
+      };
+
+      if (speechStartMs > 20) {
+        // 切页后先静候一段时间（让切换音效清晰落位），期间正常推进画面进度并保持闭嘴
+        const waitStart = Date.now();
+        setMouthOpen(0);
+        intervalId = window.setInterval(() => {
           if (cancelled) {
             return;
           }
-          const errName = err instanceof Error ? err.name : '';
-          if (errName === 'NotAllowedError') {
-            setAutoplayBlocked(true);
-            return;
-          }
-          startSilentTimerFallback();
-        });
+          const waitedMs = Math.min(speechStartMs, Date.now() - waitStart);
+          setSectionProgress(Math.min(1, waitedMs / Math.max(1, durationMs)));
+          setGlobalTimeMs(sec.startMs + waitedMs);
+        }, 40);
+        preTimerId = window.setTimeout(() => {
+          window.clearInterval(intervalId);
+          startVoicePlay();
+        }, speechStartMs);
+      } else {
+        startVoicePlay();
+      }
 
       return () => {
         cancelled = true;
         window.clearInterval(intervalId);
+        window.clearTimeout(preTimerId);
         window.clearTimeout(padTimerId);
         voice.removeEventListener('ended', onAudioEnded);
         voice.removeEventListener('error', onAudioError);
@@ -719,6 +813,7 @@ export const NewsDeck: React.FC<NewsDeckProps> = ({ initialData }) => {
     return () => {
       cancelled = true;
       window.clearInterval(intervalId);
+      window.clearTimeout(preTimerId);
       window.clearTimeout(padTimerId);
     };
   }, [
@@ -730,7 +825,6 @@ export const NewsDeck: React.FC<NewsDeckProps> = ({ initialData }) => {
     isMuted,
     issueFps,
     navigateTo,
-    sanitized.issue.pagePaddingSec,
     startup.clockMode,
     totalDurationMs,
     totalPages,
@@ -952,12 +1046,11 @@ export const NewsDeck: React.FC<NewsDeckProps> = ({ initialData }) => {
         nextVirtualProg = Math.min(1, Math.max(0, localMs / turnDur));
       }
 
-      const nextMouth = sampleLipSyncAtSec(
-        sec.lipSyncFrames,
-        localMs / 1000,
-        sec.speechMs / 1000,
-        fps,
-      );
+      const speechLocalMs = localMs - sec.speechStartMs;
+      const nextMouth =
+        speechLocalMs < 0
+          ? 0
+          : sampleLipSyncAtSec(sec.lipSyncFrames, speechLocalMs / 1000, sec.speechMs / 1000, fps);
       const prevPage = stateRef.current.currentPage;
 
       flushSync(() => {
@@ -983,7 +1076,7 @@ export const NewsDeck: React.FC<NewsDeckProps> = ({ initialData }) => {
         fixedDtMs,
         nextMouth,
         sec.mascotMood,
-        localMs <= sec.speechMs && nextMouth > 0.01,
+        speechLocalMs >= 0 && speechLocalMs <= sec.speechMs && nextMouth > 0.01,
       );
 
       if (secIdx !== prevPage || !hasPerformedInitialSeekRef.current) {
@@ -1112,6 +1205,13 @@ export const NewsDeck: React.FC<NewsDeckProps> = ({ initialData }) => {
     ? formatSubtitleLines(activeSubtitle.text, hasVisibleMascot ? 28.5 : 31.5)
     : [];
 
+  // 卡片跟着口播逐张出现只在「正在播放」或「逐帧渲染」时生效；暂停浏览、静态模式或指定全部显示时直接显示全部卡片
+  const progressiveRevealActive =
+    startup.reveal === 'progressive' &&
+    startup.motion !== 'static' &&
+    (startup.clockMode === 'manual' || isAutoPlaying);
+  const currentRevealLocalMs = progressiveRevealActive ? currentLocalSec * 1000 : null;
+
   const renderPageByIndex = useCallback(
     (pageIdx: number, isExiting: boolean) => {
       const clampedIdx = clampPageIndex(pageIdx, totalPages);
@@ -1143,16 +1243,34 @@ export const NewsDeck: React.FC<NewsDeckProps> = ({ initialData }) => {
           sanitized.issue.hostMascotUrl ||
           (sanitized.issue.mascotMode === 'fixed-host' && sanitized.issue.hostLive2dUrl),
       );
+      const pageSection = sectionTimings[clampedIdx];
+      // 正在渐出的旧页保持完整画面；只有当前页的卡片按播放进度逐张出现
+      const pageRevealLocalMs =
+        !isExiting && clampedIdx === currentPage ? currentRevealLocalMs : null;
       return (
         <NewsCardPage
           item={item}
           totalItems={sanitized.issue.items.length}
           hasMascot={pageHasMascot}
+          isExiting={isExiting}
           onErrorCaptured={isExiting ? undefined : recordRuntimeError}
+          revealLocalMs={pageRevealLocalMs}
+          pageDurationMs={pageSection?.durationMs ?? item.durationSec * 1000}
+          subtitles={pageSection?.subtitles ?? item.subtitles}
+          speechStartMs={pageSection?.speechStartMs ?? item.speechStartSec * 1000}
+          speechMs={pageSection?.speechMs ?? item.speechDurationSec * 1000}
         />
       );
     },
-    [navigateTo, recordRuntimeError, sanitized.issue, totalPages],
+    [
+      currentPage,
+      currentRevealLocalMs,
+      navigateTo,
+      recordRuntimeError,
+      sanitized.issue,
+      sectionTimings,
+      totalPages,
+    ],
   );
 
   const controlsOverlay = (

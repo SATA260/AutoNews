@@ -41,7 +41,7 @@ export interface DeckControlsProps {
 const TRANSITION_LABELS: Record<DeckTransitionStyle, string> = {
   glide: '纸张滑移 (T)',
   flip: '轻柔翻页 (T)',
-  fade: '平滑叠化 (T)',
+  fade: '平滑渐变 (T)',
   none: '无动效 (T)',
 };
 

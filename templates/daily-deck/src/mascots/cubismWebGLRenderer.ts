@@ -857,18 +857,21 @@ export async function loadCubismMascotController(
       let offsetY: number;
 
       if (unitH > 1.38) {
-        const visibleSpanY = unitH * 0.76;
+        // 高挑角色仅展示头顶至大腿中部（约全身高度 59%），完整保留左右手部宽度
+        const visibleSpanY = unitH * 0.59;
+        const idealScaleY = 1.94 / visibleSpanY;
+        scaleX = Math.min(1.94 / unitW, idealScaleY * (1 / aspectCanvas));
+        scaleY = scaleX * aspectCanvas;
+        const topModelY = unitH / 2;
+        offsetY = 0.95 - topModelY * scaleY;
+      } else {
+        // Q 版角色以头顶对齐展示约 90% 高度，完整露出主体、裙摆与鲸尾，脚部自然贴合画布底缘
+        const visibleSpanY = unitH * 0.9;
         const idealScaleY = 1.92 / visibleSpanY;
         scaleX = Math.min(1.92 / unitW, idealScaleY * (1 / aspectCanvas));
         scaleY = scaleX * aspectCanvas;
         const topModelY = unitH / 2;
         offsetY = 0.94 - topModelY * scaleY;
-      } else {
-        const idealScaleY = 1.88 / unitH;
-        scaleX = Math.min(1.9 / unitW, idealScaleY * (1 / aspectCanvas));
-        scaleY = scaleX * aspectCanvas;
-        const bottomModelY = -unitH / 2;
-        offsetY = -0.98 - bottomModelY * scaleY;
       }
 
       gl.uniform2f(uScaleLoc, scaleX, scaleY);

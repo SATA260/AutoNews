@@ -16,7 +16,7 @@ export interface RefillRoundResult {
 
 /**
  * 执行单轮新闻条数不足补足流程：
- * 首轮且允许启用备用信源时先抓一次备用池，随后按步长逐步放宽时效窗口并重新入选备选事件，
+ * 首轮且允许启用备用信源时先抓一次备用池，随后按步长逐步放宽时效窗口并重新入选备选事件（严格受制于最早时间下限），
  * 将新增事件以替补身份写入数据库并记录中文运行日志。
  */
 export async function runRefillRound(opts: {
@@ -26,11 +26,22 @@ export async function runRefillRound(opts: {
   neededCount: number;
   itemCount: number;
   settings: Settings;
+  notBeforeAt?: string | null;
   usedArticleIds: Set<string>;
   existingEventCount: number;
   signal?: AbortSignal;
 }): Promise<RefillRoundResult> {
-  const { ctx, runId, round, neededCount, itemCount, settings, usedArticleIds, signal } = opts;
+  const {
+    ctx,
+    runId,
+    round,
+    neededCount,
+    itemCount,
+    settings,
+    notBeforeAt,
+    usedArticleIds,
+    signal,
+  } = opts;
 
   if (round === 1 && settings.issue.refill.useBackupSources) {
     try {
@@ -54,7 +65,15 @@ export async function runRefillRound(opts: {
     settings.issue.refill.maxLookbackHours,
     settings.issue.freshnessHours + round * settings.issue.refill.lookbackStepHours,
   );
-  const sinceIso = new Date(ctx.now().getTime() - lookbackHours * 3600_000).toISOString();
+  const rawLookbackMs = ctx.now().getTime() - lookbackHours * 3600_000;
+  const cutoffMs = notBeforeAt ? Date.parse(notBeforeAt) : Number.NaN;
+  const effectiveSinceMs = Number.isNaN(cutoffMs)
+    ? rawLookbackMs
+    : Math.max(rawLookbackMs, cutoffMs);
+  const sinceIso = new Date(effectiveSinceMs).toISOString();
+  const maxLookbackCutoffMs =
+    ctx.now().getTime() - settings.issue.refill.maxLookbackHours * 3600_000;
+  const includeExpired = Number.isNaN(cutoffMs) || cutoffMs <= maxLookbackCutoffMs;
   const targetCount = Math.max(neededCount * settings.issue.reserveFactor, neededCount);
 
   const selection = await selectCandidateEvents({
@@ -62,7 +81,8 @@ export async function runRefillRound(opts: {
     runId,
     settings,
     sinceIso,
-    includeExpired: true,
+    notBeforeAt,
+    includeExpired,
     targetCount,
     itemCount,
     excludeArticleIds: usedArticleIds,

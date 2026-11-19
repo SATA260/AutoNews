@@ -4,8 +4,15 @@ import { fileURLToPath } from 'node:url';
 import { type EventRecord, PersonasFileSchema, type Timeline } from '@aidaily/contracts';
 import { describe, expect, it } from 'vitest';
 import { parse } from 'yaml';
-import { chooseHost, deriveMascotMood } from '../src/editorial/personas.js';
+import type { CoreContext } from '../src/context.js';
+import {
+  chooseHost,
+  deriveMascotMood,
+  describePersonaRelation,
+  formatPersonaForPrompt,
+} from '../src/editorial/personas.js';
 import { precheckIssuePackage } from '../src/editorial/prechecks.js';
+import { renderPromptTemplate } from '../src/editorial/prompts.js';
 import { computeLipSyncFramesFromWavBuffer } from '../src/media/lipsync.js';
 import { quantizeTimelineToFps } from '../src/media/timeline.js';
 
@@ -99,6 +106,9 @@ describe('主播配置、情绪推导、口型包络提取与帧时间轴量化'
     expect(deriveMascotMood('deepseek', '多名用户反馈DeepSeek算力不足出现限流', personas)).toBe(
       'thinking',
     );
+    expect(deriveMascotMood('claude', 'Anthropic宣布封禁中国地区用户账号', personas)).toBe(
+      'thinking',
+    );
     expect(deriveMascotMood('gemini', 'Google宣布Gemini免费开放新功能', personas)).toBe('proud');
     expect(deriveMascotMood('deepseek', 'OpenAI 发布新模型', personas)).toBe('surprised');
     expect(deriveMascotMood('deepseek', '新一代稀疏推理基准评测', personas)).toBe('thinking');
@@ -124,7 +134,142 @@ describe('主播配置、情绪推导、口型包络提取与帧时间轴量化'
       expect(persona.rivalReaction.length).toBeGreaterThan(5);
       expect(persona.introExamples[0]).toContain(persona.selfName);
       expect(persona.introExamples[0]).not.toMatch(/公司的/);
+      expect(persona.identityBio).toContain('二创');
+      expect(persona.stanceGuide).not.toMatch(/心里清楚自己属于/);
+      const formattedJson = formatPersonaForPrompt(persona);
+      expect(formattedJson).toContain('characterOrigin');
+      expect(formattedJson).toContain('绝非该公司员工、成员或官方发言人');
+      expect(formattedJson).toContain('expressionRule');
+      expect(formattedJson).toContain('严禁原封不动照抄');
+      expect(formattedJson).not.toContain('"affiliation"');
+      expect(formattedJson).not.toContain('哈哈，我Gemini又站起来了');
+
+      const compactPersonaJson = formatPersonaForPrompt(persona, '无特定角色', {
+        includeReactions: false,
+      });
+      expect(compactPersonaJson).not.toContain('prototypeGoodNewsReaction');
+      expect(compactPersonaJson).not.toContain('prototypeNegativeNewsReaction');
+      expect(compactPersonaJson).not.toContain('otherModelNewsReaction');
     }
+
+    const polishPrompt = await renderPromptTemplate('s4-polish.md', {
+      eventTitle: 'OpenAI发布新分类器',
+      category: 'AI安全',
+      entity: 'OpenAI',
+      summaryDraftJson: '{}',
+      contentLimitsJson: '{}',
+      personaJson: formatPersonaForPrompt(byId.get('gpt') ?? null, '无特定角色', {
+        includeReactions: false,
+      }),
+      personaRelation: '',
+      narrationRules: '',
+    });
+    expect(polishPrompt).not.toContain('我们团队这波直接');
+    expect(polishPrompt).not.toContain('哈哈，我Gemini又站起来了');
+    expect(polishPrompt).not.toContain('不愧是你啊，Anthropic');
+    expect(polishPrompt).toContain('严禁代表任何公司发言');
+    expect(polishPrompt).toContain('客观、合理、正义');
+    expect(polishPrompt).toContain('严禁照抄任何示例原句');
+    expect(polishPrompt).toContain('❌ 错误一');
+    expect(polishPrompt).toContain('✅ 正确改写');
+
+    const revisePrompt = await renderPromptTemplate('s4-revise.md', {
+      previousItemJson: '{}',
+      revisionNotesJson: '[]',
+      evidenceJson: '[]',
+      articlesXml: '',
+      personaJson: formatPersonaForPrompt(byId.get('gemini') ?? null, '无特定角色', {
+        includeReactions: false,
+      }),
+      personaRelation: '',
+      contentLimitsJson: '{}',
+      availableMediaSection: '',
+      narrationRules: '',
+    });
+    expect(revisePrompt).toContain('严禁照抄人设说明或提示词里的示范原句');
+    expect(revisePrompt).not.toContain('哈哈，我Gemini又站起来了');
+
+    const factcheckPrompt = await renderPromptTemplate('s5-factcheck.md', {
+      articlesXml: '',
+      personaJson: formatPersonaForPrompt(byId.get('gpt') ?? null, 'null', {
+        includeReactions: false,
+      }),
+      personaRelation: '',
+      candidateDraftJson: '{}',
+      priorRoundContext: '',
+    });
+    expect(factcheckPrompt).not.toContain('用第一人称复数“我们团队”');
+    expect(factcheckPrompt).not.toContain('第一人称阵营称呼');
+    expect(factcheckPrompt).not.toContain('哈哈，我Gemini又站起来了');
+    expect(factcheckPrompt).toContain('严禁代表公司发言');
+    expect(factcheckPrompt).toContain('合法角色表达');
+
+    // 验证单条新闻关系引导按事件主实体优先判别、能识别争议风波并附带防照抄约束
+    const relationEvents: EventRecord[] = [
+      {
+        ...event('OpenAI', '模型'),
+        id: 'ev-openai',
+        title: 'OpenAI 发布 Astra 与 Sol',
+      },
+      {
+        ...event('Google', '行业'),
+        id: 'ev-google-flaw',
+        title: '学区抗议谷歌将搜索与 Gemini 强行捆绑',
+      },
+      {
+        ...event('Google', '产品'),
+        id: 'ev-google-good',
+        title: 'Google 将 Gemini 下放到 Android Go 低内存设备',
+      },
+    ];
+    const relationItems = new Map<string, { id: string; eventId: string }>([
+      ['item-openai', { id: 'item-openai', eventId: 'ev-openai' }],
+      ['item-google-flaw', { id: 'item-google-flaw', eventId: 'ev-google-flaw' }],
+      ['item-google-good', { id: 'item-google-good', eventId: 'ev-google-good' }],
+    ]);
+    const mockCtx = {
+      paths: { rootDir: root },
+      settings: { issue: { minScore: 7.5 } },
+      db: {
+        prepare: () => ({
+          get: () => ({ host_id: 'gemini' }),
+        }),
+      },
+      repos: {
+        runItems: {
+          getById: (id: string) => relationItems.get(id),
+        },
+        events: {
+          listByRun: () => relationEvents,
+        },
+      },
+    } as unknown as CoreContext;
+
+    const rivalWithMention = await describePersonaRelation(
+      mockCtx,
+      'run',
+      'item-openai',
+      '第三方动画测试中也被 Gemini 比下去',
+    );
+    expect(rivalWithMention).toContain('其他模型阵营动态');
+    expect(rivalWithMention).toContain('严禁照抄示例与重复口头禅');
+
+    const ownControversy = await describePersonaRelation(
+      mockCtx,
+      'run',
+      'item-google-flaw',
+      '学区批评这是勒索条款',
+    );
+    expect(ownControversy).toContain('原型关联受限或争议动态');
+
+    const ownRollout = await describePersonaRelation(
+      mockCtx,
+      'run',
+      'item-google-good',
+      '百元入门手机可用语音对话与拍照翻译',
+    );
+    expect(ownRollout).toContain('原型关联生态新进展');
+    expect(ownRollout).not.toContain('哈哈，我Gemini又站起来了');
 
     const gemini = byId.get('gemini');
     const rejected = precheckIssuePackage({
@@ -274,6 +419,20 @@ describe('主播配置、情绪推导、口型包络提取与帧时间轴量化'
     });
     expect(cleanIntro.errors).toEqual([]);
     expect(cleanIntro.passed).toBe(true);
+
+    const companyFamilyIntro = precheckIssuePackage({
+      pkg: {
+        ...compactBasePkg,
+        intro: {
+          narration: ['大家好，我是OpenAI家的gpt，欢迎收看今天的AI每日报。'],
+          hostComment: '直接进入今天的内容。',
+        },
+      },
+      ...commonCompactOpts,
+      hostSelfName: 'gpt',
+    });
+    expect(companyFamilyIntro.passed).toBe(false);
+    expect(companyFamilyIntro.errors.some((e) => e.includes('不能代表任何公司发言'))).toBe(true);
   });
 
   it('从含扩展元数据块的 WAV 字节流中提取纯响度决定的口型开合序列', () => {

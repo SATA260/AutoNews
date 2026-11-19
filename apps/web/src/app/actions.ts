@@ -5,6 +5,8 @@ import {
   type DoctorReport,
   HostMascotIdSchema,
   PIPELINE_STAGES,
+  type ScheduleCutoffMode,
+  ScheduleCutoffModeSchema,
   ScheduleTimeSchema,
   type SourceTestResult,
   StageSchema,
@@ -106,10 +108,25 @@ export async function startRunAction(formData: FormData): Promise<ActionResult<{
     const itemCount = parseRequiredPositiveInt(formData.get('itemCount'), '本期新闻条数');
     const hostValue = String(formData.get('hostId') ?? '').trim();
     const bgmFile = String(formData.get('bgmFile') ?? '').trim();
+    const rawPreset = String(formData.get('notBeforePreset') ?? '').trim();
+    const rawCustom = String(formData.get('notBeforeAt') ?? '').trim();
+    let notBeforeAt: string | undefined;
+    if (rawPreset === 'custom') {
+      if (!rawCustom) {
+        throw new Error('选择自定义最早时间时，请填写具体日期时间');
+      }
+      notBeforeAt = rawCustom;
+    } else if (rawCustom) {
+      notBeforeAt = rawCustom;
+    } else if (rawPreset && rawPreset !== 'none') {
+      notBeforeAt = rawPreset;
+    }
+
     const hostId = hostValue ? HostMascotIdSchema.parse(hostValue) : undefined;
     const core = await getCore();
     const { runId } = await core.tasks.start({
       itemCount,
+      notBeforeAt,
       hostId,
       bgmFile: bgmFile || undefined,
       trigger: 'manual-web',
@@ -370,6 +387,14 @@ export async function createScheduleAction(formData: FormData): Promise<ActionRe
     const nameRaw = formData.get('name');
     const name = typeof nameRaw === 'string' && nameRaw.trim() ? nameRaw.trim() : undefined;
     const enabled = formData.has('enabled') ? parseBooleanField(formData.get('enabled')) : true;
+    const rawCutoff = String(formData.get('cutoffMode') ?? '').trim();
+    const cutoffMode: ScheduleCutoffMode = rawCutoff
+      ? ScheduleCutoffModeSchema.parse(rawCutoff)
+      : 'none';
+    const maxAgeHours =
+      cutoffMode === 'hours'
+        ? parseRequiredPositiveInt(formData.get('maxAgeHours'), '回溯小时数')
+        : undefined;
 
     const core = await getCore();
     const bgmFile = String(formData.get('bgmFile') ?? '').trim();
@@ -377,6 +402,8 @@ export async function createScheduleAction(formData: FormData): Promise<ActionRe
       name,
       time,
       itemCount,
+      cutoffMode,
+      maxAgeHours,
       enabled,
       bgmFile: bgmFile || undefined,
     });
@@ -396,6 +423,8 @@ export async function updateScheduleAction(formData: FormData): Promise<ActionRe
       name?: string;
       time?: string;
       itemCount?: number;
+      cutoffMode?: ScheduleCutoffMode;
+      maxAgeHours?: number | null;
       bgmFile?: string | null;
       enabled?: boolean;
     } = {};
@@ -407,6 +436,20 @@ export async function updateScheduleAction(formData: FormData): Promise<ActionRe
     const timeRaw = formData.get('time');
     if (typeof timeRaw === 'string' && timeRaw.trim()) {
       patch.time = ScheduleTimeSchema.parse(timeRaw.trim());
+    }
+    const cutoffRaw = formData.get('cutoffMode');
+    if (typeof cutoffRaw === 'string' && cutoffRaw.trim()) {
+      patch.cutoffMode = ScheduleCutoffModeSchema.parse(cutoffRaw.trim());
+    }
+    if (patch.cutoffMode === 'hours') {
+      patch.maxAgeHours = parseRequiredPositiveInt(formData.get('maxAgeHours'), '回溯小时数');
+    } else if (patch.cutoffMode !== undefined) {
+      patch.maxAgeHours = null;
+    } else if (
+      typeof formData.get('maxAgeHours') === 'string' &&
+      String(formData.get('maxAgeHours')).trim()
+    ) {
+      patch.maxAgeHours = parseRequiredPositiveInt(formData.get('maxAgeHours'), '回溯小时数');
     }
     const bgmRaw = formData.get('bgmFile');
     if (typeof bgmRaw === 'string') patch.bgmFile = bgmRaw.trim() || null;
@@ -544,6 +587,7 @@ function assertValidTimezone(timezone: string): void {
 export async function updateWorkflowSettingsAction(formData: FormData): Promise<ActionResult> {
   try {
     const rawTtsProvider = formData.get('ttsProvider');
+    const rawRenderTheme = formData.get('renderTheme');
     const rawBgmVolumeDb = formData.get('bgmVolumeDb');
     const parsed = z
       .object({
@@ -559,6 +603,7 @@ export async function updateWorkflowSettingsAction(formData: FormData): Promise<
         ttsProvider: z.string().trim().min(1).optional(),
         pauseAfterNarrate: z.boolean(),
         activeTemplate: z.string().trim().min(1),
+        renderTheme: z.enum(['light', 'dark']).optional(),
         pagePaddingSec: z.number().nonnegative(),
         bgmVolumeDb: z.number().min(-30).max(0).optional(),
         publishMode: z.enum(['manual-review', 'auto']),
@@ -590,6 +635,9 @@ export async function updateWorkflowSettingsAction(formData: FormData): Promise<
           : {}),
         pauseAfterNarrate: parseBooleanField(formData.get('pauseAfterNarrate')),
         activeTemplate: formData.get('activeTemplate'),
+        ...(typeof rawRenderTheme === 'string' && rawRenderTheme.trim()
+          ? { renderTheme: rawRenderTheme.trim() }
+          : {}),
         pagePaddingSec: parseRequiredNumberField(
           formData.get('pagePaddingSec'),
           '翻页停顿缓冲秒数',
@@ -654,6 +702,7 @@ export async function updateWorkflowSettingsAction(formData: FormData): Promise<
         active: parsed.activeTemplate,
       },
       render: {
+        ...(parsed.renderTheme !== undefined ? { theme: parsed.renderTheme } : {}),
         pagePaddingSec: parsed.pagePaddingSec,
         ...(parsed.bgmVolumeDb !== undefined ? { bgm: { volumeDb: parsed.bgmVolumeDb } } : {}),
       },
@@ -790,7 +839,7 @@ export async function runDoctorCheckAction(input?: {
   }
 }
 
-/** 保存待审核新闻的图片或切换无图模式。 */
+/** 保存待审核新闻的唯一配图（支持单张候选选图、本地上传或切换无图模式）。 */
 export async function setItemImageAction(formData: FormData): Promise<ActionResult> {
   try {
     const runId = RunIdSchema.parse(formData.get('runId'));
@@ -799,11 +848,20 @@ export async function setItemImageAction(formData: FormData): Promise<ActionResu
     const file = formData.get('image');
     const data =
       file instanceof File && file.size > 0 ? new Uint8Array(await file.arrayBuffer()) : undefined;
+    const rawPrimaryId = formData.get('selectedPrimaryMediaId');
+    const selectedPrimaryMediaId =
+      typeof rawPrimaryId === 'string' && rawPrimaryId.trim() ? rawPrimaryId.trim() : undefined;
+    const caption = formData.has('caption')
+      ? String(formData.get('caption') ?? '')
+      : mode === 'custom'
+        ? undefined
+        : '';
     const core = await getCore();
     await core.tasks.setItemImage(runId, itemId, {
       mode,
       data,
-      caption: String(formData.get('caption') ?? ''),
+      selectedPrimaryMediaId,
+      caption,
     });
     safeRevalidate(`/runs/${runId}`);
     return { ok: true, message: '图片设置已保存，请重新合成视频' };

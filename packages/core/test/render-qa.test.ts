@@ -9,8 +9,10 @@ import { afterEach, describe, expect, it } from 'vitest';
 import {
   buildMasterAudioWav,
   buildNarrationSections,
+  buildRenderableIssue,
   buildTimeline,
   createCore,
+  createDailyDeckAdapter,
   createRun,
   editSettingsFile,
   executeRun,
@@ -19,12 +21,14 @@ import {
   type PipelineError,
   type RenderCheckpoint,
   readJsonOrNull,
+  resolveRenderTheme,
   resumeRun,
   runMediaCommand,
   runQaStage,
   runRenderStage,
   updateSettingsFile,
   updateSourcesFile,
+  writeJsonAtomic,
 } from '../src/index.js';
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..', '..');
@@ -244,7 +248,7 @@ describe('template rendering, Playwright capture, ffmpeg composition, and QA', (
     expect(core.context.repos.runs.getById(runId)?.status).toBe('awaiting_review');
 
     await core.close();
-  }, 60_000);
+  }, 90_000);
 
   it('保留句子音量并根据视频时长增加处理等待时间', async () => {
     const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'aidaily-master-volume-'));
@@ -439,7 +443,7 @@ describe('template rendering, Playwright capture, ffmpeg composition, and QA', (
     expect(qaReport?.meanVolumeDb as number).toBeGreaterThan(-35);
 
     await core.close();
-  }, 60_000);
+  }, 90_000);
 
   it('renders daily-deck template with staged article image asset and passes QA', async () => {
     expect(mapEntityToMascotId('OpenAI')).toBe('gpt');
@@ -647,6 +651,54 @@ describe('template rendering, Playwright capture, ffmpeg composition, and QA', (
     expect(qa.width).toBe(1920);
     expect(qa.height).toBe(1080);
 
+    // 验证实际截出的视频帧画布边缘像素处于深色模式（RGB 亮度低），而非浅色纸张底色
+    expect(resolveRenderTheme(core.context.settings.render)).toBe('dark');
+    const samplePixelRgb = async (pngPath: string): Promise<[number, number, number]> => {
+      const { stdout } = await execa(
+        'ffmpeg',
+        [
+          '-v',
+          'error',
+          '-i',
+          pngPath,
+          '-vf',
+          'crop=1:1:10:10',
+          '-f',
+          'rawvideo',
+          '-pix_fmt',
+          'rgb24',
+          'pipe:1',
+        ],
+        { encoding: 'buffer' },
+      );
+      return [stdout[0] ?? 0, stdout[1] ?? 0, stdout[2] ?? 0];
+    };
+
+    const [darkR, darkG, darkB] = await samplePixelRgb(path.join(runDir, 'frames', 'page-01.png'));
+    expect(darkR).toBeLessThan(45);
+    expect(darkG).toBeLessThan(45);
+    expect(darkB).toBeLessThan(45);
+
+    // 验证切换 render.theme 会使章节缓存摘要失效并按浅色主题重渲
+    const lightRenderCkpt = await runRenderStage({
+      ctx: core.context,
+      runId,
+      settings: {
+        ...core.context.settings,
+        render: { ...core.context.settings.render, theme: 'light' },
+      },
+      packageData: pkgData,
+      timeline,
+    });
+    expect(lightRenderCkpt.capturedFrameCount).toBe(3);
+    expect(lightRenderCkpt.reusedFrameCount).toBe(0);
+    const [lightR, lightG, lightB] = await samplePixelRgb(
+      path.join(runDir, 'frames', 'page-01.png'),
+    );
+    expect(lightR).toBeGreaterThan(180);
+    expect(lightG).toBeGreaterThan(180);
+    expect(lightB).toBeGreaterThan(180);
+
     // 验证缺失音轨及损坏 PNG 文件头时，质检阶段仍会把失败明细写入 qa.json 再抛出异常
     const qaFile = path.join(runDir, 'qa.json');
     await fs.rm(qaFile, { force: true });
@@ -682,5 +734,228 @@ describe('template rendering, Playwright capture, ffmpeg composition, and QA', (
     );
 
     await core.close();
-  }, 60_000);
+  }, 90_000);
+
+  it('stages a single primary media asset, suppresses secondaryImageUrl in daily-deck, and supports candidate selection', async () => {
+    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'aidaily-dual-img-'));
+    tempDirs.push(tmpDir);
+    await fs.mkdir(path.join(tmpDir, 'config'), { recursive: true });
+    await fs.mkdir(path.join(tmpDir, 'storage', 'articles'), { recursive: true });
+    await fs.mkdir(path.join(tmpDir, 'storage', 'images'), { recursive: true });
+    await fs.copyFile(
+      path.join(REPO_ROOT, 'config', 'settings.yaml'),
+      path.join(tmpDir, 'config', 'settings.yaml'),
+    );
+    await fs.copyFile(
+      path.join(REPO_ROOT, 'config', 'sources.yaml'),
+      path.join(tmpDir, 'config', 'sources.yaml'),
+    );
+
+    const core = await createCore({ rootDir: tmpDir });
+    const png1x1 = Buffer.from(
+      'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+X2ZkAAAAASUVORK5CYII=',
+      'base64',
+    );
+    try {
+      const nowIso = '2026-11-16T09:00:00.000Z';
+      await fs.writeFile(path.join(tmpDir, 'storage', 'images', 'art-tw.png'), png1x1);
+      await fs.writeFile(path.join(tmpDir, 'storage', 'images', 'art-tbl.png'), png1x1);
+      await fs.writeFile(path.join(tmpDir, 'storage', 'images', 'art-chart.png'), png1x1);
+      await writeJsonAtomic(path.join(tmpDir, 'storage', 'articles', 'art-dual.json'), {
+        title: 'Model Release with Tweet and Benchmark',
+        text: 'OpenAI released GPT-5.2 with verified SWE-bench benchmark score.',
+        mediaAssets: [
+          {
+            id: 'cand-tw',
+            articleId: 'art-dual',
+            kind: 'tweet_shot',
+            imagePath: 'storage/images/art-tw.png',
+            sourceUrl: 'https://x.com/thsottiaux/status/1',
+            captionHint: '@thsottiaux 官宣推文',
+            contextSnippet: 'Official launch post',
+            score: 94,
+          },
+          {
+            id: 'cand-tbl',
+            articleId: 'art-dual',
+            kind: 'table_shot',
+            imagePath: 'storage/images/art-tbl.png',
+            sourceUrl: null,
+            captionHint: 'SWE-bench 跑分对比表',
+            contextSnippet: '84.5% vs 71.2%',
+            score: 90,
+          },
+          {
+            id: 'cand-chart',
+            articleId: 'art-dual',
+            kind: 'chart',
+            imagePath: 'storage/images/art-chart.png',
+            sourceUrl: 'https://openai.com/chart.png',
+            captionHint: '推理延迟成本对比图',
+            contextSnippet: 'Cost down 50%',
+            score: 86,
+          },
+        ],
+      });
+
+      core.context.repos.articles.insertIfAbsent({
+        id: 'art-dual',
+        sourceId: 'openai-news',
+        canonicalUrl: 'https://openai.com/news/dual',
+        title: 'Model Release with Tweet and Benchmark',
+        titleNorm: 'model release with tweet and benchmark',
+        lang: 'en',
+        publishedAt: nowIso,
+        firstSeenAt: nowIso,
+        excerpt: 'Model launch with benchmark comparison.',
+        contentPath: 'storage/articles/art-dual.json',
+        contentChars: 200,
+        imagePath: 'storage/images/art-tw.png',
+        extractStatus: 'ok',
+      });
+
+      const runId = createRun(core.context, { itemCount: 1, trigger: 'manual-web' });
+      const runDir = core.context.paths.runDir(runId);
+      core.context.repos.events.insertMany([
+        {
+          id: 'ev-dual-1',
+          runId,
+          rank: 1,
+          role: 'primary',
+          refillRound: 0,
+          title: 'OpenAI 发布新模型',
+          category: '大模型',
+          entity: 'OpenAI',
+          score: 9.2,
+          publicAppeal: 8.8,
+          reason: '重磅更新',
+          articleIds: ['art-dual'],
+        },
+      ]);
+      core.context.repos.runItems.createMany([
+        {
+          id: 'item-dual-1',
+          runId,
+          eventId: 'ev-dual-1',
+          position: 1,
+          status: 'passed',
+          revision: 0,
+          dropReason: null,
+          finalJson: {
+            title: 'OpenAI 发布推理新模型',
+            shortTitle: 'OpenAI发新模型',
+            progressLabel: 'OpenAI新模型',
+            category: '大模型',
+            entity: 'OpenAI',
+            summary: '新版本给出推文公告与跑分对比表。',
+            preferArticleImage: true,
+            primaryMediaId: 'cand-tw',
+            secondaryMediaId: 'cand-tbl',
+            imageCaption: '官宣推文与跑分对比表',
+            keyPoints: ['支持推理升级', '延迟减半'],
+            detail: '工程博客公布了完整测试结果。',
+            hostComment: '数据扎实。',
+            narration: ['OpenAI 今天发布推理模型更新，并附上了跑分对比表。'],
+            evidence: [
+              {
+                claim: '发布新模型',
+                articleId: 'art-dual',
+                quote: 'OpenAI released GPT-5.2 with verified SWE-bench benchmark score.',
+              },
+            ],
+          },
+          updatedAt: nowIso,
+        },
+      ]);
+
+      const pkg: IssuePackage = {
+        order: ['item-dual-1'],
+        headlineItemId: 'item-dual-1',
+        headline: 'OpenAI 发布推理新模型',
+        leadSummary: '双图实测展示推文与跑分。',
+        intro: { narration: ['欢迎收看每日报。'], hostComment: '来看细节。' },
+        outro: { narration: ['以上是今天全部内容。'], hostComment: '下期见。', cta: '欢迎讨论。' },
+        publish: {
+          title: 'OpenAI 推理新模型重磅上线，实测跑分全面领先！',
+          descriptionIntro: '快讯',
+          tags: ['AI'],
+        },
+      };
+      const timeline: Timeline = {
+        totalMs: 12_000,
+        sections: [
+          {
+            key: 'intro',
+            kind: 'intro',
+            audioFile: 'audio/intro.wav',
+            startMs: 0,
+            speechMs: 2000,
+            pageMs: 3000,
+            sentences: [{ text: '欢迎收看每日报。', startMs: 0, durationMs: 2000 }],
+          },
+          {
+            key: 'item-dual-1',
+            kind: 'item',
+            itemId: 'item-dual-1',
+            audioFile: 'audio/item-1.wav',
+            startMs: 3000,
+            speechMs: 4000,
+            pageMs: 5000,
+            sentences: [{ text: 'OpenAI 今天发布推理模型更新。', startMs: 3000, durationMs: 4000 }],
+          },
+          {
+            key: 'outro',
+            kind: 'outro',
+            audioFile: 'audio/outro.wav',
+            startMs: 8000,
+            speechMs: 2000,
+            pageMs: 4000,
+            sentences: [{ text: '以上是今天全部内容。', startMs: 8000, durationMs: 2000 }],
+          },
+        ],
+      };
+
+      const renderIssue = await buildRenderableIssue({
+        ctx: core.context,
+        runId,
+        settings: core.context.settings,
+        packageData: pkg,
+      });
+      expect(renderIssue.items[0]?.imagePath).toBe('assets/item-01.png');
+      expect(renderIssue.items[0]?.secondaryImagePath).toBeUndefined();
+
+      const adapter = createDailyDeckAdapter();
+      const deckData = adapter.buildData(renderIssue, timeline) as {
+        items: Array<{ imageUrl: string | null; secondaryImageUrl: string | null }>;
+      };
+      expect(deckData.items[0]?.imageUrl).toBe('/__run_assets__/assets/item-01.png');
+      expect(deckData.items[0]?.secondaryImageUrl).toBeNull();
+
+      // 将任务切为可调图状态，测试 getRunMediaCandidates 暂存与 setItemImage 单图候选切换
+      core.context.repos.runs.updateStatus(runId, 'awaiting_review');
+      const candMap = await core.tasks.getRunMediaCandidates(runId);
+      expect(candMap['item-dual-1']).toHaveLength(3);
+      const firstCandPath = candMap['item-dual-1']?.[0]?.artifactRelPath ?? '';
+      await expect(fs.stat(path.join(runDir, firstCandPath))).resolves.toBeDefined();
+
+      await core.tasks.setItemImage(runId, 'item-dual-1', {
+        mode: 'custom',
+        selectedPrimaryMediaId: 'cand-chart',
+      });
+      const updatedItem = core.context.repos.runItems.getById('item-dual-1');
+      expect(updatedItem?.selectedMediaIds).toEqual({
+        primary: 'cand-chart',
+      });
+
+      await core.tasks.setItemImage(runId, 'item-dual-1', {
+        mode: 'custom',
+        selectedPrimaryMediaId: 'cand-tw',
+      });
+      expect(core.context.repos.runItems.getById('item-dual-1')?.selectedMediaIds).toEqual({
+        primary: 'cand-tw',
+      });
+    } finally {
+      await core.close();
+    }
+  });
 });

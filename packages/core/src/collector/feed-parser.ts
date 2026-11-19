@@ -153,36 +153,199 @@ function resolveXmlBase(node: Record<string, unknown>, parentBase?: string): str
   }
 }
 
+const ENGLISH_MONTH_MAP: Record<string, number> = {
+  jan: 1,
+  january: 1,
+  feb: 2,
+  february: 2,
+  mar: 3,
+  march: 3,
+  apr: 4,
+  april: 4,
+  may: 5,
+  jun: 6,
+  june: 6,
+  jul: 7,
+  july: 7,
+  aug: 8,
+  august: 8,
+  sep: 9,
+  sept: 9,
+  september: 9,
+  oct: 10,
+  october: 10,
+  nov: 11,
+  november: 11,
+  dec: 12,
+  december: 12,
+};
+
 /** 检查日期字符串末尾是否已包含明确时区偏移信息 */
 function hasExplicitTimezone(raw: string): boolean {
   return /(?:Z|[+-]\d{2}:?\d{2}|GMT|UTC|UT|[ECMP][DS]T)$/i.test(raw.trim());
 }
 
+/** 将无时区偏移的年月日时分秒毫秒按目标时区构造为精确的 UTC ISO 时间字符串 */
+function buildWallClockIso(
+  year: number,
+  month: number,
+  day: number,
+  hour: number,
+  minute: number,
+  second: number,
+  ms: number,
+  timezone: string,
+): string | null {
+  if (
+    !Number.isInteger(year) ||
+    !Number.isInteger(month) ||
+    month < 1 ||
+    month > 12 ||
+    !Number.isInteger(day) ||
+    day < 1 ||
+    day > 31 ||
+    hour < 0 ||
+    hour > 23 ||
+    minute < 0 ||
+    minute > 59 ||
+    second < 0 ||
+    second > 59 ||
+    ms < 0 ||
+    ms > 999
+  ) {
+    return null;
+  }
+  const tzDate = new TZDate(year, month - 1, day, hour, minute, second, ms, timezone);
+  if (
+    Number.isNaN(tzDate.getTime()) ||
+    tzDate.getFullYear() !== year ||
+    tzDate.getMonth() + 1 !== month ||
+    tzDate.getDate() !== day
+  ) {
+    return null;
+  }
+  return new Date(tzDate.getTime()).toISOString();
+}
+
+/** 将不带时区的英文月份日期（如 `Nov 18, 2026` 或 `18 November 2026 14:30`）转为按指定时区解释的 UTC ISO 时间 */
+function parseTimezoneLessEnglishMonthDate(raw: string, defaultTimezone: string): string | null {
+  if (hasExplicitTimezone(raw)) {
+    return null;
+  }
+  const timeSuffix =
+    '(?:(?:\\s*,?\\s*(?:at\\s+)?)(\\d{1,2}):(\\d{2})(?::(\\d{2}))?(?:\\s*(AM|PM))?)?';
+  const monthFirst = new RegExp(
+    `^(?:[A-Za-z]{3,9},?\\s+)?([A-Za-z]{3,9})\\.?\\s+(\\d{1,2}),?\\s+(\\d{4})${timeSuffix}$`,
+    'i',
+  ).exec(raw);
+  const dayFirst = monthFirst
+    ? null
+    : new RegExp(
+        `^(?:[A-Za-z]{3,9},?\\s+)?(\\d{1,2})\\s+([A-Za-z]{3,9})\\.?,?\\s+(\\d{4})${timeSuffix}$`,
+        'i',
+      ).exec(raw);
+
+  const match = monthFirst ?? dayFirst;
+  if (!match) {
+    return null;
+  }
+
+  const monthToken = (monthFirst ? match[1] : match[2])?.toLowerCase();
+  const dayToken = monthFirst ? match[2] : match[1];
+  const yearToken = match[3];
+  const month = monthToken ? ENGLISH_MONTH_MAP[monthToken] : undefined;
+  const day = dayToken ? Number.parseInt(dayToken, 10) : Number.NaN;
+  const year = yearToken ? Number.parseInt(yearToken, 10) : Number.NaN;
+  if (!month) {
+    return null;
+  }
+
+  let hour = 0;
+  let minute = 0;
+  let second = 0;
+  if (match[4] && match[5]) {
+    hour = Number.parseInt(match[4], 10);
+    minute = Number.parseInt(match[5], 10);
+    second = match[6] ? Number.parseInt(match[6], 10) : 0;
+    const ampm = match[7]?.toUpperCase();
+    if (ampm === 'PM' && hour < 12) {
+      hour += 12;
+    } else if (ampm === 'AM' && hour === 12) {
+      hour = 0;
+    }
+  }
+
+  return buildWallClockIso(year, month, day, hour, minute, second, 0, defaultTimezone);
+}
+
+/** 将中文年月日或斜杠分隔日期规整为标准连字符格式 */
+function normalizeDateSeparators(raw: string): string {
+  const cnMatch =
+    /^(\d{4})\s*年\s*(\d{1,2})\s*月\s*(\d{1,2})\s*日(?:\s+(\d{1,2}:\d{2}(?::\d{2})?))?$/.exec(raw);
+  if (cnMatch) {
+    const y = cnMatch[1];
+    const m = cnMatch[2]?.padStart(2, '0');
+    const d = cnMatch[3]?.padStart(2, '0');
+    const time = cnMatch[4];
+    return time ? `${y}-${m}-${d}T${time}` : `${y}-${m}-${d}`;
+  }
+  const slashMatch = /^(\d{4})\/(\d{1,2})\/(\d{1,2})(?:\s+(\d{1,2}:\d{2}(?::\d{2})?))?$/.exec(raw);
+  if (slashMatch) {
+    const y = slashMatch[1];
+    const m = slashMatch[2]?.padStart(2, '0');
+    const d = slashMatch[3]?.padStart(2, '0');
+    const time = slashMatch[4];
+    return time ? `${y}-${m}-${d}T${time}` : `${y}-${m}-${d}`;
+  }
+  return raw;
+}
+
 /** 将各种常见发布时间格式解析为标准 UTC ISO 时间字符串（无时区时间按配置时区解释） */
-function parsePublishedAt(raw: string | null, defaultTimezone = 'UTC'): string | null {
+export function parsePublishedAt(raw: string | null, defaultTimezone = 'UTC'): string | null {
   if (!raw) {
     return null;
   }
-  const trimmed = unwrapCdata(raw).trim();
+  const trimmed = normalizeDateSeparators(unwrapCdata(raw).trim());
   if (!trimmed) {
     return null;
   }
 
   // 纯日期格式 YYYY-MM-DD 按配置时区的当天零点转换
-  if (/^\d{4}-\d{2}-\d{2}$/.test(trimmed)) {
-    const tzDate = new TZDate(`${trimmed}T00:00:00`, defaultTimezone);
-    return Number.isNaN(tzDate.getTime()) ? null : new Date(tzDate.getTime()).toISOString();
+  const dateOnlyMatch = /^(\d{4})-(\d{2})-(\d{2})$/.exec(trimmed);
+  if (dateOnlyMatch) {
+    return buildWallClockIso(
+      Number.parseInt(dateOnlyMatch[1] ?? '', 10),
+      Number.parseInt(dateOnlyMatch[2] ?? '', 10),
+      Number.parseInt(dateOnlyMatch[3] ?? '', 10),
+      0,
+      0,
+      0,
+      0,
+      defaultTimezone,
+    );
   }
 
   // 不带时区的 YYYY-MM-DD HH:mm(:ss)?(.sss)? 按配置时区解释
-  if (/^\d{4}-\d{2}-\d{2}[T\s]\d{2}:\d{2}(:\d{2}(?:\.\d+)?)?$/.test(trimmed)) {
-    const isoLocal = trimmed.replace(/\s+/, 'T');
-    if (!hasExplicitTimezone(isoLocal)) {
-      const tzDate = new TZDate(isoLocal, defaultTimezone);
-      if (!Number.isNaN(tzDate.getTime())) {
-        return new Date(tzDate.getTime()).toISOString();
-      }
-    }
+  const localDateTimeMatch =
+    /^(\d{4})-(\d{2})-(\d{2})[T\s](\d{2}):(\d{2})(?::(\d{2})(?:\.(\d{1,3}))?)?$/.exec(trimmed);
+  if (localDateTimeMatch && !hasExplicitTimezone(trimmed)) {
+    const msRaw = localDateTimeMatch[7] ?? '0';
+    return buildWallClockIso(
+      Number.parseInt(localDateTimeMatch[1] ?? '', 10),
+      Number.parseInt(localDateTimeMatch[2] ?? '', 10),
+      Number.parseInt(localDateTimeMatch[3] ?? '', 10),
+      Number.parseInt(localDateTimeMatch[4] ?? '', 10),
+      Number.parseInt(localDateTimeMatch[5] ?? '', 10),
+      Number.parseInt(localDateTimeMatch[6] ?? '0', 10),
+      Number.parseInt(msRaw.padEnd(3, '0'), 10),
+      defaultTimezone,
+    );
+  }
+
+  // 不带时区的英文月份日期（如 Nov 18, 2026）按配置时区解释，避免受宿主机本地时区影响
+  const englishMonthIso = parseTimezoneLessEnglishMonthDate(trimmed, defaultTimezone);
+  if (englishMonthIso) {
+    return englishMonthIso;
   }
 
   const ms = Date.parse(trimmed);
@@ -193,7 +356,7 @@ function parsePublishedAt(raw: string | null, defaultTimezone = 'UTC'): string |
 }
 
 /** 将疑似相对链接解析为绝对 http/https 地址，无效地址返回 null */
-function resolveHttpUrl(rawUrl: string | null, baseUrl?: string): string | null {
+export function resolveHttpUrl(rawUrl: string | null, baseUrl?: string): string | null {
   if (!rawUrl) {
     return null;
   }

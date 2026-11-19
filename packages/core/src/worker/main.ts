@@ -39,6 +39,7 @@ interface ParsedWorkerArgs {
   trigger?: Trigger;
   scheduleId?: string;
   itemCount?: number;
+  notBeforeAt?: string;
   dtimeUnixSec?: number;
 }
 
@@ -63,6 +64,7 @@ export function parseWorkerArgs(argv: readonly string[]): ParsedWorkerArgs {
   let trigger: Trigger | undefined;
   let scheduleId: string | undefined;
   let itemCount: number | undefined;
+  let notBeforeAt: string | undefined;
   let dtimeUnixSec: number | undefined;
 
   for (let i = 0; i < argv.length; i++) {
@@ -124,6 +126,10 @@ export function parseWorkerArgs(argv: readonly string[]): ParsedWorkerArgs {
         i += 1;
         break;
       }
+      case '--since':
+        notBeforeAt = requireFlagValue(argv, i, '--since');
+        i += 1;
+        break;
       case '--dtime': {
         const parsed = Number(requireFlagValue(argv, i, '--dtime'));
         if (!Number.isFinite(parsed) || parsed <= 0) {
@@ -156,6 +162,7 @@ export function parseWorkerArgs(argv: readonly string[]): ParsedWorkerArgs {
     trigger,
     scheduleId,
     itemCount,
+    notBeforeAt,
     dtimeUnixSec,
   };
 }
@@ -228,6 +235,7 @@ async function executeWorkerAction(
         }
         await core.tasks.start({
           itemCount: parsed.itemCount,
+          notBeforeAt: parsed.notBeforeAt,
           trigger: parsed.trigger,
           scheduleId: parsed.scheduleId,
           detach: false,

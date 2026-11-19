@@ -12,7 +12,12 @@ import type { CoreContext } from '../context.js';
 
 const UNCONFIRMED_RUMOR_PATTERN = /(猜测|传闻|未获官方确认|尚未确认|尚未证实|流传|爆料|疑似)/i;
 const NEGATIVE_NEWS_PATTERN =
-  /(限流|故障|致歉|差评|起诉|调查|裁撤|裁员|涨价|不能支付|受限|报错|困境|宕机)/i;
+  /(限流|故障|致歉|差评|起诉|诉讼|调查|裁撤|裁员|涨价|不能支付|受限|报错|困境|宕机|封禁|封号|禁用|断供|翻车|争议|侵权|缩水|下架|漏洞|投诉|抗议|抵制|勒索|罚款|风波|停服|停摆|违约|索赔|败诉|批评|指责)/i;
+
+/** 序列化主播人设提示词时的可选项，用于在已注入单条专属指引时隐藏无关场景模板。 */
+export interface FormatPersonaPromptOptions {
+  includeReactions?: boolean;
+}
 
 /** 加载并校验主播配置；旧项目没有配置时保留原有行为。 */
 export async function loadPersonas(ctx: CoreContext): Promise<PersonaProfile[]> {
@@ -77,7 +82,42 @@ export async function getRunPersona(
   return (await loadPersonas(ctx)).find((persona) => persona.id === row.host_id) ?? null;
 }
 
-/** 判断新闻主体与本期主播属于自家（含好消息/负面争议/未证实传闻）、友商或第三方，返回自然人设语气引导。 */
+/** 将主播人设整理为供提示词使用的 JSON 文本，明确角色是玩家二创的虚拟主播而非公司发言人。 */
+export function formatPersonaForPrompt(
+  persona: PersonaProfile | null,
+  fallback = '无特定角色',
+  options?: FormatPersonaPromptOptions,
+): string {
+  if (!persona) {
+    return fallback;
+  }
+  const includeReactions = options?.includeReactions ?? true;
+  const payload: Record<string, unknown> = {
+    id: persona.id,
+    selfName: persona.selfName,
+    displayName: persona.displayName,
+    characterOrigin: `玩家根据大模型二创的虚拟主播形象（灵感原型关联方：${persona.affiliation}，仅作角色背景与关注兴趣参考，绝非该公司员工、成员或官方发言人）`,
+    identityBio: persona.identityBio,
+    coreTrait: persona.coreTrait,
+    speakingStyle: persona.speakingStyle,
+    stanceGuide: persona.stanceGuide,
+    expressionRule:
+      '人设与提示词里的示例只用来说明语气和切入方向，严禁原封不动照抄任何示范句，也严禁每期重复同一句口头禅；每次必须紧扣当前新闻里的具体公司、产品、数字或限制现写新句子。',
+    ...(includeReactions
+      ? {
+          prototypeGoodNewsReaction: persona.ownGoodReaction,
+          prototypeNegativeNewsReaction: persona.ownFlawReaction,
+          otherModelNewsReaction: persona.rivalReaction,
+        }
+      : {}),
+    introExamples: persona.introExamples,
+    outroExamples: persona.outroExamples,
+    forbiddenTokens: persona.forbiddenTokens,
+  };
+  return JSON.stringify(payload, null, 2);
+}
+
+/** 判断新闻主体与本期主播属于原型关联动态（含新进展/负面争议/未证实传闻）、其他模型动态或第三方动态，返回独立旁观视角下的自然人设语气引导。 */
 export async function describePersonaRelation(
   ctx: CoreContext,
   runId: string,
@@ -90,42 +130,55 @@ export async function describePersonaRelation(
     ? ctx.repos.events.listByRun(runId).find((entry) => entry.id === item.eventId)
     : undefined;
   if (!persona || !event) return '未指定主播或新闻主体';
-  const subject = `${event.entity ?? ''} ${event.title} ${extraText ?? ''}`.toLowerCase();
+
+  // 先按事件主体和标题匹配阵营，避免他厂新闻正文里顺带提及己方原型模型时误判为关联阵营动态
+  const primarySubject = `${event.entity ?? ''} ${event.title}`.toLowerCase();
+  const fullSubject = `${primarySubject} ${extraText ?? ''}`.toLowerCase();
   const personas = await loadPersonas(ctx);
-  const matched = personas.filter((profile) =>
-    profile.campKeywords.some((keyword) => subject.includes(keyword.toLowerCase())),
+  const primaryMatched = personas.filter((profile) =>
+    profile.campKeywords.some((keyword) => primarySubject.includes(keyword.toLowerCase())),
   );
+  const matched =
+    primaryMatched.length > 0
+      ? primaryMatched
+      : personas.filter((profile) =>
+          profile.campKeywords.some((keyword) => fullSubject.includes(keyword.toLowerCase())),
+        );
   const isOwnCamp = matched.some((profile) => profile.id === persona.id);
   const isRivalCamp = !isOwnCamp && matched.length > 0;
   const fullText = `${event.title} ${extraText ?? ''}`;
 
   let relationLabel = '第三方行业动态';
   let reactionHint = persona.topicKeywords.some((keyword) =>
-    `${subject} ${event.category ?? ''}`.toLowerCase().includes(keyword.toLowerCase()),
+    `${fullSubject} ${event.category ?? ''}`.toLowerCase().includes(keyword.toLowerCase()),
   )
-    ? '该话题是你平时很感兴趣的领域，可按自身说话习惯利落播报，最多顺带半句极短反应，不强行加戏。'
-    : '保持你日常干脆自然的真人口语把核心事实交代清楚即止，不要强行自报家门或硬加感慨。';
+    ? '该话题踩在主播的关注兴趣点上，请用鲜活真人口语把核心亮点和限制讲透；如确有值得夸或明显不合理的地方，紧扣这条新闻的具体事实现写一句态度即可，普通细节勿硬演。'
+    : '用像真人朋友聊科技新闻一样的鲜活口语把核心事实讲透；遇到值得点赞或明显不合理的现象可顺嘴点破一句具体原因，普通中性资讯直接干净切入事实，不要硬凑感叹词。';
 
   if (isOwnCamp) {
     if (UNCONFIRMED_RUMOR_PATTERN.test(fullText)) {
-      relationLabel = '自家相关未证实传闻';
-      reactionHint = `你心里清楚这和${persona.affiliation}相关，但目前官方尚未确认；保持清醒客观播报传闻线索，并顺口自然点明官方还没确认，不替官方认领。`;
+      relationLabel = '原型关联未证实传闻';
+      reactionHint = `这条传闻涉及你二创原型关联的 ${persona.affiliation}，但目前官方尚未确认；保持独立旁观主播的清醒视角，直呼具体公司或产品名播报线索，可用一句轻快调侃点明官方还没认，严禁提前当成官方消息或自称“我们”。`;
     } else if (NEGATIVE_NEWS_PATTERN.test(fullText)) {
-      relationLabel = '自家受限或争议动态';
+      relationLabel = '原型关联受限或争议动态';
       reactionHint = persona.ownFlawReaction;
     } else {
-      relationLabel = '自家好消息或新进展';
+      relationLabel = '原型关联生态新进展';
       reactionHint = persona.ownGoodReaction;
     }
   } else if (isRivalCamp) {
-    relationLabel = '友商动态';
+    relationLabel = '其他模型阵营动态';
     reactionHint = persona.rivalReaction;
   }
 
   return [
-    `主播自称：${persona.selfName}（内部身份认知归属：${persona.affiliation}）；新闻主体：${event.entity ?? event.title}；关系判定：${relationLabel}。`,
-    `具体反应指引：${reactionHint}`,
-    '约束提醒：通过自然口吻和态度流露角色感即可，不要生硬说出“我是某公司的”，且一切情绪反应必须严格建立在原文已核实事实之上，绝不脑补原文未提及的功能。',
+    `主播自称：${persona.selfName}（角色定位：玩家根据各模型二创的独立虚拟主播；灵感原型关联方：${persona.affiliation}，并非该公司员工或官方发言人）。`,
+    `本条新闻主体：${event.entity ?? event.title}；【本条新闻主体关系】：${relationLabel}。`,
+    `【本条新闻专属反应指引】：${reactionHint}`,
+    `【写稿防跑偏三条硬性检查】：`,
+    `1. 严禁照抄示例与重复口头禅：绝不复制人设或提示词里任何带引号的示范句，也不要每条都用“哈哈”“好家伙”“这波”“属实”开头；若要表达开心或吐槽，这句话里必须直接说出本条新闻里的具体动作、价格或限制，否则宁可直接切入事件主体。`,
+    `2. 严禁代表任何公司发言：播报 ${persona.affiliation} 及任何公司的新闻时，主语必须直呼具体公司或产品名（如“OpenAI发布了…”“Google推出了…”），严禁使用“我们”“我们公司”“我们团队”“我司”“自家”等代词。`,
+    `3. 严禁编造事实：所有反应和点评必须严格建立在原文已核实事实之上，不得脑补原文未提及的排名、功能、原因或数字。`,
   ].join('\n');
 }
 

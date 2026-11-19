@@ -197,6 +197,40 @@ function markItemDropped(opts: {
 }
 
 /**
+ * 判断摘要中提取的事件实际发生日期是否明显早于任务设定的最早时间下限。
+ * 对于仅写出公历日期（YYYY-MM-DD）的情形，按全球最晚时区当日结束时刻计算（预留跨时区缓冲），避免海外隔夜新闻被误杀。
+ */
+export function isEventOlderThanCutoff(
+  eventOccurredAt: string | undefined,
+  notBeforeAt: string | null | undefined,
+): boolean {
+  if (!eventOccurredAt || !notBeforeAt) {
+    return false;
+  }
+  const trimmed = eventOccurredAt.trim();
+  const cutoffMs = Date.parse(notBeforeAt);
+  if (!trimmed || Number.isNaN(cutoffMs)) {
+    return false;
+  }
+
+  const dateOnlyMatch = /^(\d{4})-(\d{2})-(\d{2})$/.exec(trimmed);
+  if (dateOnlyMatch) {
+    const year = Number(dateOnlyMatch[1]);
+    const month = Number(dateOnlyMatch[2]);
+    const day = Number(dateOnlyMatch[3]);
+    // 全球最晚时区为 UTC-12，该日最晚可能延续至 UTC 次日 12:00
+    const latestPossibleMs = Date.UTC(year, month - 1, day, 23, 59, 59, 999) + 12 * 3600_000;
+    return latestPossibleMs < cutoffMs;
+  }
+
+  const parsedMs = Date.parse(trimmed);
+  if (Number.isNaN(parsedMs)) {
+    return false;
+  }
+  return parsedMs < cutoffMs;
+}
+
+/**
  * 处理单条新闻从总结、中文润色、确定性预检到独立事实核查（含打回微调闭环）的完整流程，
  * 支持按历史版本续跑未完成的子步骤以及从指定步骤单条重做。
  */
@@ -207,11 +241,23 @@ export async function processSingleItem(opts: {
   runId: string;
   item: RunItemRecord;
   event: EventRecord;
+  notBeforeAt?: string | null;
   signal: AbortSignal;
   forceFromStep?: EditSubStep;
   claimPassSlot: () => boolean;
 }): Promise<'passed' | 'dropped' | 'requeued'> {
-  const { ctx, settings, limits, runId, item, event, signal, forceFromStep, claimPassSlot } = opts;
+  const {
+    ctx,
+    settings,
+    limits,
+    runId,
+    item,
+    event,
+    notBeforeAt,
+    signal,
+    forceFromStep,
+    claimPassSlot,
+  } = opts;
 
   if (signal.aborted) {
     throw new DOMException('已取消', 'AbortError');
@@ -454,6 +500,19 @@ export async function processSingleItem(opts: {
     });
   }
 
+  if (isEventOlderThanCutoff(summary.eventOccurredAt, notBeforeAt)) {
+    markItemDropped({
+      ctx,
+      runId,
+      item,
+      event,
+      revision,
+      reason: 'outdated_before_cutoff',
+    });
+    await clearPendingRetry();
+    return 'dropped';
+  }
+
   // 步骤 2：中文口播润色
   if (!polished) {
     ctx.repos.runItems.updateItem(item.id, {
@@ -632,6 +691,11 @@ export async function runEditStage(
   if (!run) {
     throw new Error(`未找到任务记录: ${runId}`);
   }
+  const notBeforeAt = run.notBeforeAt ?? null;
+  const notBeforeMs = notBeforeAt ? Date.parse(notBeforeAt) : Number.NaN;
+  const hasCutoff = !Number.isNaN(notBeforeMs);
+  const defaultSinceMs = ctx.now().getTime() - settings.issue.freshnessHours * 3600_000;
+
   const itemCount =
     settings.issue.minScore === undefined
       ? run.itemCount
@@ -689,7 +753,23 @@ export async function runEditStage(
 
     if (pendingQueue.length === 0) {
       if (settings.issue.minScore !== undefined) break;
-      if (nextRefillRound > settings.issue.refill.maxRounds) {
+      const cutoffPreventsWindowExpand =
+        hasCutoff &&
+        notBeforeMs >= defaultSinceMs &&
+        (nextRefillRound > 1 || !settings.issue.refill.useBackupSources);
+      if (nextRefillRound > settings.issue.refill.maxRounds || cutoffPreventsWindowExpand) {
+        if (hasCutoff && passedCount >= 1) {
+          ctx.repos.runEvents.append({
+            runId,
+            ts: ctx.now().toISOString(),
+            level: 'info',
+            stage: 'edit',
+            type: 'cutoff_partial_edit',
+            message: `在设定的最早时间之后共通过核查 ${passedCount} 条新闻（少于目标上限 ${itemCount} 条），将按实际合格条数制作视频`,
+            data: { notBeforeAt, passedCount, itemCount },
+          });
+          break;
+        }
         throw new PipelineError(
           'insufficient_items',
           `合格新闻条目不足：需要 ${itemCount} 条，当前通过 ${passedCount} 条，备用候选池与补充轮次已全部耗尽`,
@@ -703,6 +783,7 @@ export async function runEditStage(
         neededCount: itemCount - passedCount,
         itemCount,
         settings,
+        notBeforeAt,
         usedArticleIds,
         existingEventCount: totalEventCount,
         signal: parentSignal,
@@ -785,6 +866,7 @@ export async function runEditStage(
               runId,
               item: nextItem,
               event: ev,
+              notBeforeAt,
               signal: excessAbort.signal,
               claimPassSlot,
             })
@@ -820,8 +902,17 @@ export async function runEditStage(
 
   resetLingeringActiveItems();
   const finalItems = ctx.repos.runItems.listByRun(runId);
+  const passedItemIds = finalItems.filter((i) => i.status === 'passed').map((i) => i.id);
+  if (passedItemIds.length === 0) {
+    throw new PipelineError(
+      'insufficient_items',
+      hasCutoff
+        ? `在设定的最早时间（${notBeforeAt}）之后没有新闻通过事实核查，请放宽时间后再试`
+        : '本期没有新闻通过事实核查，无法生成成片',
+    );
+  }
   return {
-    passedItemIds: finalItems.filter((i) => i.status === 'passed').map((i) => i.id),
+    passedItemIds,
     droppedItemIds: finalItems.filter((i) => i.status === 'dropped').map((i) => i.id),
   };
 }
@@ -964,6 +1055,7 @@ export async function retryMultipleEditItems(opts: {
                 finalJson: null,
               },
               event: target.event,
+              notBeforeAt: run.notBeforeAt ?? null,
               signal: localAc.signal,
               forceFromStep: fromStep,
               claimPassSlot,

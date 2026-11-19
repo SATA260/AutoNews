@@ -180,6 +180,9 @@ describe('aidaily CLI commands, JSON output, streaming logs, and exit codes', ()
     const c2 = createBufferedIo();
     expect(await runCli(['run', '-n', '0'], c2.io)).toBe(2);
 
+    const cFuture = createBufferedIo();
+    expect(await runCli(['run', '-n', '1', '--since', '2099-01-01'], cFuture.io)).toBe(2);
+
     const cOverflow = createBufferedIo();
     expect(await runCli(['run', '-n', '9007199254740993'], cOverflow.io)).toBe(2);
 
@@ -289,6 +292,10 @@ describe('aidaily CLI commands, JSON output, streaming logs, and exit codes', ()
           '09:15',
           '-n',
           '6',
+          '--cutoff',
+          'hours',
+          '--max-age-hours',
+          '24',
           '--name',
           '测试定时',
           '--disabled',
@@ -300,9 +307,13 @@ describe('aidaily CLI commands, JSON output, streaming logs, and exit codes', ()
       id: string;
       time: string;
       itemCount: number;
+      cutoffMode: string;
+      maxAgeHours: number | null;
     };
     expect(createdJob.time).toBe('09:15');
     expect(createdJob.itemCount).toBe(6);
+    expect(createdJob.cutoffMode).toBe('hours');
+    expect(createdJob.maxAgeHours).toBe(24);
 
     const schedListBuf = createBufferedIo();
     expect(await runCli(['--root', rootDir, 'schedule', 'list', '--json'], schedListBuf.io)).toBe(
@@ -328,6 +339,32 @@ describe('aidaily CLI commands, JSON output, streaming logs, and exit codes', ()
     ).toBe(0);
     expect(JSON.parse(schedRmBuf.getOut())).toMatchObject({ removed: true });
 
+    // x-login --status --json 与 --import <cookieFile>
+    const xStatusEmptyBuf = createBufferedIo();
+    expect(
+      await runCli(['--root', rootDir, 'x-login', '--status', '--json'], xStatusEmptyBuf.io),
+    ).toBe(0);
+    expect(JSON.parse(xStatusEmptyBuf.getOut())).toMatchObject({ configured: false });
+
+    const importCookiePath = path.join(rootDir, 'import-x-cookies.txt');
+    await fs.writeFile(
+      importCookiePath,
+      '.x.com\tTRUE\t/\tTRUE\t1900000000\tauth_token\tcli_token_val\n.x.com\tTRUE\t/\tTRUE\t1900000000\tct0\tcli_ct0_val\n',
+      'utf8',
+    );
+    const xImportBuf = createBufferedIo();
+    expect(
+      await runCli(
+        ['--root', rootDir, 'x-login', '--import', importCookiePath, '--json'],
+        xImportBuf.io,
+      ),
+    ).toBe(0);
+    expect(JSON.parse(xImportBuf.getOut())).toMatchObject({
+      configured: true,
+      hasAuthToken: true,
+      hasCt0: true,
+    });
+
     // doctor
     const docBuf = createBufferedIo();
     expect(await runCli(['--root', rootDir, 'doctor', '--json'], docBuf.io)).toBe(0);
@@ -343,9 +380,11 @@ describe('aidaily CLI commands, JSON output, streaming logs, and exit codes', ()
     const feedUrl = await startFixtureFeedServer();
     const { rootDir } = await setupCliWorkspace(feedUrl);
 
-    // 1. 前台运行并实时打印阶段日志
+    // 1. 前台运行并实时打印阶段日志（含 --since 最近时间参数）
     const runBuf = createBufferedIo();
-    expect(await runCli(['--root', rootDir, 'run', '-n', '1'], runBuf.io)).toBe(0);
+    expect(await runCli(['--root', rootDir, 'run', '-n', '1', '--since', '24h'], runBuf.io)).toBe(
+      0,
+    );
     const stdoutText = runBuf.getOut();
     expect(stdoutText).toContain('开始执行阶段：collect');
     expect(stdoutText).toContain('成片制作与质检已全部完成');

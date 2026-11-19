@@ -147,6 +147,7 @@ export const RunSummarySchema = z.object({
   status: RunStatusSchema,
   currentStage: StageSchema.nullable(),
   itemCount: z.number().int().positive(),
+  notBeforeAt: z.string().nullable().optional(),
   hostId: HostMascotIdSchema.nullable().optional(),
   bgmFile: z.string().nullable().optional(),
   mediaDirty: z.boolean().optional(),
@@ -226,12 +227,19 @@ export const ScheduleTimeSchema = z
   .string()
   .regex(/^([01]\d|2[0-3]):([0-5]\d)$/, '定时时间必须为 HH:mm 格式（00:00–23:59）');
 
+/** 定时任务新闻最早时间限制策略：不额外收紧、仅限上次成功发布后、或严格限定最近若干小时 */
+export const ScheduleCutoffModeSchema = z.enum(['none', 'since_last_published', 'hours']);
+/** 定时任务新闻最早时间策略类型 */
+export type ScheduleCutoffMode = z.infer<typeof ScheduleCutoffModeSchema>;
+
 /** 用户手动创建的定时任务记录（新建时必须显式填写执行时间和新闻条数） */
 export const ScheduleJobSchema = z.object({
   id: z.string().min(1),
   name: z.string().min(1),
   time: ScheduleTimeSchema,
   itemCount: z.number().int().positive(),
+  cutoffMode: ScheduleCutoffModeSchema.default('none'),
+  maxAgeHours: z.number().int().positive().nullable().optional(),
   bgmFile: z.string().nullable().optional(),
   enabled: z.boolean(),
   installed: z.boolean(),

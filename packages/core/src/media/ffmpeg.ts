@@ -119,6 +119,8 @@ export async function buildMasterAudioWav(opts: {
   levelVoice?: boolean;
   denoiseVoice?: boolean;
   bgm: { file: string; volumeDb: number; duckDb: number };
+  /** 可选的翻页音效：音效文件、音量（分贝）和每次发声的时间点（毫秒）；不传或文件为空则不加 */
+  pageTurnSfx?: { file: string; volumeDb: number; atMs: number[] };
   rootDir: string;
   ffmpegBin?: string;
   signal?: AbortSignal;
@@ -156,7 +158,9 @@ export async function buildMasterAudioWav(opts: {
       }
       inputArgs.push('-i', sectionInputPath);
 
-      const delayMs = Math.max(0, Math.round(sec.startMs));
+      // 切页后若配置了等待静默时长，把整段口播往后推迟对应的毫秒数
+      const speechOffsetMs = Math.max(0, Math.round(sec.speechOffsetMs ?? 0));
+      const delayMs = Math.max(0, Math.round(sec.startMs) + speechOffsetMs);
       const delayFilter = delayMs > 0 ? `,adelay=${delayMs}|${delayMs}` : '';
       // 仅针对尚未在语音合成阶段执行处理的外部音源启用降噪与响度拉齐，避免对本地克隆音频二次滤波
       const cleanupPrefix = opts.denoiseVoice ? `${VOICE_CLEANUP_FILTER},` : '';
@@ -212,6 +216,13 @@ export async function buildMasterAudioWav(opts: {
     // 保持单句的响度，整轨仅限制峰值。
     const voiceWav = rawVoiceWav;
 
+    // 配置了翻页音效时，先把人声和背景音乐混到工作目录，最后再叠加音效写入目标文件
+    const sfx = opts.pageTurnSfx;
+    const sfxFile = sfx?.file.trim() ?? '';
+    const sfxTimesMs = (sfx?.atMs ?? []).filter((ms) => Number.isFinite(ms) && ms >= 0);
+    const needsSfx = Boolean(sfx && sfxFile && sfxTimesMs.length > 0);
+    const mixTarget = needsSfx ? path.join(workDir, 'pre-sfx.wav') : opts.outWav;
+
     // 3. 若配置了背景音乐，循环铺满全片并挂载人声侧链压低混音
     const bgmRel = opts.bgm.file.trim();
     if (bgmRel) {
@@ -243,7 +254,7 @@ export async function buildMasterAudioWav(opts: {
               );
             })();
 
-      await withAtomicMediaWrite(opts.outWav, '.wav', async (tmpOut) => {
+      await withAtomicMediaWrite(mixTarget, '.wav', async (tmpOut) => {
         await runMediaCommand(
           ffmpegBin,
           [
@@ -273,15 +284,91 @@ export async function buildMasterAudioWav(opts: {
           },
         );
       });
-      return;
+    } else {
+      await withAtomicMediaWrite(mixTarget, '.wav', async (tmpOut) => {
+        await fs.copyFile(voiceWav, tmpOut);
+      });
     }
 
-    await withAtomicMediaWrite(opts.outWav, '.wav', async (tmpOut) => {
-      await fs.copyFile(voiceWav, tmpOut);
-    });
+    // 4. 在每次翻页的时间点叠加咔嗒音效（放在背景音乐避让之后，音效不会误触发背景音乐压低）
+    if (needsSfx && sfx) {
+      const sfxPath = path.isAbsolute(sfxFile) ? sfxFile : path.resolve(opts.rootDir, sfxFile);
+      await fs.access(sfxPath);
+      await withAtomicMediaWrite(opts.outWav, '.wav', async (tmpOut) => {
+        await runMediaCommand(
+          ffmpegBin,
+          buildPageTurnSfxOverlayArgs({
+            inWav: mixTarget,
+            sfxFile: sfxPath,
+            outWav: tmpOut,
+            atMs: sfxTimesMs,
+            volumeDb: sfx.volumeDb,
+            sampleRate: opts.sampleRate,
+          }),
+          {
+            signal: opts.signal,
+            timeoutMs: mediaTimeoutMs(opts.timeline.totalMs),
+            actionLabel: 'ffmpeg 叠加翻页音效',
+          },
+        );
+      });
+    }
   } finally {
     await fs.rm(workDir, { recursive: true, force: true }).catch(() => undefined);
   }
+}
+
+/** 算出成片里每次翻页音效的发声时刻（毫秒）：从第二页起每页开始时间减去提前量，且不早于 0 */
+export function computePageTurnSfxTimesMs(timeline: Timeline, leadMs: number): number[] {
+  const safeLead = Number.isFinite(leadMs) ? Math.max(0, leadMs) : 0;
+  return timeline.sections
+    .slice(1)
+    .map((sec) => Math.max(0, Math.round(sec.startMs - safeLead)))
+    .filter((ms) => Number.isFinite(ms));
+}
+
+/** 生成「在指定时间点叠加多次同一音效」的 ffmpeg 参数：音效拆成多份，分别延后到各时间点再与原音轨混合 */
+export function buildPageTurnSfxOverlayArgs(opts: {
+  inWav: string;
+  sfxFile: string;
+  outWav: string;
+  atMs: readonly number[];
+  volumeDb: number;
+  sampleRate: number;
+}): string[] {
+  const count = opts.atMs.length;
+  const splitTags = opts.atMs.map((_, i) => `[c${i}]`).join('');
+  const delayed = opts.atMs
+    .map((ms, i) => {
+      const d = Math.max(0, Math.round(ms));
+      return `[c${i}]adelay=${d}|${d}[d${i}]`;
+    })
+    .join(';');
+  const mixInputs = opts.atMs.map((_, i) => `[d${i}]`).join('');
+  const filter =
+    `[1:a]${buildHighQualityResampleFilter(opts.sampleRate)},aformat=sample_fmts=s16:channel_layouts=stereo,` +
+    `volume=${opts.volumeDb}dB,asplit=${count}${splitTags};` +
+    `${delayed};` +
+    `[0:a]${mixInputs}amix=inputs=${count + 1}:duration=first:dropout_transition=0:normalize=0,` +
+    `alimiter=limit=0.95:level=false:latency=true[out]`;
+  return [
+    '-y',
+    '-i',
+    opts.inWav,
+    '-i',
+    opts.sfxFile,
+    '-filter_complex',
+    filter,
+    '-map',
+    '[out]',
+    '-ar',
+    String(opts.sampleRate),
+    '-ac',
+    '2',
+    '-c:a',
+    'pcm_s16le',
+    opts.outWav,
+  ];
 }
 
 /** 转义 ffmpeg concat 列表文件里的反斜杠与单引号 */

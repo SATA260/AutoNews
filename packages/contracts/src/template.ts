@@ -32,6 +32,7 @@ export interface RenderableNewsItem extends PolishedItem {
   sourceUrl: string;
   publishedAt: string;
   imagePath?: string;
+  secondaryImagePath?: string;
   impact: ImpactLevel;
   mascotMood?: MascotMood;
 }
@@ -71,6 +72,8 @@ export interface SectionRenderPlan {
   frameCount: number;
   startMs: number;
   durationMs: number;
+  /** 画面出现后延迟多少毫秒再开始播报口播 */
+  speechOffsetMs?: number;
   speechMs: number;
   mood?: MascotMood;
   outMp4Path: string;

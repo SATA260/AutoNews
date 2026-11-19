@@ -222,7 +222,7 @@ export function PublishControls({
           <div>
             <div className="flex items-center justify-between">
               <label htmlFor="pub-desc" className="text-sm font-medium text-slate-700">
-                视频简介（含章节时间轴、出处列表与 AI 声明）
+                视频简介（含章节时间轴与 AI 声明）
               </label>
               <span
                 className={`text-xs ${descCount > limits.descMax ? 'font-semibold text-rose-600' : 'text-slate-500'}`}

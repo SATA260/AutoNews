@@ -125,6 +125,7 @@ export function createRun(
   ctx: CoreContext,
   opts: {
     itemCount: number;
+    notBeforeAt?: string | null;
     hostId?: HostMascotId;
     bgmFile?: string;
     trigger?: Trigger;
@@ -143,6 +144,7 @@ export function createRun(
   const runId = generateRunId(now, ctx.settings.timezone);
   const trigger = opts.trigger ?? 'manual-cli';
   const configSnapshotJson = JSON.stringify(ctx.settings);
+  const notBeforeAt = opts.notBeforeAt ?? null;
 
   inTransaction(ctx.db, () => {
     ctx.repos.runs.create({
@@ -150,6 +152,7 @@ export function createRun(
       trigger,
       scheduleId: opts.scheduleId ?? null,
       itemCount: opts.itemCount,
+      notBeforeAt,
       configSnapshotJson,
       createdAt: nowIso,
     });
@@ -162,9 +165,10 @@ export function createRun(
       runId,
       level: 'info',
       type: 'run_created',
-      message: `已创建第 ${runId} 期任务（最多 ${opts.itemCount} 条新闻，触发方式：${trigger}）`,
+      message: `已创建第 ${runId} 期任务（最多 ${opts.itemCount} 条新闻，触发方式：${trigger}${notBeforeAt ? `，最早新闻下限：${notBeforeAt}` : ''}）`,
       data: {
         itemCount: opts.itemCount,
+        notBeforeAt,
         trigger,
         scheduleId: opts.scheduleId ?? null,
       },

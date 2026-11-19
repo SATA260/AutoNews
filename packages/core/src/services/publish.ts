@@ -42,7 +42,7 @@ export interface PublishDraftPatch {
 
 /** B 站视频审核、发布文案微调、上传确认与人工兜底服务接口（供命令行与网页后台共用） */
 export interface PublishService {
-  /** 获取指定期次的待审核视频投稿草稿（含标题、章节简介、参考来源、标签及成片路径） */
+  /** 获取指定期次的待审核视频投稿草稿（含标题、章节时间轴简介、标签及成片路径） */
   getDraft(runId: string): Promise<PublishDraft>;
   /** 人工修改投稿标题、简介或标签列表并校验平台字数与数量限制 */
   updateDraft(runId: string, patch: PublishDraftPatch): Promise<PublishDraft>;

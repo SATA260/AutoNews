@@ -34,6 +34,7 @@ interface RunRow {
   status: RunStatus;
   current_stage: Stage | null;
   item_count: number;
+  not_before_at: string | null;
   host_id: string | null;
   bgm_file: string | null;
   media_dirty: number;
@@ -101,6 +102,7 @@ function mapRunSummary(row: RunRow): RunSummary {
     status: row.status,
     currentStage: row.current_stage,
     itemCount: row.item_count,
+    notBeforeAt: row.not_before_at ?? null,
     hostId: HostMascotIdSchema.safeParse(row.host_id).data ?? null,
     bgmFile: row.bgm_file,
     mediaDirty: row.media_dirty === 1,
@@ -229,18 +231,20 @@ export function createRunsRepo(db: DatabaseSync) {
       trigger: Trigger;
       scheduleId?: string | null;
       itemCount: number;
+      notBeforeAt?: string | null;
       configSnapshotJson: string;
       createdAt: string;
     }): void {
       db.prepare(`
         INSERT INTO runs (
-          id, trigger, schedule_id, status, item_count, config_snapshot, created_at
-        ) VALUES (?, ?, ?, 'queued', ?, ?, ?)
+          id, trigger, schedule_id, status, item_count, not_before_at, config_snapshot, created_at
+        ) VALUES (?, ?, ?, 'queued', ?, ?, ?, ?)
       `).run(
         input.id,
         input.trigger,
         input.scheduleId ?? null,
         input.itemCount,
+        input.notBeforeAt ?? null,
         input.configSnapshotJson,
         input.createdAt,
       );

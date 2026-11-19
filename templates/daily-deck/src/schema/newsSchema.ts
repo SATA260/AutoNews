@@ -1,4 +1,10 @@
 import { z } from 'zod';
+import {
+  type CardIconName,
+  inferCardIconFromText,
+  type PresetCardIconName,
+  resolvePresetIconName,
+} from '../icons/cardIconSet';
 
 /** 模板内置的右下角人物形象标识 */
 export type PresetMascotId = 'deepseek' | 'gpt' | 'claude' | 'gemini' | 'grok' | 'none';
@@ -20,20 +26,8 @@ export interface SanitizedMetric {
   value: string;
 }
 
-/** 信息卡片网格支持的语义图标名称 */
-export type CardIconName =
-  | 'rocket'
-  | 'cpu'
-  | 'trending-down'
-  | 'zap'
-  | 'grid'
-  | 'gift'
-  | 'clipboard-check'
-  | 'users'
-  | 'code'
-  | 'shield'
-  | 'globe'
-  | 'sparkles';
+/** 信息卡片支持的图标名称（预置图标 + 旧版兼容名），具体清单见图标登记表 */
+export type { CardIconName, PresetCardIconName } from '../icons/cardIconSet';
 
 /** 外部传入的单张新闻信息卡片输入结构 */
 export interface NewsCardInput {
@@ -42,9 +36,9 @@ export interface NewsCardInput {
   body: string;
 }
 
-/** 经安全清洗后的单张新闻信息卡片展示结构 */
+/** 经安全清洗后的单张新闻信息卡片展示结构（图标已换算成实际要画的预置图标） */
 export interface SanitizedInfoCard {
-  icon: CardIconName;
+  icon: PresetCardIconName;
   title: string;
   body: string;
 }
@@ -89,6 +83,8 @@ export interface NewsItemInput {
   mascotMood?: MascotMood | string;
   frameCount?: number | null;
   durationSec?: number;
+  /** 本页画面切入后延迟多少秒再开始播报口播（默认 0） */
+  speechStartSec?: number;
   speechDurationSec?: number;
   audioUrl?: string | null;
   lipSyncFrames?: number[];
@@ -110,15 +106,23 @@ export interface DailyIssueInput {
   mascotMode?: MascotMode | string;
   bgmAudioUrl?: string | null;
   bgmVolumeDb?: number;
+  /** 预览时切换页面播放的鼠标点击音效链接；不传使用模板自带音效，传 null 或空字符串关闭 */
+  pageTurnSfxUrl?: string | null;
+  /** 鼠标点击音效音量（分贝） */
+  pageTurnSfxVolumeDb?: number;
   pagePaddingSec?: number;
   coverFrameCount?: number | null;
   coverDurationSec?: number;
+  /** 封面出现后延迟多少秒开始口播（默认 0） */
+  coverSpeechStartSec?: number;
   coverSpeechSec?: number;
   coverAudioUrl?: string | null;
   coverLipSync?: number[];
   coverSubtitles?: SubtitleCueInput[];
   outroFrameCount?: number | null;
   outroDurationSec?: number;
+  /** 尾页出现后延迟多少秒开始口播（默认 0） */
+  outroSpeechStartSec?: number;
   outroSpeechSec?: number;
   outroAudioUrl?: string | null;
   outroLipSync?: number[];
@@ -150,6 +154,8 @@ export interface SanitizedNewsItem {
   mascotMood: MascotMood;
   frameCount: number | null;
   durationSec: number;
+  /** 本页画面切入后延迟多少秒再开始播报口播 */
+  speechStartSec: number;
   speechDurationSec: number;
   audioUrl: string | null;
   lipSyncFrames: number[];
@@ -171,15 +177,23 @@ export interface SanitizedDailyIssue {
   mascotMode: MascotMode;
   bgmAudioUrl: string | null;
   bgmVolumeDb: number;
+  /** 预览时切换页面播放的鼠标点击音效链接，为空表示不播放 */
+  pageTurnSfxUrl: string | null;
+  /** 鼠标点击音效音量（分贝） */
+  pageTurnSfxVolumeDb: number;
   pagePaddingSec: number;
   coverFrameCount: number | null;
   coverDurationSec: number;
+  /** 封面出现后延迟多少秒开始口播 */
+  coverSpeechStartSec: number;
   coverSpeechSec: number;
   coverAudioUrl: string | null;
   coverLipSync: number[];
   coverSubtitles: SanitizedSubtitleCue[];
   outroFrameCount: number | null;
   outroDurationSec: number;
+  /** 尾页出现后延迟多少秒开始口播 */
+  outroSpeechStartSec: number;
   outroSpeechSec: number;
   outroAudioUrl: string | null;
   outroLipSync: number[];
@@ -210,6 +224,8 @@ export const HARD_LIMITS = {
   title: 48,
   summary: 100,
   cardsMaxCount: 8,
+  /** 单页最多同时展示的卡片张数（多出的卡片保留在数据里，但不上屏） */
+  cardsVisibleMax: 4,
   cardTitle: 16,
   cardBody: 80,
   keyPointsCount: 3,
@@ -256,61 +272,18 @@ const MASCOT_MOODS: readonly MascotMood[] = ['neutral', 'proud', 'surprised', 't
 
 const LooseRecordSchema = z.record(z.unknown());
 
-const VALID_CARD_ICONS: readonly CardIconName[] = [
-  'rocket',
-  'cpu',
-  'trending-down',
-  'zap',
-  'grid',
-  'gift',
-  'clipboard-check',
-  'users',
-  'code',
-  'shield',
-  'globe',
-  'sparkles',
-] as const;
+/** 模板自带的切换页面鼠标点击音效路径 */
+export const DEFAULT_PAGE_TURN_SFX_URL = '/sfx/page-click.wav';
+/** 鼠标点击音效默认音量（分贝） */
+export const DEFAULT_PAGE_TURN_SFX_VOLUME_DB = -9;
 
-const FALLBACK_CARD_ICON_ORDER: readonly CardIconName[] = [
-  'rocket',
-  'cpu',
-  'trending-down',
-  'grid',
-  'gift',
-  'clipboard-check',
-  'users',
-  'code',
-] as const;
-
-/** 根据标题与正文关键词匹配语义化卡片图标，未命中时按索引循环回退 */
-function inferCardIcon(title: string, body: string, idx: number): CardIconName {
-  const sample = `${title} ${body}`.toLowerCase();
-  if (/参数|规格|架构|芯片|上下文|tokens|吞吐|延迟/.test(sample)) return 'cpu';
-  if (/降价|成本|价格|收费|美元|万元|元|定价/.test(sample)) return 'trending-down';
-  if (/多平台|平台|接入|客户端|上线|集成|生态/.test(sample)) return 'grid';
-  if (/免费|折扣|限时|福利|配额|优惠/.test(sample)) return 'gift';
-  if (/自评|评测|表现|基准|对比|准确|解决率|测试/.test(sample)) return 'clipboard-check';
-  if (/盲测|用户|大众|开发者|团队|满意度/.test(sample)) return 'users';
-  if (/开源|代码|协议|api|schema|json|重构/.test(sample)) return 'code';
-  if (/限制|范围|边界|合规|安全|收费会员/.test(sample)) return 'shield';
-  if (/检索|实时|网页|联网|全球/.test(sample)) return 'globe';
-  if (/发布|推出|新品|亮相/.test(sample)) return 'rocket';
-  if (/响应|提速|加速|高效|性能/.test(sample)) return 'zap';
-  return FALLBACK_CARD_ICON_ORDER[idx % FALLBACK_CARD_ICON_ORDER.length]!;
-}
-
-/** 校验单张卡片图标标识，未传或非法时结合文案自动选择匹配图标 */
-function sanitizeCardIcon(
+/** 校验单张卡片图标：认识的图标名（含旧版名）直接换算成预置图标，未传或不认识时按标题和正文关键词自动匹配 */
+export function sanitizeCardIcon(
   rawIcon: unknown,
   title: string,
   body: string,
-  idx: number,
-): CardIconName {
-  const cleaned = normalizeText(rawIcon).toLowerCase();
-  if ((VALID_CARD_ICONS as readonly string[]).includes(cleaned)) {
-    return cleaned as CardIconName;
-  }
-  return inferCardIcon(title, body, idx);
+): PresetCardIconName {
+  return resolvePresetIconName(normalizeText(rawIcon)) ?? inferCardIconFromText(title, body);
 }
 
 /** 清洗结构化信息卡片数组；当旧版输入未提供 cards 时，从核心结论与要点自动拆解生成安全卡片 */
@@ -355,7 +328,7 @@ function sanitizeItemCards(
           return null;
         }
         return {
-          icon: sanitizeCardIcon(rec.data.icon, title, body, cIdx),
+          icon: sanitizeCardIcon(rec.data.icon, title, body),
           title,
           body,
         };
@@ -377,14 +350,14 @@ function sanitizeItemCards(
   ];
   keyPoints.forEach((kp, idx) => {
     fallbackCards.push({
-      icon: inferCardIcon('', kp, idx + 1),
+      icon: inferCardIconFromText('', kp),
       title: `关键要点 ${String(idx + 1).padStart(2, '0')}`,
       body: truncateCodepoints(kp, HARD_LIMITS.cardBody).text,
     });
   });
   if (keyPoints.length === 0 && officialQuote) {
     fallbackCards.push({
-      icon: 'clipboard-check',
+      icon: 'quote',
       title: '官方披露',
       body: truncateCodepoints(officialQuote, HARD_LIMITS.cardBody).text,
     });
@@ -628,16 +601,30 @@ function clampDuration(
   return rounded;
 }
 
-/** 校验并归一化章节纯人声播报秒数，确保不超过当前页面总停留时长 */
-function sanitizeSpeechSec(raw: unknown, pageDurationSec: number): number {
+/** 校验画面切入后等待再开始口播的秒数，保证非负且不超过当前页总时长 */
+function sanitizeSpeechStartSec(raw: unknown, pageDurationSec: number): number {
   if (raw === undefined || raw === null || raw === '') {
-    return pageDurationSec;
+    return 0;
+  }
+  const num = typeof raw === 'number' ? raw : Number(raw);
+  if (!Number.isFinite(num) || num <= 0) {
+    return 0;
+  }
+  const maxStart = Math.max(0, pageDurationSec - 0.1);
+  return Math.min(maxStart, Math.round(num * 1000) / 1000);
+}
+
+/** 校验并归一化章节纯人声播报秒数，确保加上起播延迟后不超过当前页面总停留时长 */
+function sanitizeSpeechSec(raw: unknown, pageDurationSec: number, speechStartSec = 0): number {
+  const maxSpeech = Math.max(0, Math.round((pageDurationSec - speechStartSec) * 1000) / 1000);
+  if (raw === undefined || raw === null || raw === '') {
+    return maxSpeech;
   }
   const num = typeof raw === 'number' ? raw : Number(raw);
   if (!Number.isFinite(num) || num < 0) {
-    return pageDurationSec;
+    return maxSpeech;
   }
-  return Math.min(pageDurationSec, Math.round(num * 1000) / 1000);
+  return Math.min(maxSpeech, Math.round(num * 1000) / 1000);
 }
 
 /** 校验右下角角色标识，遇到未知标识时记录提示并回退默认角色 */
@@ -810,11 +797,8 @@ function sanitizeSingleNewsItem(
     .filter((m): m is SanitizedMetric => m !== null);
 
   const imageUrl = sanitizeMediaUrl(obj.imageUrl, `${basePath}.imageUrl`, warnings);
-  const secondaryImageUrl = sanitizeMediaUrl(
-    obj.secondaryImageUrl,
-    `${basePath}.secondaryImageUrl`,
-    warnings,
-  );
+  // 每条新闻固定最多展示一张主图，保留输出字段为 null 以兼容既有读取方
+  const secondaryImageUrl: string | null = null;
   const imageCaption = cleanAndTruncate(
     obj.imageCaption,
     HARD_LIMITS.imageCaption,
@@ -874,7 +858,8 @@ function sanitizeSingleNewsItem(
     `${basePath}.durationSec`,
     warnings,
   );
-  const speechDurationSec = sanitizeSpeechSec(obj.speechDurationSec, durationSec);
+  const speechStartSec = sanitizeSpeechStartSec(obj.speechStartSec, durationSec);
+  const speechDurationSec = sanitizeSpeechSec(obj.speechDurationSec, durationSec, speechStartSec);
   const audioUrl = sanitizeAudioUrl(obj.audioUrl, `${basePath}.audioUrl`, warnings);
   const lipSyncFrames = sanitizeLipSyncArray(obj.lipSyncFrames);
   const subtitles = sanitizeSubtitleArray(obj.subtitles, durationSec);
@@ -904,6 +889,7 @@ function sanitizeSingleNewsItem(
     mascotMood,
     frameCount,
     durationSec,
+    speechStartSec,
     speechDurationSec,
     audioUrl,
     lipSyncFrames,
@@ -928,7 +914,7 @@ function createEmergencyFallbackIssue(): SanitizedDailyIssue {
           body: '画布采用多张结构化信息卡片呈现核心事实，适合高密度呈现新闻细节。',
         },
         {
-          icon: 'grid',
+          icon: 'cloud',
           title: '图文双模自适应',
           body: '提供完整卡片矩阵与图文并排两种版式，坏图时无感切回全幅面板。',
         },
@@ -977,15 +963,19 @@ function createEmergencyFallbackIssue(): SanitizedDailyIssue {
     mascotMode: 'per-item',
     bgmAudioUrl: null,
     bgmVolumeDb: -18,
+    pageTurnSfxUrl: DEFAULT_PAGE_TURN_SFX_URL,
+    pageTurnSfxVolumeDb: DEFAULT_PAGE_TURN_SFX_VOLUME_DB,
     pagePaddingSec: 1.0,
     coverFrameCount: null,
     coverDurationSec: HARD_LIMITS.defaultCoverDurationSec,
+    coverSpeechStartSec: 0,
     coverSpeechSec: HARD_LIMITS.defaultCoverDurationSec,
     coverAudioUrl: null,
     coverLipSync: [],
     coverSubtitles: [],
     outroFrameCount: null,
     outroDurationSec: HARD_LIMITS.defaultOutroDurationSec,
+    outroSpeechStartSec: 0,
     outroSpeechSec: HARD_LIMITS.defaultOutroDurationSec,
     outroAudioUrl: null,
     outroLipSync: [],
@@ -1119,6 +1109,20 @@ export function sanitizeDailyIssue(raw: unknown): SanitizedIssueResult {
     const pagePaddingSec =
       Number.isFinite(rawPadSec) && rawPadSec >= 0 ? Math.min(10, rawPadSec) : 1.0;
 
+    // 没传翻页音效字段时用模板自带音效；明确传 null 或空字符串表示关闭
+    const pageTurnSfxUrl =
+      root.pageTurnSfxUrl === undefined
+        ? DEFAULT_PAGE_TURN_SFX_URL
+        : sanitizeAudioUrl(root.pageTurnSfxUrl, 'pageTurnSfxUrl', warnings);
+    const rawSfxVol = Number(root.pageTurnSfxVolumeDb);
+    const pageTurnSfxVolumeDb =
+      root.pageTurnSfxVolumeDb !== undefined && Number.isFinite(rawSfxVol)
+        ? Math.max(-60, Math.min(0, rawSfxVol))
+        : DEFAULT_PAGE_TURN_SFX_VOLUME_DB;
+
+    const coverSpeechStartSec = sanitizeSpeechStartSec(root.coverSpeechStartSec, coverDurationSec);
+    const outroSpeechStartSec = sanitizeSpeechStartSec(root.outroSpeechStartSec, outroDurationSec);
+
     return {
       issue: {
         issueTitle,
@@ -1134,16 +1138,28 @@ export function sanitizeDailyIssue(raw: unknown): SanitizedIssueResult {
         mascotMode,
         bgmAudioUrl: sanitizeAudioUrl(root.bgmAudioUrl, 'bgmAudioUrl', warnings),
         bgmVolumeDb,
+        pageTurnSfxUrl,
+        pageTurnSfxVolumeDb,
         pagePaddingSec,
         coverFrameCount,
         coverDurationSec,
-        coverSpeechSec: sanitizeSpeechSec(root.coverSpeechSec, coverDurationSec),
+        coverSpeechStartSec,
+        coverSpeechSec: sanitizeSpeechSec(
+          root.coverSpeechSec,
+          coverDurationSec,
+          coverSpeechStartSec,
+        ),
         coverAudioUrl: sanitizeAudioUrl(root.coverAudioUrl, 'coverAudioUrl', warnings),
         coverLipSync: sanitizeLipSyncArray(root.coverLipSync),
         coverSubtitles: sanitizeSubtitleArray(root.coverSubtitles, coverDurationSec),
         outroFrameCount,
         outroDurationSec,
-        outroSpeechSec: sanitizeSpeechSec(root.outroSpeechSec, outroDurationSec),
+        outroSpeechStartSec,
+        outroSpeechSec: sanitizeSpeechSec(
+          root.outroSpeechSec,
+          outroDurationSec,
+          outroSpeechStartSec,
+        ),
         outroAudioUrl: sanitizeAudioUrl(root.outroAudioUrl, 'outroAudioUrl', warnings),
         outroLipSync: sanitizeLipSyncArray(root.outroLipSync),
         outroSubtitles: sanitizeSubtitleArray(root.outroSubtitles, outroDurationSec),

@@ -184,6 +184,7 @@ describe('OpenAI 兼容模型 API', () => {
           availability: 'unknown',
           availabilityNote: '待确认',
           evidence: [evidence],
+          eventOccurredAt: null,
         },
         output: {
           facts: ['事实'],
@@ -204,6 +205,8 @@ describe('OpenAI 兼容模型 API', () => {
           summary: polished.summary,
           highlight: null,
           preferArticleImage: null,
+          primaryMediaId: null,
+          secondaryMediaId: null,
           imageCaption: null,
           cards: null,
           keyPoints: polished.keyPoints,

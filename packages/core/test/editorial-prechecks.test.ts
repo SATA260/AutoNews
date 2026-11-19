@@ -5,12 +5,14 @@ import {
   enforceFactCheckConsistency,
   extractArabicNumbers,
   isDuplicateOfHistory,
+  isExactTitleMatch,
   longestCommonSubstringLength,
+  normalizeTitleForExactMatch,
   precheckIssuePackage,
   precheckPolishedItem,
   renderPromptTemplate,
   selectGroundedEvidence,
-  titleJaccardSimilarity,
+  selectRelevantOriginReferences,
 } from '../src/index.js';
 
 const DEFAULT_LIMITS: ContentLimits = {
@@ -87,22 +89,81 @@ describe('editorial foundation: prompts, similarity, and deterministic prechecks
     expect(xml.length).toBeLessThanOrEqual(340);
   });
 
-  it('computes bigram Jaccard similarity and detects historical duplicates', () => {
-    const high = titleJaccardSimilarity(
-      'OpenAI 正式推出全新推理模型',
-      'OpenAI 正式发布全新推理模型',
-    );
-    expect(high).toBeGreaterThan(0.6);
+  it('deduplicates only exact normalized titles without dropping different codenames/versions or reworded titles, and recalls relevant origin references', async () => {
+    expect(
+      isDuplicateOfHistory('Introducing Gemini 4 Neon', [
+        { title: 'Introducing Gemini 4 Hydrogen' },
+      ]),
+    ).toEqual({ duplicate: false });
 
-    const low = titleJaccardSimilarity('OpenAI 发布推理模型', '谷歌推出新版机器人控制算法');
-    expect(low).toBeLessThan(0.3);
-
-    const dup = isDuplicateOfHistory(
-      'OpenAI 推出全新推理模型',
-      [{ title: 'OpenAI 发布全新推理模型' }],
-      0.6,
+    expect(isDuplicateOfHistory('Introducing X 5 BBB', [{ title: 'Introducing X 5 AAA' }])).toEqual(
+      { duplicate: false },
     );
-    expect(dup.duplicate).toBe(true);
+
+    expect(isDuplicateOfHistory('OpenAI 发布 GPT-6.2', [{ title: 'OpenAI 发布 GPT-6.1' }])).toEqual(
+      { duplicate: false },
+    );
+
+    expect(
+      isDuplicateOfHistory('OpenAI 正式推出全新推理模型', [
+        { title: 'OpenAI 正式发布全新推理模型' },
+      ]),
+    ).toEqual({ duplicate: false });
+
+    expect(isExactTitleMatch('OpenAI 发布新模型', 'openai发布新模型！')).toBe(true);
+    expect(
+      isExactTitleMatch(
+        'Introducing GPT\u20116.2 Astra and Sol!',
+        'introducing gpt-6.2 astra and sol',
+      ),
+    ).toBe(true);
+    expect(normalizeTitleForExactMatch('“AI” 时代来了')).toBe(
+      normalizeTitleForExactMatch('"ai"时代来了'),
+    );
+    expect(isDuplicateOfHistory('OpenAI 发布新模型！', [{ title: 'OpenAI发布新模型' }])).toEqual({
+      duplicate: true,
+      matchedTitle: 'OpenAI发布新模型',
+    });
+
+    const recalled = selectRelevantOriginReferences(
+      [{ title: 'DeepSeek 正式发布开源新一代推理优化框架实测' }],
+      [
+        { title: '其他公司例行季报电话会纪要', publishedAt: '2026-11-15T12:00:00.000Z' },
+        {
+          title: 'DeepSeek 正式发布开源新一代推理优化框架',
+          publishedAt: '2026-11-15T10:00:00.000Z',
+        },
+        { title: '欧洲人工智能监管会议闭幕', publishedAt: '2026-11-15T08:00:00.000Z' },
+      ],
+      2,
+    );
+    expect(recalled).toHaveLength(2);
+    expect(recalled[0]?.title).toBe('DeepSeek 正式发布开源新一代推理优化框架');
+
+    const selectPrompt = await renderPromptTemplate('s2-select.md', {
+      targetCount: '10',
+      itemCount: '5',
+      historyDedupDays: '14',
+      timeCutoffRule: '',
+      historyTitles: '（近期暂无已播事件）',
+      candidates: '[]',
+    });
+    expect(selectPrompt).toContain('新模型发布');
+    expect(selectPrompt).toContain('Gemini 4 Neon');
+    expect(selectPrompt).toContain('同一具体事件');
+
+    const packagePrompt = await renderPromptTemplate('s6-package.md', {
+      personaJson: '无特定角色',
+      date: '2026-11-19',
+      dateDisplay: '11月19日周四',
+      issueNumber: 'VOL.2026.11.19',
+      passedItemsJson: '[]',
+      contentLimitsJson: '{}',
+      publishLimitsJson: '{}',
+      coverTitleMax: '14',
+      coverSubtitleMax: '22',
+    });
+    expect(packagePrompt).toContain('公众最关注新模型发布');
   });
 
   it('passes precheck for valid quotes (including 90% LCS) and normalized comma/full-width numbers', () => {
@@ -122,22 +183,22 @@ describe('editorial foundation: prompts, similarity, and deterministic prechecks
       {
         icon: 'rocket',
         title: '核心发布',
-        body: 'OpenAI 宣布推出全新推理模型，整体响应速度提升 2 倍。',
+        body: 'OpenAI 推出新推理模型，速度提升 2 倍',
       },
       {
-        icon: 'trending-down',
+        icon: 'banknote',
         title: '定价与档位',
-        body: '每 1000000 tokens 定价 15 美元，现已向付费订阅用户开放。',
+        body: '每 1000000 tokens 定价 15 美元',
       },
       {
         icon: 'zap',
         title: '工程体验',
-        body: '主要面向日常编码、逻辑推理与复杂问答场景提供更低延迟。',
+        body: '面向编码、推理与复杂问答降低延迟',
       },
       {
         icon: 'shield',
         title: '可用范围',
-        body: '目前仅面向付费订阅用户开放使用，免费档位暂未包含本次更新。',
+        body: '目前仅向付费订阅用户开放',
       },
     ];
     item.narration = [
@@ -339,6 +400,24 @@ describe('editorial foundation: prompts, similarity, and deterministic prechecks
     expect(badColumnTitle.passed).toBe(false);
     expect(badColumnTitle.errors.some((e) => e.includes('死板栏目名开头'))).toBe(true);
 
+    const badDescWithSources = precheckIssuePackage({
+      pkg: {
+        ...compactValidPkg,
+        publish: {
+          ...compactValidPkg.publish,
+          descriptionIntro: '本期要点汇总，参考来源：https://example.com/news',
+        },
+      },
+      expectedItemIds: ['item-1', 'item-2'],
+      limits: DEFAULT_LIMITS,
+      publishConfig,
+      metaTextBlacklist: BLACKLIST,
+      compact: true,
+      hostSelfName: '哈基米',
+    });
+    expect(badDescWithSources.passed).toBe(false);
+    expect(badDescWithSources.errors.some((e) => e.includes('不要包含信息来源'))).toBe(true);
+
     const badUnderscoreAndShortTitle = precheckIssuePackage({
       pkg: {
         ...compactValidPkg,
@@ -521,22 +600,22 @@ describe('editorial foundation: prompts, similarity, and deterministic prechecks
     baseItem.cards = [
       {
         title: '推理速度明显翻倍',
-        body: '新推理模型面向日常编程和复杂问答场景做了专门优化，实测推理速度比前代快了两倍，等待显著缩短。',
+        body: '编程与复杂问答速度比前代快两倍',
         icon: 'zap',
       },
       {
         title: '收费定价公开透明',
-        body: '官方公布的新模型接口收费标准为每百万词元十五美元，让需要高频调用推理能力的团队更容易核算成本。',
-        icon: 'trending-down',
+        body: '接口定价为每百万词元十五美元',
+        icon: 'banknote',
       },
       {
         title: '面向付费会员开放',
-        body: '这次能力更新已正式向平台的付费订阅会员开放体验，用户登录账号即可在日常工作流中直接切换试用。',
-        icon: 'clipboard-check',
+        body: '付费订阅会员登录后即可切换试用',
+        icon: 'users',
       },
       {
         title: '聚焦编码复杂问答',
-        body: '相比单一评测分数，这次更新更加关注编程开发和多轮推理问答体验，帮助开发者更快完成复杂任务拆解。',
+        body: '更关注编程开发与多轮推理问答体验',
         icon: 'code',
       },
     ];
@@ -622,5 +701,158 @@ describe('editorial foundation: prompts, similarity, and deterministic prechecks
     });
     expect(cardReadingRejected.passed).toBe(false);
     expect(cardReadingRejected.errors.some((e) => e.includes('直接念卡片小标题'))).toBe(true);
+
+    const firstPersonCompanyRejected = precheckPolishedItem({
+      item: {
+        ...baseItem,
+        hostComment: '自家这次被加州起诉了，OpenAI官方回应也摆在屏幕上。',
+        narration: [
+          '我们发布了一款全新推理模型，编码与问答速度比前代快了两倍。',
+          '每百万词元接口定价控制到十五美元。',
+          '目前这套能力已经向付费会员开放使用。',
+        ],
+      },
+      articlesById,
+      limits: DEFAULT_LIMITS,
+      metaTextBlacklist: BLACKLIST,
+      compact: true,
+      hostSelfName: 'gpt',
+    });
+    expect(firstPersonCompanyRejected.passed).toBe(false);
+    expect(
+      firstPersonCompanyRejected.errors.some(
+        (e) => e.includes('hostComment') && e.includes('不能代表任何公司发言'),
+      ),
+    ).toBe(true);
+    expect(
+      firstPersonCompanyRejected.errors.some(
+        (e) => e.includes('narration[0]') && e.includes('我们发布'),
+      ),
+    ).toBe(true);
+
+    const nonSpokespersonWeAllowed = precheckPolishedItem({
+      item: {
+        ...baseItem,
+        hostComment: 'OpenAI把新能力接进自家桌面工具后，确实能帮我们省不少写代码时间。',
+        narration: [
+          'OpenAI正式推出全新推理模型，能帮我们把编码速度比前代提高两倍。',
+          '接口定价控制到每百万词元十五美元，OpenAI称“我们正在继续优化体验”。',
+          '目前付费会员已经可以直接体验这项新能力。',
+        ],
+      },
+      articlesById,
+      limits: DEFAULT_LIMITS,
+      metaTextBlacklist: BLACKLIST,
+      compact: true,
+      hostSelfName: 'gpt',
+    });
+    expect(nonSpokespersonWeAllowed.errors).toEqual([]);
+    expect(nonSpokespersonWeAllowed.passed).toBe(true);
+
+    const livelyBanterAndRoastAllowed = precheckPolishedItem({
+      item: {
+        ...baseItem,
+        hostComment: '不愧是你啊，Anthropic，一刀切封账号还觉得挺合理。',
+        narration: [
+          '哈哈，我Gemini又站起来了！',
+          '新模型速度比前代快了两倍，每百万词元接口定价控制到十五美元。',
+          '目前已向付费会员分批开放体验。',
+        ],
+      },
+      articlesById,
+      limits: DEFAULT_LIMITS,
+      metaTextBlacklist: BLACKLIST,
+      compact: true,
+      hostSelfName: '哈基米',
+    });
+    expect(livelyBanterAndRoastAllowed.errors).toEqual([]);
+    expect(livelyBanterAndRoastAllowed.passed).toBe(true);
+  });
+
+  it('rejects >4 cards, >8-char card titles, and >28-char card bodies in both default and compact modes', () => {
+    const articlesById = new Map([
+      [
+        'art-1',
+        {
+          text: 'The new model runs 2x faster at $15 per 1,000,000 tokens for paid subscribers.',
+          publishedAt: '2026-11-18T00:00:00.000Z',
+        },
+      ],
+    ]);
+
+    const makeCompactBase = (): PolishedItem => ({
+      ...makeValidPolishedItem(),
+      title: '新推理模型速度翻倍，每百万词元十五美元',
+      shortTitle: '新推理模型提速两倍',
+      progressLabel: '新推理模型提速',
+      highlight: '速度比前代快两倍，每百万词元十五美元',
+      keyPoints: ['速度比前代快两倍', '每百万词元定价十五美元', '已向付费订阅会员开放'],
+      narration: [
+        '官方正式推出全新推理模型，编码与问答速度比前代快了两倍。',
+        '接口定价控制到每百万词元十五美元。',
+        '目前这套能力已经向付费会员开放使用。',
+      ],
+      cards: [
+        { icon: 'zap', title: '推理提速', body: '编程与复杂问答速度比前代快两倍' },
+        { icon: 'banknote', title: '接口定价', body: '每百万词元接口定价控制到十五美元' },
+      ],
+    });
+
+    const fiveCards = makeCompactBase();
+    fiveCards.cards = [
+      { icon: 'zap', title: '卡片一', body: '编程与复杂问答速度比前代快两倍' },
+      { icon: 'banknote', title: '卡片二', body: '每百万词元接口定价控制到十五美元' },
+      { icon: 'users', title: '卡片三', body: '目前这套能力已向付费会员开放使用' },
+      { icon: 'code', title: '卡片四', body: '主要面向日常编码与复杂问答优化' },
+      { icon: 'shield', title: '卡片五', body: '付费会员登录后即可直接切换试用' },
+    ];
+
+    const overTitle = makeCompactBase();
+    overTitle.cards = [
+      { icon: 'zap', title: '九个字的小标题名字', body: '编程与复杂问答速度比前代快两倍' },
+      { icon: 'banknote', title: '接口定价', body: '每百万词元接口定价控制到十五美元' },
+    ];
+
+    const overBody = makeCompactBase();
+    overBody.cards = [
+      {
+        icon: 'zap',
+        title: '推理提速',
+        body: '编程与复杂问答速度比前代整整快了两倍且目前已全部开放测试体验',
+      },
+      { icon: 'banknote', title: '接口定价', body: '每百万词元接口定价控制到十五美元' },
+    ];
+
+    for (const compact of [false, true]) {
+      const resFive = precheckPolishedItem({
+        item: fiveCards,
+        articlesById,
+        limits: DEFAULT_LIMITS,
+        metaTextBlacklist: BLACKLIST,
+        compact,
+      });
+      expect(resFive.passed).toBe(false);
+      expect(resFive.errors.some((e) => e.includes('5 > 4 张'))).toBe(true);
+
+      const resTitle = precheckPolishedItem({
+        item: overTitle,
+        articlesById,
+        limits: DEFAULT_LIMITS,
+        metaTextBlacklist: BLACKLIST,
+        compact,
+      });
+      expect(resTitle.passed).toBe(false);
+      expect(resTitle.errors.some((e) => e.includes('> 8 字'))).toBe(true);
+
+      const resBody = precheckPolishedItem({
+        item: overBody,
+        articlesById,
+        limits: DEFAULT_LIMITS,
+        metaTextBlacklist: BLACKLIST,
+        compact,
+      });
+      expect(resBody.passed).toBe(false);
+      expect(resBody.errors.some((e) => e.includes('> 28 字'))).toBe(true);
+    }
   });
 });

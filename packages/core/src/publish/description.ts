@@ -1,6 +1,5 @@
 import path from 'node:path';
 import {
-  type Article,
   type IssuePackage,
   type PublishDraft,
   PublishDraftSchema,
@@ -42,25 +41,14 @@ export function formatChapterTimestamp(ms: number): string {
   return `${mins}:${secs}`;
 }
 
-/** 根据时间轴、编排顺序、文章出处和平台字数上限生成 B 站视频简介文本 */
+/** 根据时间轴、编排顺序和平台字数上限生成 B 站视频简介文本（不包含信息来源与原文链接） */
 export function buildBilibiliDescription(opts: {
   packageData: IssuePackage;
   timeline: Timeline;
   items: RunItemRecord[];
-  articlesById: ReadonlyMap<string, Article>;
-  eventsArticleIdsByEventId: ReadonlyMap<string, string[]>;
-  sourceNameById: ReadonlyMap<string, string>;
   publishConfig: Settings['publish']['bilibili'];
 }): string {
-  const {
-    packageData,
-    timeline,
-    items,
-    articlesById,
-    eventsArticleIdsByEventId,
-    sourceNameById,
-    publishConfig,
-  } = opts;
+  const { packageData, timeline, items, publishConfig } = opts;
 
   const itemById = new Map(items.map((item) => [item.id, item]));
   const chapterLines: string[] = [];
@@ -80,72 +68,17 @@ export function buildBilibiliDescription(opts: {
     }
   }
 
-  const sourceLines: string[] = [];
-  const seenUrls = new Set<string>();
-  let sourceIdx = 0;
-  for (const itemId of packageData.order) {
-    const item = itemById.get(itemId);
-    if (!item) {
-      continue;
-    }
-    const evArtIds = eventsArticleIdsByEventId.get(item.eventId) ?? [];
-    const draftArtIds = (item.finalJson?.evidence ?? []).map((e) => e.articleId);
-    const orderedIds = [...new Set([...draftArtIds, ...evArtIds])];
-    for (const artId of orderedIds) {
-      const art = articlesById.get(artId);
-      if (!art || seenUrls.has(art.canonicalUrl)) {
-        continue;
-      }
-      seenUrls.add(art.canonicalUrl);
-      sourceIdx += 1;
-      const sourceName = sourceNameById.get(art.sourceId) ?? art.sourceId;
-      sourceLines.push(`${String(sourceIdx).padStart(2, '0')} ${sourceName} - ${art.canonicalUrl}`);
-    }
-  }
-
   const introBlock = packageData.publish.descriptionIntro.trim();
   const chaptersBlock = `【内容时间轴】\n${chapterLines.join('\n')}`;
   const disclaimerBlock = publishConfig.aiDisclaimerText.trim();
   const maxChars = publishConfig.descMax;
 
-  /** 按传入的片段列表动态拼接完整简介文本 */
-  const assemble = (
-    activeSources: string[],
-    activeIntro: string,
-    activeChapters: string,
-  ): string => {
-    const parts: string[] = [];
-    if (activeIntro) {
-      parts.push(activeIntro);
-    }
-    if (activeChapters) {
-      parts.push(activeChapters);
-    }
-    if (activeSources.length > 0) {
-      parts.push(`【参考来源】\n${activeSources.join('\n')}`);
-    }
-    if (disclaimerBlock) {
-      parts.push(disclaimerBlock);
-    }
-    return parts.join('\n\n');
-  };
-
-  let candidate = assemble(sourceLines, introBlock, chaptersBlock);
+  const candidate = [introBlock, chaptersBlock, disclaimerBlock].filter(Boolean).join('\n\n');
   if (codepointLen(candidate) <= maxChars) {
     return candidate;
   }
 
-  // 超出长度上限时优先从参考来源列表末尾逐步裁减，确保完整保留时间轴与 AI 声明文案
-  const trimmedSources = [...sourceLines];
-  while (trimmedSources.length > 0 && codepointLen(candidate) > maxChars) {
-    trimmedSources.pop();
-    candidate = assemble(trimmedSources, introBlock, chaptersBlock);
-  }
-  if (codepointLen(candidate) <= maxChars) {
-    return candidate;
-  }
-
-  // 若仍超长则逐步压缩导言与章节块，并始终兜底保留 AI 生成内容声明
+  // 超长时优先裁剪导览与章节块，并始终兜底保留 AI 生成内容声明
   const fixedTail = disclaimerBlock;
   const fixedTailLen = codepointLen(fixedTail);
   if (fixedTailLen >= maxChars) {
@@ -180,7 +113,7 @@ export function buildBilibiliTags(
 }
 
 /**
- * 为处于可审阅状态的任务自动生成并落盘 B 站投稿草稿（标题、时间轴及来源简介、标签）；
+ * 为处于可审阅状态的任务自动生成并落盘 B 站投稿草稿（标题、章节时间轴简介与标签）；
  * 除非显式指定重新生成（`regenerate: true`），否则一旦已存在完整草稿或正式投稿记录即原样保留，避免覆盖人工编辑或尝试次数。
  */
 export async function ensurePublishDraftForRun(
@@ -226,27 +159,12 @@ export async function ensurePublishDraftForRun(
 
   const pkg = pkgCheckpoint.packageData;
   const items = ctx.repos.runItems.listByRun(runId);
-  const events = ctx.repos.events.listByRun(runId);
-  const eventsArticleIdsByEventId = new Map(events.map((e) => [e.id, e.articleIds]));
-  const allArticleIds = Array.from(
-    new Set(
-      events
-        .flatMap((e) => e.articleIds)
-        .concat(items.flatMap((i) => (i.finalJson?.evidence ?? []).map((ev) => ev.articleId))),
-    ),
-  );
-  const articles = ctx.repos.articles.getByIds(allArticleIds);
-  const articlesById = new Map(articles.map((a) => [a.id, a]));
-  const sourceNameById = new Map(ctx.sources.map((s) => [s.id, s.name]));
 
   const title = truncateByCodepoints(pkg.publish.title.trim(), settings.publish.bilibili.titleMax);
   const description = buildBilibiliDescription({
     packageData: pkg,
     timeline: parsedTimeline.data,
     items,
-    articlesById,
-    eventsArticleIdsByEventId,
-    sourceNameById,
     publishConfig: settings.publish.bilibili,
   });
   const tags = buildBilibiliTags(pkg.publish.tags, settings.publish.bilibili);

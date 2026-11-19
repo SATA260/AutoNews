@@ -2,8 +2,14 @@ import { type DatabaseSync, inTransaction } from './db.js';
 import { MIGRATION_001, type Migration } from './migrations/001_init.js';
 import { MIGRATION_002 } from './migrations/002_workflow.js';
 import { MIGRATION_003 } from './migrations/003_review_state.js';
+import { MIGRATION_004 } from './migrations/004_sources_media_and_cutoff.js';
 
-const MIGRATIONS: readonly Migration[] = [MIGRATION_001, MIGRATION_002, MIGRATION_003];
+const MIGRATIONS: readonly Migration[] = [
+  MIGRATION_001,
+  MIGRATION_002,
+  MIGRATION_003,
+  MIGRATION_004,
+];
 
 /** 按版本号顺序幂等地执行尚未应用的数据库表结构迁移脚本 */
 export function runMigrations(db: DatabaseSync): void {

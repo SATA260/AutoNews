@@ -4,7 +4,13 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { type ScheduleJob, ScheduleJobSchema, ScheduleTimeSchema } from '@aidaily/contracts';
+import {
+  type ScheduleCutoffMode,
+  ScheduleCutoffModeSchema,
+  type ScheduleJob,
+  ScheduleJobSchema,
+  ScheduleTimeSchema,
+} from '@aidaily/contracts';
 import { TZDate } from '@date-fns/tz';
 import { addDays } from 'date-fns';
 import { execa } from 'execa';
@@ -20,6 +26,8 @@ export interface CreateScheduleInput {
   name?: string;
   time: string;
   itemCount: number;
+  cutoffMode?: ScheduleCutoffMode;
+  maxAgeHours?: number | null;
   bgmFile?: string | null;
   enabled?: boolean;
 }
@@ -29,6 +37,8 @@ export interface UpdateSchedulePatch {
   name?: string;
   time?: string;
   itemCount?: number;
+  cutoffMode?: ScheduleCutoffMode;
+  maxAgeHours?: number | null;
   bgmFile?: string | null;
   enabled?: boolean;
 }
@@ -333,6 +343,21 @@ export function createSchedulerService(
       if (input.bgmFile && !(await listBgmFiles(ctx)).includes(input.bgmFile))
         throw new Error('指定的背景音乐不在曲库中');
       validateTemplateItemCount(ctx.settings, input.itemCount);
+      const cutoffMode = ScheduleCutoffModeSchema.parse(input.cutoffMode ?? 'none');
+      let maxAgeHours: number | null = null;
+      if (cutoffMode === 'hours') {
+        if (
+          typeof input.maxAgeHours !== 'number' ||
+          !Number.isInteger(input.maxAgeHours) ||
+          input.maxAgeHours <= 0
+        ) {
+          throw new RangeError('按最近小时数过滤时必须填写正整数小时数 maxAgeHours');
+        }
+        maxAgeHours = input.maxAgeHours;
+      } else if (input.maxAgeHours !== undefined && input.maxAgeHours !== null) {
+        throw new RangeError('仅当新闻时间策略为 hours 时才允许设置 maxAgeHours');
+      }
+
       const name = input.name?.trim() || `每日定时任务 ${time}`;
       const enabled = input.enabled ?? true;
       const id = `sched-${crypto.randomBytes(4).toString('hex')}`;
@@ -343,6 +368,8 @@ export function createSchedulerService(
         name,
         time,
         itemCount: input.itemCount,
+        cutoffMode,
+        maxAgeHours,
         bgmFile: input.bgmFile,
         enabled,
         now: nowIso,
@@ -382,10 +409,41 @@ export function createSchedulerService(
         throw new Error('定时任务名称不能为空');
       }
 
+      const nextCutoffMode =
+        patch.cutoffMode !== undefined
+          ? ScheduleCutoffModeSchema.parse(patch.cutoffMode)
+          : existing.cutoffMode;
+      let nextMaxAgeHours: number | null | undefined;
+      if (nextCutoffMode === 'hours') {
+        const effectiveHours =
+          patch.maxAgeHours !== undefined ? patch.maxAgeHours : existing.maxAgeHours;
+        if (
+          typeof effectiveHours !== 'number' ||
+          !Number.isInteger(effectiveHours) ||
+          effectiveHours <= 0
+        ) {
+          throw new RangeError('按最近小时数过滤时必须填写正整数小时数 maxAgeHours');
+        }
+        nextMaxAgeHours = effectiveHours;
+      } else {
+        if (
+          patch.cutoffMode === undefined &&
+          patch.maxAgeHours !== undefined &&
+          patch.maxAgeHours !== null
+        ) {
+          throw new RangeError('仅当新闻时间策略为 hours 时才允许设置 maxAgeHours');
+        }
+        if (patch.cutoffMode !== undefined || patch.maxAgeHours !== undefined) {
+          nextMaxAgeHours = null;
+        }
+      }
+
       const updated = ctx.repos.schedules.update(id, {
         name: nextName,
         time: nextTime,
         itemCount: patch.itemCount,
+        ...(patch.cutoffMode !== undefined ? { cutoffMode: nextCutoffMode } : {}),
+        ...(nextMaxAgeHours !== undefined ? { maxAgeHours: nextMaxAgeHours } : {}),
         bgmFile: patch.bgmFile,
         enabled: patch.enabled,
         now: ctx.now().toISOString(),
@@ -402,6 +460,8 @@ export function createSchedulerService(
           name: existing.name,
           time: existing.time,
           itemCount: existing.itemCount,
+          cutoffMode: existing.cutoffMode,
+          maxAgeHours: existing.maxAgeHours ?? null,
           bgmFile: existing.bgmFile ?? null,
           enabled: existing.enabled,
           now: ctx.now().toISOString(),
