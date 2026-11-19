@@ -13,6 +13,8 @@ export interface TemplateHttpServerOptions {
   runDir?: string;
   /** 角色立绘与 Live2D 模型包目录，只读挂载在 `/__mascot_assets__/` 之下 */
   mascotDir?: string;
+  /** 公司与机构 Logo 静态资源目录，只读挂载在 `/__logo_assets__/` 之下 */
+  logosDir?: string;
 }
 
 /** 已启动的本地模板静态服务实例 */
@@ -54,6 +56,7 @@ const MIME_TYPES: Record<string, string> = {
 
 const ASSET_PREFIX = '/__run_assets__/';
 const MASCOT_PREFIX = '/__mascot_assets__/';
+const LOGO_PREFIX = '/__logo_assets__/';
 
 /** 根据文件后缀名判断 HTTP 响应所需的 MIME 类型 */
 function guessMimeType(filePath: string): string {
@@ -237,6 +240,7 @@ export async function startTemplateHttpServer(
   const distRoot = opts.distDir ? path.resolve(opts.distDir) : null;
   const runRoot = opts.runDir ? path.resolve(opts.runDir) : null;
   const mascotRoot = opts.mascotDir ? path.resolve(opts.mascotDir) : null;
+  const logosRoot = opts.logosDir ? path.resolve(opts.logosDir) : null;
 
   const server = http.createServer((req, res) => {
     void (async () => {
@@ -289,6 +293,23 @@ export async function startTemplateHttpServer(
         }
         const relMascot = decodedPath.slice(MASCOT_PREFIX.length);
         const resolved = await resolveConfinedFile(mascotRoot, relMascot);
+        if (resolved.status !== 200 || !resolved.filePath) {
+          res.writeHead(resolved.status);
+          res.end();
+          return;
+        }
+        await sendStaticFile(req, res, resolved.filePath);
+        return;
+      }
+
+      if (decodedPath.startsWith(LOGO_PREFIX)) {
+        if (!logosRoot) {
+          res.writeHead(404);
+          res.end('Not Found');
+          return;
+        }
+        const relLogo = decodedPath.slice(LOGO_PREFIX.length);
+        const resolved = await resolveConfinedFile(logosRoot, relLogo);
         if (resolved.status !== 200 || !resolved.filePath) {
           res.writeHead(resolved.status);
           res.end();

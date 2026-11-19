@@ -6,6 +6,7 @@ import type {
   HostMascotId,
   ImpactLevel,
   IssuePackage,
+  Live2dPack,
   MascotMood,
   PagePlan,
   RenderableIssue,
@@ -34,6 +35,7 @@ import {
   type TemplateRegistry,
 } from '../templates/registry.js';
 import { closeBrowserSafely, resolveChromiumExecutablePath } from './browser.js';
+import { loadLogoCatalog, resolveCompanyIdentity, resolveLogoAssetsRoot } from './company-logos.js';
 import { renderRunCover } from './cover.js';
 import {
   buildMasterAudioWav,
@@ -84,6 +86,13 @@ interface SectionsProgressFile {
 /** 解析视频合成使用的模板主题外观，未配置时默认使用深色模式 */
 export function resolveRenderTheme(renderSettings: Pick<Settings['render'], 'theme'>): RenderTheme {
   return renderSettings.theme === 'light' ? 'light' : 'dark';
+}
+
+/** 解析看板娘使用的 Live2D 模型套组，未配置时默认使用全身动作版 */
+export function resolveRenderLive2dPack(
+  renderSettings: Pick<Settings['render'], 'live2dPack'>,
+): Live2dPack {
+  return renderSettings.live2dPack === 'expression' ? 'expression' : 'fullbody';
 }
 
 const PNG_HEADER = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
@@ -270,28 +279,42 @@ async function stageBgmAssetIntoRunDir(opts: {
   }
 }
 
-/** 自动扫描指定角色的 Live2D 模型包目录，返回首个 `.model3.json` 对应的只读服务路径 */
-async function resolveHostLive2dModelUrl(
+/** 按指定模型套组自动扫描角色 Live2D 目录，返回首个 `.model3.json` 的只读服务路径，缺失时自动回退可用套组 */
+export async function resolveHostLive2dModelUrl(
   rootDir: string,
   hostId: HostMascotId,
   templateDir?: string,
+  live2dPack: Live2dPack = 'fullbody',
 ): Promise<string | undefined> {
   const candidateRoots = [path.join(rootDir, 'assets', 'mascots')];
-  if (templateDir) {
-    candidateRoots.push(path.resolve(templateDir, '..', '..', 'assets', 'mascots'));
+  const primaryRoot = candidateRoots[0];
+  if (templateDir && primaryRoot) {
+    const fallbackRoot = path.resolve(templateDir, '..', '..', 'assets', 'mascots');
+    if (path.resolve(fallbackRoot) !== path.resolve(primaryRoot)) {
+      candidateRoots.push(fallbackRoot);
+    }
   }
-  for (const mascotBase of candidateRoots) {
-    const hostDir = path.join(mascotBase, hostId);
-    try {
-      const entries = await fs.readdir(hostDir, { withFileTypes: true });
-      const modelEntry = entries
-        .filter((e) => e.isFile() && e.name.toLowerCase().endsWith('.model3.json'))
-        .sort((a, b) => a.name.localeCompare(b.name))[0];
-      if (modelEntry) {
-        return `/__mascot_assets__/${hostId}/${modelEntry.name}`;
+  const fallbackPack: Live2dPack = live2dPack === 'fullbody' ? 'expression' : 'fullbody';
+  const packSearchOrder: Array<Live2dPack | ''> = [live2dPack, fallbackPack, ''];
+
+  for (const packSubdir of packSearchOrder) {
+    for (const mascotBase of candidateRoots) {
+      const hostDir = packSubdir
+        ? path.join(mascotBase, packSubdir, hostId)
+        : path.join(mascotBase, hostId);
+      try {
+        const entries = await fs.readdir(hostDir, { withFileTypes: true });
+        const modelEntry = entries
+          .filter((e) => e.isFile() && e.name.toLowerCase().endsWith('.model3.json'))
+          .sort((a, b) => a.name.localeCompare(b.name))[0];
+        if (modelEntry) {
+          return packSubdir
+            ? `/__mascot_assets__/${packSubdir}/${hostId}/${modelEntry.name}`
+            : `/__mascot_assets__/${hostId}/${modelEntry.name}`;
+        }
+      } catch {
+        // 当前候选目录不存在对应模型时继续尝试回退目录
       }
-    } catch {
-      // 当前候选目录不存在对应模型时继续尝试回退目录
     }
   }
   return undefined;
@@ -329,6 +352,8 @@ export async function buildRenderableIssue(opts: {
 
   const personas = await loadPersonas(ctx).catch(() => []);
   const activePersona = personas.find((p) => p.id === activeHostId);
+  const logosRoot = await resolveLogoAssetsRoot(ctx.paths.rootDir, templateDir);
+  const logoCatalog = logosRoot ? await loadLogoCatalog(logosRoot) : null;
 
   const items = ctx.repos.runItems.listByRun(runId);
   const itemById = new Map<string, RunItemRecord>(items.map((i) => [i.id, i]));
@@ -427,6 +452,11 @@ export async function buildRenderableIssue(opts: {
       `${item.finalJson.entity} ${item.finalJson.title} ${item.finalJson.category}`,
       personas,
     );
+    const companyIdentity = resolveCompanyIdentity({
+      entity: item.finalJson.entity,
+      fallbackText: `${item.finalJson.title} ${item.finalJson.shortTitle} ${sourceDisplay}`,
+      catalog: logoCatalog,
+    });
 
     renderItems.push({
       ...item.finalJson,
@@ -439,6 +469,7 @@ export async function buildRenderableIssue(opts: {
       sourceUrl: primaryArticle?.canonicalUrl ?? '',
       publishedAt: primaryArticle?.publishedAt ?? run.createdAt,
       imagePath: effectivePrimaryRel,
+      ...(companyIdentity.logoUrl ? { companyLogoUrl: companyIdentity.logoUrl } : {}),
       impact: mapScoreToImpact(ev?.score ?? 5),
       mascotMood,
     });
@@ -455,6 +486,7 @@ export async function buildRenderableIssue(opts: {
     ctx.paths.rootDir,
     activeHostId,
     templateDir,
+    resolveRenderLive2dPack(settings.render),
   );
 
   const musicRow = ctx.db.prepare('SELECT bgm_file FROM runs WHERE id = ?').get(runId) as
@@ -656,6 +688,9 @@ export async function runRenderStage(opts: {
                   shortTitle: (it as Record<string, unknown>).shortTitle,
                   category: (it as Record<string, unknown>).category,
                   source: (it as Record<string, unknown>).source,
+                  entity: (it as Record<string, unknown>).entity,
+                  impact: (it as Record<string, unknown>).impact,
+                  companyLogoUrl: (it as Record<string, unknown>).companyLogoUrl,
                 }
               : null,
           ),

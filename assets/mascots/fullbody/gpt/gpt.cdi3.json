@@ -1,0 +1,270 @@
+{
+  "Version": 3,
+  "Parameters": [
+    {
+      "Id": "ParamAngleX",
+      "GroupId": "GroupHead",
+      "Name": "Angle X"
+    },
+    {
+      "Id": "ParamAngleY",
+      "GroupId": "GroupHead",
+      "Name": "Angle Y"
+    },
+    {
+      "Id": "ParamAngleZ",
+      "GroupId": "GroupHead",
+      "Name": "Angle Z"
+    },
+    {
+      "Id": "ParamBreath",
+      "GroupId": "GroupBody",
+      "Name": "Breath"
+    },
+    {
+      "Id": "ParamHairSwing",
+      "GroupId": "GroupBody",
+      "Name": "发梢"
+    },
+    {
+      "Id": "ParamEyeLOpen",
+      "GroupId": "GroupFace",
+      "Name": "Eye Open L"
+    },
+    {
+      "Id": "ParamEyeROpen",
+      "GroupId": "GroupFace",
+      "Name": "Eye Open R"
+    },
+    {
+      "Id": "ParamMouthOpenY",
+      "GroupId": "GroupFace",
+      "Name": "Mouth Open"
+    },
+    {
+      "Id": "ParamMouthForm",
+      "GroupId": "GroupFace",
+      "Name": "Mouth Form"
+    },
+    {
+      "Id": "ParamBodyAngleX",
+      "GroupId": "GroupBody",
+      "Name": "重心横移"
+    },
+    {
+      "Id": "ParamBodyAngleY",
+      "GroupId": "GroupBody",
+      "Name": "身体起落"
+    },
+    {
+      "Id": "ParamBodyAngleZ",
+      "GroupId": "GroupBody",
+      "Name": "身体侧倾"
+    },
+    {
+      "Id": "ParamArmLA",
+      "GroupId": "GroupArms",
+      "Name": "左肩"
+    },
+    {
+      "Id": "ParamArmLB",
+      "GroupId": "GroupArms",
+      "Name": "左肘"
+    },
+    {
+      "Id": "ParamHandL",
+      "GroupId": "GroupArms",
+      "Name": "左手腕"
+    },
+    {
+      "Id": "ParamLegLA",
+      "GroupId": "GroupLegs",
+      "Name": "左腿抬摆"
+    },
+    {
+      "Id": "ParamLegLB",
+      "GroupId": "GroupLegs",
+      "Name": "左膝"
+    },
+    {
+      "Id": "ParamFootL",
+      "GroupId": "GroupLegs",
+      "Name": "左脚踝"
+    },
+    {
+      "Id": "ParamArmRA",
+      "GroupId": "GroupArms",
+      "Name": "右肩"
+    },
+    {
+      "Id": "ParamArmRB",
+      "GroupId": "GroupArms",
+      "Name": "右肘"
+    },
+    {
+      "Id": "ParamHandR",
+      "GroupId": "GroupArms",
+      "Name": "右手腕"
+    },
+    {
+      "Id": "ParamLegRA",
+      "GroupId": "GroupLegs",
+      "Name": "右腿抬摆"
+    },
+    {
+      "Id": "ParamLegRB",
+      "GroupId": "GroupLegs",
+      "Name": "右膝"
+    },
+    {
+      "Id": "ParamFootR",
+      "GroupId": "GroupLegs",
+      "Name": "右脚踝"
+    },
+    {
+      "Id": "ParamSkirtSwing",
+      "GroupId": "GroupBody",
+      "Name": "裙摆"
+    },
+    {
+      "Id": "ParamWingRSwing",
+      "GroupId": "GroupBody",
+      "Name": "右翼"
+    },
+    {
+      "Id": "ParamWingLSwing",
+      "GroupId": "GroupBody",
+      "Name": "左翼"
+    },
+    {
+      "Id": "ParamTailSwing",
+      "GroupId": "GroupBody",
+      "Name": "尾巴"
+    }
+  ],
+  "ParameterGroups": [
+    {
+      "Id": "GroupHead",
+      "GroupId": "",
+      "Name": "Head"
+    },
+    {
+      "Id": "GroupFace",
+      "GroupId": "",
+      "Name": "Face"
+    },
+    {
+      "Id": "GroupBody",
+      "GroupId": "",
+      "Name": "Body"
+    },
+    {
+      "Id": "GroupArms",
+      "GroupId": "",
+      "Name": "手臂和手腕"
+    },
+    {
+      "Id": "GroupLegs",
+      "GroupId": "",
+      "Name": "腿和脚踝"
+    }
+  ],
+  "Parts": [
+    {
+      "Id": "Character",
+      "Name": "Character"
+    },
+    {
+      "Id": "HairFlow",
+      "Name": "原画发丝"
+    },
+    {
+      "Id": "Head",
+      "Name": "头部"
+    },
+    {
+      "Id": "LFoot",
+      "Name": "左脚踝"
+    },
+    {
+      "Id": "LShin",
+      "Name": "左膝"
+    },
+    {
+      "Id": "LThigh",
+      "Name": "左腿抬摆"
+    },
+    {
+      "Id": "RFoot",
+      "Name": "右脚踝"
+    },
+    {
+      "Id": "RShin",
+      "Name": "右膝"
+    },
+    {
+      "Id": "RThigh",
+      "Name": "右腿抬摆"
+    },
+    {
+      "Id": "Skirt",
+      "Name": "裙摆"
+    },
+    {
+      "Id": "Tail",
+      "Name": "尾巴"
+    },
+    {
+      "Id": "Torso",
+      "Name": "躯干"
+    },
+    {
+      "Id": "WingL",
+      "Name": "左翼"
+    },
+    {
+      "Id": "WingR",
+      "Name": "右翼"
+    },
+    {
+      "Id": "OpenLashLeft",
+      "Name": "OpenLashLeft"
+    },
+    {
+      "Id": "OpenLashRight",
+      "Name": "OpenLashRight"
+    },
+    {
+      "Id": "ClosedLashLeft",
+      "Name": "ClosedLashLeft"
+    },
+    {
+      "Id": "ClosedLashRight",
+      "Name": "ClosedLashRight"
+    },
+    {
+      "Id": "RestMouth",
+      "Name": "RestMouth"
+    },
+    {
+      "Id": "AltMouth",
+      "Name": "AltMouth"
+    },
+    {
+      "Id": "RSleeve",
+      "Name": "RSleeve"
+    },
+    {
+      "Id": "LSleeve",
+      "Name": "LSleeve"
+    },
+    {
+      "Id": "RFrontLock",
+      "Name": "RFrontLock"
+    },
+    {
+      "Id": "LFrontLock",
+      "Name": "LFrontLock"
+    }
+  ]
+}

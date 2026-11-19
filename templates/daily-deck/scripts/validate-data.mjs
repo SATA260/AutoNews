@@ -9,6 +9,7 @@ const LIMITS = {
   headline: 48,
   footerCta: 56,
   category: 10,
+  entity: 32,
   shortTitle: 30,
   progressLabel: 12,
   title: 48,
@@ -63,6 +64,7 @@ if (items.length > LIMITS.maxItems) {
 items.forEach((item, idx) => {
   const prefix = `items[${idx}]`;
   checkLen(`${prefix}.category`, item.category, LIMITS.category);
+  checkLen(`${prefix}.entity`, item.entity, LIMITS.entity);
   checkLen(`${prefix}.shortTitle`, item.shortTitle, LIMITS.shortTitle);
   checkLen(`${prefix}.progressLabel`, item.progressLabel, LIMITS.progressLabel);
   checkLen(`${prefix}.title`, item.title, LIMITS.title);

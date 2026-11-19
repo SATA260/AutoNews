@@ -118,6 +118,7 @@ export const DataInspectorDrawer: React.FC<DataInspectorDrawerProps> = ({
     next.items.push({
       id: `news-${String(nextNum).padStart(2, '0')}`,
       category: '新资讯',
+      entity: 'OpenAI',
       shortTitle: `新增 AI 动态 #${nextNum}`,
       progressLabel: `AI动态#${nextNum}`,
       title: `新增 AI 动态 #${nextNum}：请填写标题`,
@@ -179,6 +180,7 @@ export const DataInspectorDrawer: React.FC<DataInspectorDrawerProps> = ({
   };
 
   const titleLen = Array.from(currentItem.title ?? '').length;
+  const entityLen = Array.from(currentItem.entity ?? '').length;
   const shortTitleLen = Array.from(currentItem.shortTitle ?? '').length;
   const progressLabelLen = Array.from(currentItem.progressLabel ?? '').length;
   const summaryLen = Array.from(currentItem.summary ?? '').length;
@@ -321,6 +323,23 @@ export const DataInspectorDrawer: React.FC<DataInspectorDrawerProps> = ({
                     value={currentItem.title ?? ''}
                     onChange={(e) => updateCurrentItem({ title: e.target.value })}
                     placeholder="输入简明事实性标题"
+                  />
+                </label>
+
+                <label className="editor-field full-span">
+                  <div className="field-label-row">
+                    <span>所属公司 / 主体（用于开头瀑布流归组与 Logo 匹配）</span>
+                    <span
+                      className={`char-count ${entityLen > HARD_LIMITS.entity ? 'is-over' : ''}`}
+                    >
+                      {entityLen} / {HARD_LIMITS.entity}
+                    </span>
+                  </div>
+                  <input
+                    type="text"
+                    value={currentItem.entity ?? ''}
+                    onChange={(e) => updateCurrentItem({ entity: e.target.value })}
+                    placeholder="例如：OpenAI、Google DeepMind、腾讯混元"
                   />
                 </label>
 

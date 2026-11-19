@@ -608,7 +608,7 @@ describe('template rendering, Playwright capture, ffmpeg composition, and QA', (
     const tplData = await readJsonOrNull<Record<string, unknown>>(
       path.join(runDir, 'template-data.json'),
     );
-    expect(tplData?.hostLive2dUrl).toBe('/__mascot_assets__/gemini/gemini.model3.json');
+    expect(tplData?.hostLive2dUrl).toBe('/__mascot_assets__/fullbody/gemini/gemini.model3.json');
     expect(Array.isArray(tplData?.coverLipSync)).toBe(true);
 
     const stagedAssetStat = await fs.stat(path.join(runDir, 'assets', 'item-01.png'));

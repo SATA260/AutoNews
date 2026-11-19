@@ -510,6 +510,7 @@ export function WorkflowSettingsForm({ settings }: { settings: Settings }) {
     pauseAfterNarrate: settings.tts.pauseAfterNarrate,
     activeTemplate: settings.template.active,
     renderTheme: settings.render.theme ?? 'dark',
+    renderLive2dPack: settings.render.live2dPack ?? 'fullbody',
     pagePaddingSec: settings.render.pagePaddingSec,
     bgmVolumeDb: settings.render.bgm.volumeDb,
     publish: settings.publish,
@@ -728,6 +729,19 @@ export function WorkflowSettingsForm({ settings }: { settings: Settings }) {
             >
               <option value="dark">深色模式（dark）</option>
               <option value="light">浅色模式（light）</option>
+            </select>
+          </label>
+        </div>
+        <div>
+          <label className="block text-xs font-medium text-slate-700">
+            看板娘 Live2D 模型套组
+            <select
+              name="renderLive2dPack"
+              defaultValue={settings.render.live2dPack ?? 'fullbody'}
+              className="mt-1 w-full rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-xs font-normal"
+            >
+              <option value="fullbody">全身动作版（fullbody）</option>
+              <option value="expression">仅表情版（expression）</option>
             </select>
           </label>
         </div>

@@ -15,6 +15,7 @@ export const SAMPLE_DAILY_ISSUE: DailyIssueInput = {
     {
       id: 'news-01',
       category: '推理架构',
+      entity: 'DeepSeek',
       shortTitle: 'DeepSeek 新一代推理架构开源，成本降 70%',
       progressLabel: 'DeepSeek推理降本',
       title: 'DeepSeek 新一代推理架构开源：长文本吞吐翻倍，API 成本直降 70%',
@@ -59,6 +60,7 @@ export const SAMPLE_DAILY_ISSUE: DailyIssueInput = {
     {
       id: 'news-02',
       category: '工程编程',
+      entity: 'Anthropic',
       shortTitle: 'Claude 发布百文件级代码重构与回归闭环',
       progressLabel: 'Claude百文件重构',
       title: 'Claude 升级长程代码工作流，支持跨百文件重构与自动回归测试',
@@ -103,6 +105,7 @@ export const SAMPLE_DAILY_ISSUE: DailyIssueInput = {
     {
       id: 'news-03',
       category: '多模态交互',
+      entity: 'OpenAI',
       shortTitle: 'OpenAI 推出低延迟桌面语音视觉助手',
       progressLabel: 'OpenAI低延迟语音',
       title: 'OpenAI 推出低延迟桌面语音视觉助手，端到端响应压入 220ms',
@@ -142,6 +145,7 @@ export const SAMPLE_DAILY_ISSUE: DailyIssueInput = {
     {
       id: 'news-04',
       category: '长视频理解',
+      entity: 'Google DeepMind',
       shortTitle: 'Gemini 2M 上下文开放两小时原生视频检索',
       progressLabel: 'Gemini长视频直检',
       title: 'Gemini 2M 上下文开放原生视频逐帧检索，2 小时整片秒级定位',
@@ -186,6 +190,7 @@ export const SAMPLE_DAILY_ISSUE: DailyIssueInput = {
     {
       id: 'news-05',
       category: '模型发布',
+      entity: 'xAI',
       shortTitle: 'Grok 开放实时网络检索与推理 API 新配额',
       progressLabel: 'Grok实时检索API',
       title: 'xAI 更新 Grok 推理 API 与实时信源检索能力，开放开发者配额',

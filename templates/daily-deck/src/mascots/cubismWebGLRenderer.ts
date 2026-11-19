@@ -1,4 +1,11 @@
 import type { MascotMood } from '../schema/newsSchema';
+import {
+  computeMascotProjection,
+  type ModelRestBounds,
+  type MotionClipSummary,
+  positiveModulo,
+  selectMotionSample,
+} from './cubismMotionHelpers';
 
 /** 全局注入的官方 Cubism Core 运行时最小接口声明 */
 interface CubismCoreGlobal {
@@ -60,10 +67,18 @@ interface CubismDrawables {
   resetDynamicFlags: () => void;
 }
 
+/** 模型可调节不透明度的部件集合 */
+interface CubismParts {
+  count: number;
+  ids: string[];
+  opacities: Float32Array;
+}
+
 /** 已实例化的角色运行时模型对象 */
 interface CubismModelInstance {
   canvasinfo: CubismCanvasInfo;
   parameters: CubismParameters;
+  parts?: CubismParts;
   drawables: CubismDrawables;
   update: () => void;
   release: () => void;
@@ -235,10 +250,41 @@ const BLEND_MULTIPLICATIVE_BIT = 1 << 1;
 const INVERTED_MASK_BIT = 1 << 3;
 const VISIBLE_DYNAMIC_BIT = 1 << 0;
 
-/** 计算在正负实数输入下始终落在 `[0, period)` 区间的非负数学取模值 */
-function positiveModulo(value: number, period: number): number {
-  const m = value % period;
-  return m < 0 ? m + period : m;
+/** 从动作文件提取时长、循环方式以及是否自带微笑嘴型曲线的摘要信息 */
+function summarizeMotionClip(motion: Motion3Json | null): MotionClipSummary | null {
+  if (!motion?.Curves?.length) {
+    return null;
+  }
+  return {
+    durationSec: motion.Meta?.Duration ?? 7.2,
+    loop: motion.Meta?.Loop,
+    hasMouthFormCurve: motion.Curves.some(
+      (curve) => curve.Target === 'Parameter' && curve.Id === 'ParamMouthForm',
+    ),
+  };
+}
+
+/** 按指定优先级在动作映射表中查找对应动作分组的文件路径（兼容大小写键名） */
+function findMotionGroupFile(
+  motions: Model3Json['FileReferences'] extends undefined
+    ? never
+    : NonNullable<Model3Json['FileReferences']>['Motions'],
+  targetKey: string,
+): string | undefined {
+  if (!motions) {
+    return undefined;
+  }
+  const direct = motions[targetKey]?.[0]?.File;
+  if (direct) {
+    return direct;
+  }
+  const lower = targetKey.toLowerCase();
+  for (const [key, items] of Object.entries(motions)) {
+    if (key.toLowerCase() === lower && items?.[0]?.File) {
+      return items[0].File;
+    }
+  }
+  return undefined;
 }
 
 /** 拼接基于模型描述文件所在目录的子资源相对路径 */
@@ -436,19 +482,25 @@ export async function loadCubismMascotController(
   }
 
   const resolveRel = (rel: string) => joinRelativeAssetUrl(modelJsonUrl, rel);
+  const idleFile = findMotionGroupFile(refs.Motions, 'Idle');
+  const talkFile = findMotionGroupFile(refs.Motions, 'Talk');
+  const fullBodyFile = findMotionGroupFile(refs.Motions, 'FullBody');
 
-  const [mocBuffer, images, physicsJson, idleMotion, talkMotion, expressionsMap] =
+  const [mocBuffer, images, physicsJson, idleMotion, talkMotion, fullBodyMotion, expressionsMap] =
     await Promise.all([
       readLocalBinary(resolveRel(refs.Moc)),
       Promise.all(refs.Textures.map((texRel) => loadImageElement(resolveRel(texRel)))),
       refs.Physics
         ? readLocalJson<Physics3Json>(resolveRel(refs.Physics)).catch(() => null)
         : Promise.resolve(null),
-      refs.Motions?.Idle?.[0]?.File
-        ? readLocalJson<Motion3Json>(resolveRel(refs.Motions.Idle[0].File)).catch(() => null)
+      idleFile
+        ? readLocalJson<Motion3Json>(resolveRel(idleFile)).catch(() => null)
         : Promise.resolve(null),
-      refs.Motions?.Talk?.[0]?.File
-        ? readLocalJson<Motion3Json>(resolveRel(refs.Motions.Talk[0].File)).catch(() => null)
+      talkFile
+        ? readLocalJson<Motion3Json>(resolveRel(talkFile)).catch(() => null)
+        : Promise.resolve(null),
+      fullBodyFile
+        ? readLocalJson<Motion3Json>(resolveRel(fullBodyFile)).catch(() => null)
         : Promise.resolve(null),
       (async () => {
         const map = new Map<string, Expression3Json>();
@@ -589,6 +641,18 @@ export async function loadCubismMascotController(
       }
     }
 
+    const partIndexById = new Map<string, number>();
+    let defaultPartOpacities: Float32Array | null = null;
+    if (model.parts) {
+      for (let i = 0; i < model.parts.count; i++) {
+        const id = model.parts.ids[i];
+        if (id) {
+          partIndexById.set(id, i);
+        }
+      }
+      defaultPartOpacities = new Float32Array(model.parts.opacities);
+    }
+
     const setParam = (id: string, val: number) => {
       const idx = paramIndexById.get(id);
       if (idx === undefined) {
@@ -603,6 +667,57 @@ export async function loadCubismMascotController(
       const idx = paramIndexById.get(id);
       return idx !== undefined ? (model.parameters.values[idx] ?? 0) : 0;
     };
+
+    const fullBodySummary = summarizeMotionClip(fullBodyMotion);
+    const idleSummary = summarizeMotionClip(idleMotion);
+    const talkSummary = summarizeMotionClip(talkMotion);
+
+    /** 在默认静止姿态下采样可见顶点坐标范围，消除模型画布额外边距带来的尺寸偏移 */
+    const computeModelRestBounds = (): ModelRestBounds | null => {
+      for (let i = 0; i < model.parameters.count; i++) {
+        model.parameters.values[i] = model.parameters.defaultValues[i] ?? 0;
+      }
+      if (model.parts && defaultPartOpacities) {
+        model.parts.opacities.set(defaultPartOpacities);
+      }
+      model.update();
+      let minX = Number.POSITIVE_INFINITY;
+      let maxX = Number.NEGATIVE_INFINITY;
+      let minY = Number.POSITIVE_INFINITY;
+      let maxY = Number.NEGATIVE_INFINITY;
+      for (let dIdx = 0; dIdx < model.drawables.count; dIdx++) {
+        const dynFlag = model.drawables.dynamicFlags[dIdx] ?? 0;
+        if (
+          (dynFlag & VISIBLE_DYNAMIC_BIT) === 0 ||
+          (model.drawables.opacities[dIdx] ?? 1) <= 0.001
+        ) {
+          continue;
+        }
+        const positions = model.drawables.vertexPositions[dIdx];
+        if (!positions) {
+          continue;
+        }
+        for (let k = 0; k + 1 < positions.length; k += 2) {
+          const vx = positions[k] ?? 0;
+          const vy = positions[k + 1] ?? 0;
+          if (vx < minX) minX = vx;
+          if (vx > maxX) maxX = vx;
+          if (vy < minY) minY = vy;
+          if (vy > maxY) maxY = vy;
+        }
+      }
+      model.drawables.resetDynamicFlags();
+      if (
+        !Number.isFinite(minX) ||
+        !Number.isFinite(maxX) ||
+        !Number.isFinite(minY) ||
+        !Number.isFinite(maxY)
+      ) {
+        return null;
+      }
+      return { minX, maxX, minY, maxY };
+    };
+    const restBounds = computeModelRestBounds();
 
     const physicsChains = createPhysicsChains(physicsJson);
     const expressionWeights = new Map<string, number>();
@@ -687,19 +802,41 @@ export async function loadCubismMascotController(
       for (let i = 0; i < model.parameters.count; i++) {
         model.parameters.values[i] = model.parameters.defaultValues[i] ?? 0;
       }
+      if (model.parts && defaultPartOpacities) {
+        model.parts.opacities.set(defaultPartOpacities);
+      }
 
-      const activeMotion = params.speaking && talkMotion ? talkMotion : (idleMotion ?? talkMotion);
-      if (activeMotion?.Curves?.length) {
-        const duration = Math.max(0.1, activeMotion.Meta?.Duration ?? 7.2);
-        const localT =
-          activeMotion.Meta?.Loop !== false
-            ? positiveModulo(timeSec, duration)
-            : Math.min(duration, Math.max(0, timeSec));
+      const selectedSample = selectMotionSample({
+        timeSec,
+        speaking: params.speaking,
+        fullBody: fullBodySummary,
+        idle: idleSummary,
+        talk: talkSummary,
+      });
+      const activeMotion =
+        selectedSample?.clipKind === 'fullbody'
+          ? fullBodyMotion
+          : selectedSample?.clipKind === 'talk'
+            ? talkMotion
+            : selectedSample?.clipKind === 'idle'
+              ? idleMotion
+              : null;
+
+      if (selectedSample && activeMotion?.Curves?.length) {
+        const localT = selectedSample.localTimeSec;
         for (const curve of activeMotion.Curves) {
-          if (curve.Target !== 'Parameter' || curve.Id === 'ParamMouthOpenY') {
-            continue;
+          if (curve.Target === 'Parameter') {
+            if (curve.Id === 'ParamMouthOpenY') {
+              continue;
+            }
+            setParam(curve.Id, evaluateMotionSegments(curve.Segments, localT));
+          } else if (curve.Target === 'PartOpacity' && model.parts) {
+            const pIdx = partIndexById.get(curve.Id);
+            if (pIdx !== undefined) {
+              const rawOpacity = evaluateMotionSegments(curve.Segments, localT);
+              model.parts.opacities[pIdx] = Math.min(1, Math.max(0, rawOpacity));
+            }
           }
-          setParam(curve.Id, evaluateMotionSegments(curve.Segments, localT));
         }
       } else {
         setParam('ParamBreath', 0.5 + 0.5 * Math.sin((2 * Math.PI * timeSec) / 3.2));
@@ -740,6 +877,15 @@ export async function loadCubismMascotController(
 
         if (nextW > 0.001 && expSpec.Parameters) {
           for (const p of expSpec.Parameters) {
+            // 中性情绪播放全身动作期间保留动作自带的温和嘴角微笑曲线
+            if (
+              targetMood === 'neutral' &&
+              expName === 'neutral' &&
+              selectedSample?.preserveNeutralMouthForm &&
+              p.Id === 'ParamMouthForm'
+            ) {
+              continue;
+            }
             const baseVal = getParam(p.Id);
             if (p.Blend === 'Add') {
               setParam(p.Id, baseVal + p.Value * nextW);
@@ -755,6 +901,7 @@ export async function loadCubismMascotController(
       for (const chain of physicsChains) {
         let driveAngleRad = 0;
         let driveShiftX = 0;
+        let driveShiftY = 0;
         const normAngle = Math.max(1, Math.abs(chain.spec.Normalization?.Angle?.Maximum ?? 10));
         const normPos = Math.max(1, Math.abs(chain.spec.Normalization?.Position?.Maximum ?? 10));
 
@@ -774,6 +921,8 @@ export async function loadCubismMascotController(
           const normalized = (pVal / pMax) * sign * weightRatio;
           if (inp.Type === 'Angle') {
             driveAngleRad += (normalized * normAngle * Math.PI) / 180;
+          } else if (inp.Type === 'Y') {
+            driveShiftY += normalized * normPos;
           } else {
             driveShiftX += normalized * normPos;
           }
@@ -785,7 +934,7 @@ export async function loadCubismMascotController(
           const root = chain.nodes[0];
           if (root) {
             root.x = driveShiftX;
-            root.y = 0;
+            root.y = driveShiftY;
           }
           for (let ni = 1; ni < chain.nodes.length; ni++) {
             const prev = chain.nodes[ni - 1];
@@ -851,31 +1000,16 @@ export async function loadCubismMascotController(
       gl.disable(gl.CULL_FACE);
       gl.disable(gl.STENCIL_TEST);
 
-      const aspectCanvas = cw / ch;
-      let scaleX: number;
-      let scaleY: number;
-      let offsetY: number;
+      const projection = computeMascotProjection({
+        canvasWidth: cw,
+        canvasHeight: ch,
+        unitW,
+        unitH,
+        restBounds,
+      });
 
-      if (unitH > 1.38) {
-        // 高挑角色仅展示头顶至大腿中部（约全身高度 59%），完整保留左右手部宽度
-        const visibleSpanY = unitH * 0.59;
-        const idealScaleY = 1.94 / visibleSpanY;
-        scaleX = Math.min(1.94 / unitW, idealScaleY * (1 / aspectCanvas));
-        scaleY = scaleX * aspectCanvas;
-        const topModelY = unitH / 2;
-        offsetY = 0.95 - topModelY * scaleY;
-      } else {
-        // Q 版角色以头顶对齐展示约 90% 高度，完整露出主体、裙摆与鲸尾，脚部自然贴合画布底缘
-        const visibleSpanY = unitH * 0.9;
-        const idealScaleY = 1.92 / visibleSpanY;
-        scaleX = Math.min(1.92 / unitW, idealScaleY * (1 / aspectCanvas));
-        scaleY = scaleX * aspectCanvas;
-        const topModelY = unitH / 2;
-        offsetY = 0.94 - topModelY * scaleY;
-      }
-
-      gl.uniform2f(uScaleLoc, scaleX, scaleY);
-      gl.uniform2f(uOffsetLoc, 0, offsetY);
+      gl.uniform2f(uScaleLoc, projection.scaleX, projection.scaleY);
+      gl.uniform2f(uOffsetLoc, projection.offsetX, projection.offsetY);
       gl.uniform1i(uTexLoc, 0);
 
       const drawCount = model.drawables.count;

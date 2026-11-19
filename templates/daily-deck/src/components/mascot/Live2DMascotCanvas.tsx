@@ -220,7 +220,7 @@ export const Live2DMascotCanvas = forwardRef<MascotImperativeHandle, Live2DMasco
     return (
       <canvas
         ref={canvasRef}
-        width={560}
+        width={632}
         height={580}
         className={`corner-mascot-live2d-canvas ${ready ? 'is-ready' : 'is-loading'}`}
         data-testid="corner-mascot-live2d"

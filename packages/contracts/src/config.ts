@@ -11,6 +11,11 @@ export const RenderThemeSchema = z.enum(['light', 'dark']);
 /** 视频模板外观主题类型 */
 export type RenderTheme = z.infer<typeof RenderThemeSchema>;
 
+/** 看板娘 Live2D 模型套组枚举（全身动作版或仅表情版） */
+export const Live2dPackSchema = z.enum(['fullbody', 'expression']);
+/** 看板娘 Live2D 模型套组类型 */
+export type Live2dPack = z.infer<typeof Live2dPackSchema>;
+
 /** 单个 AI 处理环节使用的调用名称、模型名与超时重试配置 */
 export const StageAiConfigSchema = z.object({
   cli: z.string().min(1),
@@ -199,6 +204,8 @@ const SettingsFieldsSchema = z.object({
   render: z.object({
     /** 视频模板外观主题（light 浅色 / dark 深色），未配置时默认使用深色模式 */
     theme: RenderThemeSchema.optional(),
+    /** 看板娘 Live2D 模型套组（fullbody 全身动作版 / expression 仅表情版），未配置时默认使用全身动作版 */
+    live2dPack: Live2dPackSchema.optional(),
     width: z.number().int().positive(),
     height: z.number().int().positive(),
     fps: z.number().int().positive(),

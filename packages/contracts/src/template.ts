@@ -33,6 +33,8 @@ export interface RenderableNewsItem extends PolishedItem {
   publishedAt: string;
   imagePath?: string;
   secondaryImagePath?: string;
+  /** 匹配到的公司或机构 Logo 本地服务地址，未命中时为空 */
+  companyLogoUrl?: string;
   impact: ImpactLevel;
   mascotMood?: MascotMood;
 }

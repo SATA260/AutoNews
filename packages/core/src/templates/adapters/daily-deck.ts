@@ -15,6 +15,7 @@ import type {
   TimelineSection,
 } from '@aidaily/contracts';
 import { execa } from 'execa';
+import { resolveLogoAssetsRoot } from '../../media/company-logos.js';
 import { encodeJpegStreamToMp4 } from '../../media/ffmpeg.js';
 import { quantizeTimelineToFps } from '../../media/timeline.js';
 import { startTemplateHttpServer } from '../server.js';
@@ -135,6 +136,50 @@ async function computeDirectoryContentHash(dirPath: string): Promise<string> {
     return 'empty';
   }
   return hasher.digest('hex');
+}
+
+/** 根据模型访问路径安全解析实际命中的 Live2D 模型文件夹，缺失时按全身版、仅表情版、旧根目录顺序探测 */
+export async function resolveMascotModelDirectory(
+  mascotRoot: string,
+  hostLive2dModelUrl: string | undefined,
+  hostKey: string,
+): Promise<string> {
+  const rootResolved = path.resolve(mascotRoot);
+  const mascotPrefix = '/__mascot_assets__/';
+  if (hostLive2dModelUrl?.startsWith(mascotPrefix)) {
+    const rawRel = hostLive2dModelUrl.slice(mascotPrefix.length);
+    let decodedRel = rawRel;
+    try {
+      decodedRel = decodeURIComponent(rawRel);
+    } catch {
+      decodedRel = rawRel;
+    }
+    const posixDir = path.posix.dirname(decodedRel.replace(/\\/g, '/'));
+    const segments = posixDir.split('/').filter((seg) => seg.length > 0 && seg !== '.');
+    if (segments.length > 0 && !segments.includes('..')) {
+      const candidate = path.resolve(rootResolved, ...segments);
+      if (candidate === rootResolved || candidate.startsWith(`${rootResolved}${path.sep}`)) {
+        return candidate;
+      }
+    }
+  }
+  const defaultDir = path.join(rootResolved, 'fullbody', hostKey);
+  const fallbackCandidates = [
+    defaultDir,
+    path.join(rootResolved, 'expression', hostKey),
+    path.join(rootResolved, hostKey),
+  ];
+  for (const dir of fallbackCandidates) {
+    try {
+      const st = await fs.stat(dir);
+      if (st.isDirectory()) {
+        return dir;
+      }
+    } catch {
+      // 继续尝试下一个候选模型目录
+    }
+  }
+  return defaultDir;
 }
 
 /** 定位可用的看板娘模型根目录：优先读取工作区根目录，缺失时回退模板所在仓库的共享模型目录 */
@@ -484,6 +529,9 @@ export function createDailyDeckAdapter(): TemplateAdapter {
           return {
             id: item.id,
             category: item.category,
+            entity: item.entity,
+            impact: item.impact,
+            companyLogoUrl: item.companyLogoUrl ?? null,
             shortTitle: item.shortTitle,
             progressLabel: item.progressLabel,
             title: item.title,
@@ -521,30 +569,37 @@ export function createDailyDeckAdapter(): TemplateAdapter {
       }));
     },
 
-    /** 计算模板构建产物与当期角色模型资产的文件内容 SHA-1 指纹，用于判定章节分片缓存是否需要失效重渲 */
+    /** 计算模板构建产物、角色模型与公司 Logo 资产的内容 SHA-1 指纹，用于判定章节分片缓存是否需要失效重渲 */
     async getAssetFingerprint(opts) {
       const distDir = await ensureDailyDeckBuilt(opts.templateDir, opts.signal);
       const distHash = await computeDirectoryContentHash(distDir);
       const mascotRoot = await resolveMascotAssetsRoot(opts.templateDir, opts.rootDir);
       const hostKey = opts.issue.hostId ?? 'gemini';
-      const mascotHash =
+      const mascotDir =
         mascotRoot && hostKey
-          ? await computeDirectoryContentHash(path.join(mascotRoot, hostKey))
-          : 'none';
+          ? await resolveMascotModelDirectory(mascotRoot, opts.issue.hostLive2dModelUrl, hostKey)
+          : undefined;
+      const mascotHash = mascotDir ? await computeDirectoryContentHash(mascotDir) : 'none';
+      const logosDir = await resolveLogoAssetsRoot(opts.rootDir, opts.templateDir);
+      const logosHash = logosDir ? await computeDirectoryContentHash(logosDir) : 'none';
       return crypto
         .createHash('sha1')
-        .update(JSON.stringify({ distHash, mascotHash }), 'utf8')
+        .update(JSON.stringify({ distHash, mascotHash, logosHash }), 'utf8')
         .digest('hex');
     },
 
-    /** 确认前端模板已打包完成，并启动同时挂载当期素材与只读角色模型目录的本地服务 */
+    /** 确认前端模板已打包完成，并启动同时挂载当期素材、角色模型与公司 Logo 目录的本地服务 */
     async prepare(opts) {
       const distDir = await ensureDailyDeckBuilt(opts.dir, opts.signal);
       const mascotDir = await resolveMascotAssetsRoot(opts.dir, opts.rootDir);
+      const logosDir = opts.rootDir
+        ? await resolveLogoAssetsRoot(opts.rootDir, opts.dir)
+        : await resolveLogoAssetsRoot(path.resolve(opts.dir, '..', '..'), opts.dir);
       return startTemplateHttpServer({
         distDir,
         runDir: opts.runDir,
         mascotDir,
+        logosDir,
       });
     },
 

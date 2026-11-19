@@ -11,6 +11,12 @@ import { TZDate } from '@date-fns/tz';
 import { format } from 'date-fns';
 import type { CoreContext } from '../context.js';
 import { lockRunBgm } from '../media/bgm.js';
+import {
+  alignOrderByCompanyOverview,
+  loadLogoCatalog,
+  type OrderAlignmentItemMeta,
+  resolveLogoAssetsRoot,
+} from '../media/company-logos.js';
 import { inTransaction } from '../storage/db.js';
 import { writeFileAtomic } from '../storage/files.js';
 import { invokeStageLlm } from './llm.js';
@@ -139,6 +145,27 @@ export async function runPackageStage(
     });
 
     if (check.passed) {
+      const logosRoot = await resolveLogoAssetsRoot(ctx.paths.rootDir);
+      const logoCatalog = logosRoot ? await loadLogoCatalog(logosRoot) : null;
+      const metaById = new Map<string, OrderAlignmentItemMeta>(
+        passedItems.map((item) => {
+          const ev = eventById.get(item.eventId);
+          return [
+            item.id,
+            {
+              entity: item.finalJson?.entity ?? ev?.entity ?? '',
+              title: item.finalJson?.title ?? ev?.title ?? '',
+            },
+          ];
+        }),
+      );
+      const alignedOrder = alignOrderByCompanyOverview(res.data.order, metaById, logoCatalog);
+      const alignedPackageData: IssuePackage = {
+        ...res.data,
+        order: alignedOrder,
+        headlineItemId: alignedOrder[0] ?? res.data.headlineItemId,
+      };
+
       const nowIso = ctx.now().toISOString();
       inTransaction(ctx.db, () => {
         for (const item of ctx.repos.runItems.listByRun(runId)) {
@@ -146,7 +173,7 @@ export async function runPackageStage(
             ctx.repos.runItems.updateItem(item.id, { position: null, updatedAt: nowIso });
           }
         }
-        res.data.order.forEach((itemId, idx) => {
+        alignedPackageData.order.forEach((itemId, idx) => {
           ctx.repos.runItems.updateItem(itemId, {
             position: idx + 1,
             updatedAt: nowIso,
@@ -157,11 +184,11 @@ export async function runPackageStage(
       await lockRunBgm(ctx, runId);
       const itemById = new Map(passedItems.map((item) => [item.id, item]));
       const paragraphs = [
-        buildNarrationParagraph(res.data.intro.narration),
-        ...res.data.order.map((id) =>
+        buildNarrationParagraph(alignedPackageData.intro.narration),
+        ...alignedPackageData.order.map((id) =>
           buildNarrationParagraph(itemById.get(id)?.finalJson?.narration ?? []),
         ),
-        buildNarrationParagraph(res.data.outro.narration),
+        buildNarrationParagraph(alignedPackageData.outro.narration),
       ].filter((text) => text.length > 0);
       await writeFileAtomic(
         path.join(ctx.paths.runDir(runId), 'narration.txt'),
@@ -170,7 +197,7 @@ export async function runPackageStage(
       return {
         issueNumber,
         date: dateStr,
-        packageData: res.data,
+        packageData: alignedPackageData,
       };
     }
 

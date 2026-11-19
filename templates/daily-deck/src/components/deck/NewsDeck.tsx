@@ -12,6 +12,7 @@ import {
   type SeekToResult,
 } from '../../bridge/videoSynthBridge';
 import { SAMPLE_DAILY_ISSUE } from '../../data/sampleIssue';
+import { resolveItemCompany } from '../../logos/companyRegistry';
 import { MASCOT_REGISTRY } from '../../mascots/mascotRegistry';
 import {
   type DailyIssueInput,
@@ -416,6 +417,13 @@ export const NewsDeck: React.FC<NewsDeckProps> = ({ initialData }) => {
       }
       if (item.customMascotUrl) {
         urls.add(item.customMascotUrl);
+      }
+      if (item.companyLogoUrl) {
+        urls.add(item.companyLogoUrl);
+      }
+      const companyLogo = resolveItemCompany(item).logoUrl;
+      if (companyLogo) {
+        urls.add(companyLogo);
       }
     }
     for (const url of urls) {
@@ -1216,10 +1224,31 @@ export const NewsDeck: React.FC<NewsDeckProps> = ({ initialData }) => {
     (pageIdx: number, isExiting: boolean) => {
       const clampedIdx = clampPageIndex(pageIdx, totalPages);
       if (clampedIdx === 0) {
+        const coverSection = sectionTimings[0];
+        const coverDurationMs = coverSection?.durationMs ?? sanitized.issue.coverDurationSec * 1000;
+        const coverAutoScrollActive =
+          startup.motion !== 'static' && (startup.clockMode === 'manual' || isAutoPlaying);
+        // 封面淡出切换至首条新闻时锁定停在底部位置，避免瞬间回弹到顶部
+        const coverScrollLocalMs = coverAutoScrollActive
+          ? isExiting
+            ? coverDurationMs
+            : clampedIdx === currentPage
+              ? currentLocalSec * 1000
+              : null
+          : null;
+        const coverHasMascot = Boolean(
+          sanitized.issue.hostMascotId !== 'none' ||
+            sanitized.issue.hostMascotUrl ||
+            sanitized.issue.hostLive2dUrl,
+        );
         return (
           <CoverPage
             issue={sanitized.issue}
             onJumpToNews={isExiting ? () => {} : (itemIdx) => navigateTo(itemIdx + 1)}
+            hasMascot={coverHasMascot}
+            isExiting={isExiting}
+            scrollLocalMs={coverScrollLocalMs}
+            pageDurationMs={coverDurationMs}
           />
         );
       }
@@ -1263,12 +1292,16 @@ export const NewsDeck: React.FC<NewsDeckProps> = ({ initialData }) => {
       );
     },
     [
+      currentLocalSec,
       currentPage,
       currentRevealLocalMs,
+      isAutoPlaying,
       navigateTo,
       recordRuntimeError,
       sanitized.issue,
       sectionTimings,
+      startup.clockMode,
+      startup.motion,
       totalPages,
     ],
   );

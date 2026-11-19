@@ -12,6 +12,8 @@ export type PresetMascotId = 'deepseek' | 'gpt' | 'claude' | 'gemini' | 'grok' |
 export type MascotMode = 'per-item' | 'fixed-host';
 /** 看板娘随新闻阵营或话题呈现的微表情状态 */
 export type MascotMood = 'neutral' | 'proud' | 'surprised' | 'thinking';
+/** 新闻重要程度等级，用于总览分组与视觉高亮 */
+export type NewsImpactLevel = 'breaking' | 'high' | 'normal';
 
 /** 数据清洗过程中记录的单条提示或自动修正明细 */
 export interface ValidationWarning {
@@ -61,6 +63,9 @@ export interface SanitizedSubtitleCue {
 export interface NewsItemInput {
   id?: string;
   category?: string;
+  entity?: string;
+  impact?: NewsImpactLevel | string;
+  companyLogoUrl?: string | null;
   shortTitle?: string;
   progressLabel?: string;
   title: string;
@@ -135,6 +140,9 @@ export interface SanitizedNewsItem {
   id: string;
   indexLabel: string;
   category: string;
+  entity: string;
+  impact: NewsImpactLevel;
+  companyLogoUrl: string | null;
   shortTitle: string;
   progressLabel: string;
   title: string;
@@ -219,6 +227,7 @@ export const HARD_LIMITS = {
   footerCta: 56,
   hostDisplayName: 16,
   category: 10,
+  entity: 32,
   shortTitle: 30,
   progressLabel: 12,
   title: 48,
@@ -269,6 +278,7 @@ const MASCOT_DEFAULT_NAMES: Record<PresetMascotId, string> = {
 
 const MASCOT_MODES: readonly MascotMode[] = ['per-item', 'fixed-host'] as const;
 const MASCOT_MOODS: readonly MascotMood[] = ['neutral', 'proud', 'surprised', 'thinking'] as const;
+const IMPACT_LEVELS: readonly NewsImpactLevel[] = ['breaking', 'high', 'normal'] as const;
 
 const LooseRecordSchema = z.record(z.unknown());
 
@@ -675,6 +685,15 @@ function sanitizeMascotMood(raw: unknown): MascotMood {
   return 'neutral';
 }
 
+/** 校验新闻重要程度等级，未知值统一回退普通级别 */
+function sanitizeImpactLevel(raw: unknown): NewsImpactLevel {
+  const normalized = normalizeText(raw).toLowerCase();
+  if ((IMPACT_LEVELS as readonly string[]).includes(normalized)) {
+    return normalized as NewsImpactLevel;
+  }
+  return 'normal';
+}
+
 /** 清洗并补全单条新闻的全部文本、配图、音频与口型字段 */
 function sanitizeSingleNewsItem(
   rawItem: unknown,
@@ -835,6 +854,17 @@ function sanitizeSingleNewsItem(
     warnings,
   );
 
+  const rawEntity = normalizeText(obj.entity);
+  const entity = rawEntity
+    ? cleanAndTruncate(rawEntity, HARD_LIMITS.entity, '', `${basePath}.entity`, warnings)
+    : '';
+  const impact = sanitizeImpactLevel(obj.impact);
+  const companyLogoUrl = sanitizeMediaUrl(
+    obj.companyLogoUrl,
+    `${basePath}.companyLogoUrl`,
+    warnings,
+  );
+
   const mascotId = sanitizeMascotId(obj.mascotId, hostMascotId, `${basePath}.mascotId`, warnings);
   const customMascotUrl = sanitizeMediaUrl(
     obj.customMascotUrl,
@@ -870,6 +900,9 @@ function sanitizeSingleNewsItem(
     id,
     indexLabel,
     category,
+    entity,
+    impact,
+    companyLogoUrl,
     shortTitle,
     progressLabel,
     title,
@@ -903,6 +936,8 @@ function createEmergencyFallbackIssue(): SanitizedDailyIssue {
     {
       id: 'fallback-01',
       category: '模板就绪',
+      entity: 'DeepSeek',
+      impact: 'normal',
       shortTitle: '等待导入本期 AI 日报数据',
       progressLabel: '等待导入日报',
       title: '等待导入本期 AI 日报数据',

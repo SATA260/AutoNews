@@ -63,6 +63,9 @@ describe('Layer 1: Zero-Throw Sanitizer & Editorial Contract Limits', () => {
       title: `${longEmojiText} 标题 #${idx}`,
       summary: `${'⚡'.repeat(60)} 总结`,
       progressLabel: `${'🔥'.repeat(20)} 极简总结`,
+      entity: `${'🏢'.repeat(40)}公司`,
+      impact: idx === 0 ? 'breaking' : 'unknown-impact',
+      companyLogoUrl: idx === 0 ? 'javascript:bad()' : '/__logo_assets__/openai.svg',
       imageUrl: idx === 0 ? 'javascript:alert(1)' : '/media/official-deepseek-report.svg',
       audioUrl: idx === 0 ? 'javascript:evil()' : '/__run_assets__/audio/01-item-1.wav',
       cards: Array.from({ length: 10 }).map((_, cIdx) => ({
@@ -82,6 +85,9 @@ describe('Layer 1: Zero-Throw Sanitizer & Editorial Contract Limits', () => {
     expect(Array.from(first.title).length).toBeLessThanOrEqual(HARD_LIMITS.title);
     expect(Array.from(first.summary).length).toBeLessThanOrEqual(HARD_LIMITS.summary);
     expect(Array.from(first.progressLabel).length).toBeLessThanOrEqual(HARD_LIMITS.progressLabel);
+    expect(Array.from(first.entity).length).toBeLessThanOrEqual(HARD_LIMITS.entity);
+    expect(first.impact).toBe('breaking');
+    expect(first.companyLogoUrl).toBeNull();
     expect(first.title.includes('\uFFFD')).toBe(false);
     expect(first.imageUrl).toBeNull();
     expect(first.audioUrl).toBeNull();
@@ -96,6 +102,8 @@ describe('Layer 1: Zero-Throw Sanitizer & Editorial Contract Limits', () => {
     const second = res.issue.items[1]!;
     expect(second.durationSec).toBe(12.4);
     expect(second.audioUrl).toBe('/__run_assets__/audio/01-item-1.wav');
+    expect(second.impact).toBe('normal');
+    expect(second.companyLogoUrl).toBe('/__logo_assets__/openai.svg');
     expect(res.warnings.some((w) => w.code === 'invalid_url')).toBe(true);
     expect(res.warnings.some((w) => w.code === 'clamped')).toBe(true);
   });
@@ -115,7 +123,7 @@ describe('Layer 2-5: Editorial Deck, Segmented Chapter Bar, Virtual Clock & Erro
     expect(parseTransitionStyle('flip')).toBe('flip');
     expect(parseTransitionStyle('unknown')).toBe('fade');
     expect(parseTransitionStyle(undefined)).toBe('fade');
-    expect(screen.getByText('今日要闻')).toBeInTheDocument();
+    expect(screen.getByText('2026-11-16 资讯概览')).toBeInTheDocument();
 
     // 验证顶部章节分段进度条渲染 [导览] + 5 条新闻总结胶囊 + [速览]，且已移除底部旧进度线
     const pills = container.querySelectorAll('.chapter-pill');
@@ -234,7 +242,7 @@ describe('Layer 2-5: Editorial Deck, Segmented Chapter Bar, Virtual Clock & Erro
       const enteringForward = container.querySelector('.page-sheet.is-active.is-entering');
       expect(exitingForward).toBeInTheDocument();
       expect(enteringForward).toBeInTheDocument();
-      expect(exitingForward!.textContent).toContain('今日要闻');
+      expect(exitingForward!.textContent).toContain('2026-11-16 资讯概览');
       expect(enteringForward!.textContent).toContain(SAMPLE_DAILY_ISSUE.items[0]!.title);
 
       // 推进定时器越过滑移过渡时长，验证离场页卸载
@@ -257,7 +265,7 @@ describe('Layer 2-5: Editorial Deck, Segmented Chapter Bar, Virtual Clock & Erro
       expect(exitingBack).toBeInTheDocument();
       expect(enteringBack).toBeInTheDocument();
       expect(exitingBack!.textContent).toContain(SAMPLE_DAILY_ISSUE.items[0]!.title);
-      expect(enteringBack!.textContent).toContain('今日要闻');
+      expect(enteringBack!.textContent).toContain('2026-11-16 资讯概览');
 
       await act(async () => {
         vi.advanceTimersByTime(PAGE_TURN_DURATION_MS.glide + 20);

@@ -1,3 +1,4 @@
+export * from './company-logos.js';
 export * from './compositor.js';
 export * from './cover.js';
 export * from './ffmpeg.js';

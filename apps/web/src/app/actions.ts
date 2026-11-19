@@ -588,6 +588,7 @@ export async function updateWorkflowSettingsAction(formData: FormData): Promise<
   try {
     const rawTtsProvider = formData.get('ttsProvider');
     const rawRenderTheme = formData.get('renderTheme');
+    const rawRenderLive2dPack = formData.get('renderLive2dPack');
     const rawBgmVolumeDb = formData.get('bgmVolumeDb');
     const parsed = z
       .object({
@@ -604,6 +605,7 @@ export async function updateWorkflowSettingsAction(formData: FormData): Promise<
         pauseAfterNarrate: z.boolean(),
         activeTemplate: z.string().trim().min(1),
         renderTheme: z.enum(['light', 'dark']).optional(),
+        renderLive2dPack: z.enum(['fullbody', 'expression']).optional(),
         pagePaddingSec: z.number().nonnegative(),
         bgmVolumeDb: z.number().min(-30).max(0).optional(),
         publishMode: z.enum(['manual-review', 'auto']),
@@ -637,6 +639,9 @@ export async function updateWorkflowSettingsAction(formData: FormData): Promise<
         activeTemplate: formData.get('activeTemplate'),
         ...(typeof rawRenderTheme === 'string' && rawRenderTheme.trim()
           ? { renderTheme: rawRenderTheme.trim() }
+          : {}),
+        ...(typeof rawRenderLive2dPack === 'string' && rawRenderLive2dPack.trim()
+          ? { renderLive2dPack: rawRenderLive2dPack.trim() }
           : {}),
         pagePaddingSec: parseRequiredNumberField(
           formData.get('pagePaddingSec'),
@@ -703,6 +708,7 @@ export async function updateWorkflowSettingsAction(formData: FormData): Promise<
       },
       render: {
         ...(parsed.renderTheme !== undefined ? { theme: parsed.renderTheme } : {}),
+        ...(parsed.renderLive2dPack !== undefined ? { live2dPack: parsed.renderLive2dPack } : {}),
         pagePaddingSec: parsed.pagePaddingSec,
         ...(parsed.bgmVolumeDb !== undefined ? { bgm: { volumeDb: parsed.bgmVolumeDb } } : {}),
       },
