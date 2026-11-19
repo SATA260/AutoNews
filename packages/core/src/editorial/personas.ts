@@ -11,8 +11,15 @@ import { parse } from 'yaml';
 import type { CoreContext } from '../context.js';
 
 const UNCONFIRMED_RUMOR_PATTERN = /(猜测|传闻|未获官方确认|尚未确认|尚未证实|流传|爆料|疑似)/i;
+const BENIGN_SECURITY_BENCH_PATTERN = /漏洞(?:发现|检测|识别|挖掘|验证|修复|扫描|评估|赏金)/g;
 const NEGATIVE_NEWS_PATTERN =
   /(限流|故障|致歉|差评|起诉|诉讼|调查|裁撤|裁员|涨价|不能支付|受限|报错|困境|宕机|封禁|封号|禁用|断供|翻车|争议|侵权|缩水|下架|漏洞|投诉|抗议|抵制|勒索|罚款|风波|停服|停摆|违约|索赔|败诉|批评|指责)/i;
+
+/** 剔除安全能力评测里的正向防御术语后再判断是否属于负面故障或争议动态 */
+function hasNegativeNewsSignal(text: string): boolean {
+  const sanitized = text.replace(BENIGN_SECURITY_BENCH_PATTERN, '');
+  return NEGATIVE_NEWS_PATTERN.test(sanitized);
+}
 
 /** 序列化主播人设提示词时的可选项，用于在已注入单条专属指引时隐藏无关场景模板。 */
 export interface FormatPersonaPromptOptions {
@@ -100,6 +107,7 @@ export function formatPersonaForPrompt(
     identityBio: persona.identityBio,
     coreTrait: persona.coreTrait,
     speakingStyle: persona.speakingStyle,
+    ...(persona.roastStyle ? { roastStyle: persona.roastStyle } : {}),
     stanceGuide: persona.stanceGuide,
     expressionRule:
       '人设与提示词里的示例只用来说明语气和切入方向，严禁原封不动照抄任何示范句，也严禁每期重复同一句口头禅；每次必须紧扣当前新闻里的具体公司、产品、数字或限制现写新句子。',
@@ -148,18 +156,19 @@ export async function describePersonaRelation(
   const isRivalCamp = !isOwnCamp && matched.length > 0;
   const fullText = `${event.title} ${extraText ?? ''}`;
 
+  const roastLens = persona.roastStyle ?? persona.coreTrait;
   let relationLabel = '第三方行业动态';
   let reactionHint = persona.topicKeywords.some((keyword) =>
     `${fullSubject} ${event.category ?? ''}`.toLowerCase().includes(keyword.toLowerCase()),
   )
-    ? '该话题踩在主播的关注兴趣点上，请用鲜活真人口语把核心亮点和限制讲透；如确有值得夸或明显不合理的地方，紧扣这条新闻的具体事实现写一句态度即可，普通细节勿硬演。'
-    : '用像真人朋友聊科技新闻一样的鲜活口语把核心事实讲透；遇到值得点赞或明显不合理的现象可顺嘴点破一句具体原因，普通中性资讯直接干净切入事实，不要硬凑感叹词。';
+    ? `该话题踩在主播的关注兴趣点上，请用鲜活真人口语把核心亮点和限制讲透；若新闻中存在付费门槛、官方短板、天价套现反差或体验限制，务必按主播性格的吐槽视角（${roastLens}）在口播里顺势补上一句紧扣事实的鲜活调侃或吐槽。`
+    : `用像真人朋友聊科技新闻一样的鲜活口语把核心事实讲透；若新闻中存在付费高门槛、只放预览、短板缺陷、天价估值套现反差或对用户不合理限制，别只写平淡叹息，按主播性格的吐槽视角（${roastLens}）在口播里顺嘴吐槽或调侃一句；纯中性事实则干净流畅聊清即可。`;
 
   if (isOwnCamp) {
     if (UNCONFIRMED_RUMOR_PATTERN.test(fullText)) {
       relationLabel = '原型关联未证实传闻';
       reactionHint = `这条传闻涉及你二创原型关联的 ${persona.affiliation}，但目前官方尚未确认；保持独立旁观主播的清醒视角，直呼具体公司或产品名播报线索，可用一句轻快调侃点明官方还没认，严禁提前当成官方消息或自称“我们”。`;
-    } else if (NEGATIVE_NEWS_PATTERN.test(fullText)) {
+    } else if (hasNegativeNewsSignal(fullText)) {
       relationLabel = '原型关联受限或争议动态';
       reactionHint = persona.ownFlawReaction;
     } else {
@@ -174,11 +183,12 @@ export async function describePersonaRelation(
   return [
     `主播自称：${persona.selfName}（角色定位：玩家根据各模型二创的独立虚拟主播；灵感原型关联方：${persona.affiliation}，并非该公司员工或官方发言人）。`,
     `本条新闻主体：${event.entity ?? event.title}；【本条新闻主体关系】：${relationLabel}。`,
+    `【主播性格与专属吐槽视角】：${roastLens}`,
     `【本条新闻专属反应指引】：${reactionHint}`,
     `【写稿防跑偏三条硬性检查】：`,
-    `1. 严禁照抄示例与重复口头禅：绝不复制人设或提示词里任何带引号的示范句，也不要每条都用“哈哈”“好家伙”“这波”“属实”开头；若要表达开心或吐槽，这句话里必须直接说出本条新闻里的具体动作、价格或限制，否则宁可直接切入事件主体。`,
+    `1. 严禁照抄示例与重复口头禅：绝不复制人设或提示词里任何带引号的示范句，也不要每条都用“哈哈”“好家伙”“这波”“属实”开头；口播是观众真正听见的内容，有槽点/反差/门槛时要把性格吐槽直接写进 narration 口播里，不要只藏在 hostComment 里或写成“可惜免费用户用不上”式平淡套话。`,
     `2. 严禁代表任何公司发言：播报 ${persona.affiliation} 及任何公司的新闻时，主语必须直呼具体公司或产品名（如“OpenAI发布了…”“Google推出了…”），严禁使用“我们”“我们公司”“我们团队”“我司”“自家”等代词。`,
-    `3. 严禁编造事实：所有反应和点评必须严格建立在原文已核实事实之上，不得脑补原文未提及的排名、功能、原因或数字。`,
+    `3. 严禁编造事实：所有反应和吐槽必须严格建立在原文已核实事实之上，不得脑补原文未提及的排名、功能、原因或数字。`,
   ].join('\n');
 }
 
@@ -194,7 +204,7 @@ export function deriveMascotMood(
       profile.campKeywords.some((keyword) => lower.includes(keyword.toLowerCase())),
     );
     if (matched.some((profile) => profile.id === hostId)) {
-      if (NEGATIVE_NEWS_PATTERN.test(subjectText)) {
+      if (hasNegativeNewsSignal(subjectText)) {
         return 'thinking';
       }
       return 'proud';

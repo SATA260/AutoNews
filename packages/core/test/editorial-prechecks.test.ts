@@ -148,7 +148,14 @@ describe('editorial foundation: prompts, similarity, and deterministic prechecks
       historyTitles: '（近期暂无已播事件）',
       candidates: '[]',
     });
-    expect(selectPrompt).toContain('新模型发布');
+    expect(selectPrompt).toContain('GPT');
+    expect(selectPrompt).toContain('Claude');
+    expect(selectPrompt).toContain('Gemini');
+    expect(selectPrompt).toContain('DeepSeek');
+    expect(selectPrompt).toContain('GLM');
+    expect(selectPrompt).toContain('Qwen');
+    expect(selectPrompt).toContain('业内顶尖');
+    expect(selectPrompt).toContain('能力一般或受众面窄的新模型降低优先级');
     expect(selectPrompt).toContain('Gemini 4 Neon');
     expect(selectPrompt).toContain('同一具体事件');
 
@@ -163,7 +170,8 @@ describe('editorial foundation: prompts, similarity, and deterministic prechecks
       coverTitleMax: '14',
       coverSubtitleMax: '22',
     });
-    expect(packagePrompt).toContain('公众最关注新模型发布');
+    expect(packagePrompt).toContain('重磅主流模型、顶尖突破或全局大事优先头条');
+    expect(packagePrompt).toContain('能力比较一般');
   });
 
   it('passes precheck for valid quotes (including 90% LCS) and normalized comma/full-width numbers', () => {

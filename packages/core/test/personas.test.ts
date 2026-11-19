@@ -129,6 +129,7 @@ describe('主播配置、情绪推导、口型包络提取与帧时间轴量化'
     for (const persona of personas) {
       expect(persona.affiliation.length).toBeGreaterThan(0);
       expect(persona.identityBio.length).toBeGreaterThan(10);
+      expect(persona.roastStyle && persona.roastStyle.length > 10).toBe(true);
       expect(persona.ownGoodReaction.length).toBeGreaterThan(10);
       expect(persona.ownFlawReaction.length).toBeGreaterThan(10);
       expect(persona.rivalReaction.length).toBeGreaterThan(5);
@@ -140,6 +141,7 @@ describe('主播配置、情绪推导、口型包络提取与帧时间轴量化'
       expect(formattedJson).toContain('characterOrigin');
       expect(formattedJson).toContain('绝非该公司员工、成员或官方发言人');
       expect(formattedJson).toContain('expressionRule');
+      expect(formattedJson).toContain('roastStyle');
       expect(formattedJson).toContain('严禁原封不动照抄');
       expect(formattedJson).not.toContain('"affiliation"');
       expect(formattedJson).not.toContain('哈哈，我Gemini又站起来了');
@@ -147,6 +149,7 @@ describe('主播配置、情绪推导、口型包络提取与帧时间轴量化'
       const compactPersonaJson = formatPersonaForPrompt(persona, '无特定角色', {
         includeReactions: false,
       });
+      expect(compactPersonaJson).toContain('roastStyle');
       expect(compactPersonaJson).not.toContain('prototypeGoodNewsReaction');
       expect(compactPersonaJson).not.toContain('prototypeNegativeNewsReaction');
       expect(compactPersonaJson).not.toContain('otherModelNewsReaction');
@@ -171,7 +174,9 @@ describe('主播配置、情绪推导、口型包络提取与帧时间轴量化'
     expect(polishPrompt).toContain('客观、合理、正义');
     expect(polishPrompt).toContain('严禁照抄任何示例原句');
     expect(polishPrompt).toContain('❌ 错误一');
+    expect(polishPrompt).toContain('❌ 错误三');
     expect(polishPrompt).toContain('✅ 正确改写');
+    expect(polishPrompt).toContain('roastStyle');
 
     const revisePrompt = await renderPromptTemplate('s4-revise.md', {
       previousItemJson: '{}',
@@ -221,11 +226,26 @@ describe('主播配置、情绪推导、口型包络提取与帧时间轴量化'
         id: 'ev-google-good',
         title: 'Google 将 Gemini 下放到 Android Go 低内存设备',
       },
+      {
+        ...event('Google DeepMind', '模型'),
+        id: 'ev-google-security-bench',
+        title: 'Google DeepMind 发布 Gemini 4 Neon 模型',
+      },
+      {
+        ...event('Mistral', '融资'),
+        id: 'ev-third-party',
+        title: 'Mistral 完成 30 亿欧元融资',
+      },
     ];
     const relationItems = new Map<string, { id: string; eventId: string }>([
       ['item-openai', { id: 'item-openai', eventId: 'ev-openai' }],
       ['item-google-flaw', { id: 'item-google-flaw', eventId: 'ev-google-flaw' }],
       ['item-google-good', { id: 'item-google-good', eventId: 'ev-google-good' }],
+      [
+        'item-google-security-bench',
+        { id: 'item-google-security-bench', eventId: 'ev-google-security-bench' },
+      ],
+      ['item-third-party', { id: 'item-third-party', eventId: 'ev-third-party' }],
     ]);
     const mockCtx = {
       paths: { rootDir: root },
@@ -270,6 +290,27 @@ describe('主播配置、情绪推导、口型包络提取与帧时间轴量化'
     );
     expect(ownRollout).toContain('原型关联生态新进展');
     expect(ownRollout).not.toContain('哈哈，我Gemini又站起来了');
+
+    // 安全评测中的“漏洞发现/验证”等正向术语不应误触发负面争议分类
+    const ownSecurityBenchWin = await describePersonaRelation(
+      mockCtx,
+      'run',
+      'item-google-security-bench',
+      '在 SEC-bench Pro 漏洞发现和防滥用评测中排名领先',
+    );
+    expect(ownSecurityBenchWin).toContain('原型关联生态新进展');
+    expect(ownSecurityBenchWin).toContain('【主播性格与专属吐槽视角】');
+
+    // 第三方行业新闻同样携带主播自身的性格吐槽视角
+    const thirdPartyWithRoastLens = await describePersonaRelation(
+      mockCtx,
+      'run',
+      'item-third-party',
+      '投后估值超 210 亿欧元，企业级服务门槛较高',
+    );
+    expect(thirdPartyWithRoastLens).toContain('第三方行业动态');
+    expect(thirdPartyWithRoastLens).toContain('【主播性格与专属吐槽视角】');
+    expect(thirdPartyWithRoastLens).toContain('元气直爽玩家吐槽');
 
     const gemini = byId.get('gemini');
     const rejected = precheckIssuePackage({

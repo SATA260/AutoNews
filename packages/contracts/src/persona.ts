@@ -17,6 +17,7 @@ export const PersonaProfileSchema = z.object({
   themeAccent: z.string().min(1),
   coreTrait: z.string().min(1),
   speakingStyle: z.string().min(1),
+  roastStyle: z.string().min(1).optional(),
   stanceGuide: z.string().min(1),
   ownGoodReaction: z.string().min(1),
   ownFlawReaction: z.string().min(1),
