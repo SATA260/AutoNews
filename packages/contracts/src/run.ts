@@ -272,3 +272,33 @@ export const DoctorReportSchema = z.object({
 });
 /** 系统环境自检报告类型 */
 export type DoctorReport = z.infer<typeof DoctorReportSchema>;
+
+/** 批量删除任务或清理任务产物的处理模式 */
+export const DeleteRunsModeSchema = z.enum(['artifacts_only', 'full']);
+/** 批量删除任务处理模式：artifacts_only 仅删除本地产物文件保留任务记录；full 彻底删除任务记录及产物目录 */
+export type DeleteRunsMode = z.infer<typeof DeleteRunsModeSchema>;
+
+/** 选择性或按时间范围删除任务及产物的请求参数 */
+export const DeleteRunsInputSchema = z.object({
+  runIds: z.array(z.string().trim().min(1)).optional(),
+  statuses: z.array(RunStatusSchema).min(1).optional(),
+  from: z.string().trim().min(1).optional(),
+  to: z.string().trim().min(1).optional(),
+  mode: DeleteRunsModeSchema,
+  dryRun: z.boolean().optional(),
+});
+/** 选择性或按时间范围删除任务及产物的请求参数类型 */
+export type DeleteRunsInput = z.input<typeof DeleteRunsInputSchema>;
+
+/** 预演或执行任务及产物删除后的汇总结果 */
+export const DeleteRunsResultSchema = z.object({
+  dryRun: z.boolean(),
+  mode: DeleteRunsModeSchema,
+  matchedCount: z.number().int().nonnegative(),
+  affectedRunIds: z.array(z.string()),
+  skippedProtectedRunIds: z.array(z.string()),
+  releasedArticlesCount: z.number().int().nonnegative(),
+  reclaimedBytes: z.number().int().nonnegative(),
+});
+/** 预演或执行任务及产物删除后的汇总结果类型 */
+export type DeleteRunsResult = z.infer<typeof DeleteRunsResultSchema>;

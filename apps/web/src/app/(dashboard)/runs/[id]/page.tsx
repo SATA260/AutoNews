@@ -14,10 +14,12 @@ import { RunCancelButton } from '@/components/RunCancelAndItemActions';
 import { CoverEditor } from '@/components/run-detail/CoverEditor';
 import { MediaAdjustments } from '@/components/run-detail/MediaAdjustments';
 import { NarrationSectionEditor } from '@/components/run-detail/NarrationSectionEditor';
+import { RunDeleteButtons } from '@/components/run-detail/RunDeleteButtons';
 import { RunItemsTab } from '@/components/run-detail/RunItemsTab';
 import { RunLlmTab } from '@/components/run-detail/RunLlmTab';
 import { RunMediaTab } from '@/components/run-detail/RunMediaTab';
 import { RunProgressTab } from '@/components/run-detail/RunProgressTab';
+import { RunReviewQuickBar } from '@/components/run-detail/RunReviewQuickBar';
 import { getCore } from '@/lib/core';
 import {
   formatDuration,
@@ -70,9 +72,16 @@ export default async function RunDetailPage({
   }
 
   const settings = core.config.getSettings();
-  const retryOptions = await core.tasks.getRetryOptions(id);
+  const [retryOptions, diskUsageMap] = await Promise.all([
+    core.tasks.getRetryOptions(id),
+    core.tasks.listRunDiskUsage([detail.id]),
+  ]);
+  const diskBytes = diskUsageMap[detail.id] ?? 0;
   const isActive =
     detail.status === 'running' || detail.status === 'queued' || detail.status === 'publishing';
+  const showQuickReviewBar =
+    (detail.status === 'awaiting_review' || detail.status === 'publish_failed') &&
+    activeTab !== 'publish';
   const selectDone = detail.stages.some((s) => s.stage === 'select' && s.status === 'done');
   const canRetryItems = RETRYABLE_RUN_STATUSES.includes(detail.status) && selectDone;
 
@@ -116,7 +125,10 @@ export default async function RunDetailPage({
             </div>
           </div>
 
-          {isActive ? <RunCancelButton runId={detail.id} /> : null}
+          <div className="flex flex-wrap items-center gap-2">
+            {isActive ? <RunCancelButton runId={detail.id} /> : null}
+            <RunDeleteButtons runId={detail.id} runStatus={detail.status} diskBytes={diskBytes} />
+          </div>
         </div>
 
         {detail.error || detail.errorCode ? (
@@ -150,6 +162,10 @@ export default async function RunDetailPage({
           })}
         </nav>
       </div>
+
+      {showQuickReviewBar ? (
+        <RunReviewQuickBar runId={detail.id} runStatus={detail.status} />
+      ) : null}
 
       {activeTab === 'progress'
         ? await (async () => {

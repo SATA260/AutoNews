@@ -2,6 +2,13 @@
 
 import {
   AiStageNameSchema,
+  type ArticleDetail,
+  type DeleteArticlesInput,
+  DeleteArticlesInputSchema,
+  type DeleteArticlesResult,
+  type DeleteRunsInput,
+  DeleteRunsInputSchema,
+  type DeleteRunsResult,
   type DoctorReport,
   HostMascotIdSchema,
   PIPELINE_STAGES,
@@ -14,7 +21,7 @@ import {
 import { revalidatePath } from 'next/cache';
 import { z } from 'zod';
 import { getCore } from '@/lib/core';
-import { STAGE_LABELS } from '@/lib/format';
+import { formatBytes, STAGE_LABELS } from '@/lib/format';
 
 /** 网页端提交操作后的统一响应结构 */
 export interface ActionResult<T = undefined> {
@@ -362,7 +369,7 @@ export async function rejectPublishAction(formData: FormData): Promise<ActionRes
   }
 }
 
-/** 跳过投稿直接将本期选用新闻归入历史已播库 */
+/** 审核通过但不上传视频，直接将本期选用新闻归入历史已播库 */
 export async function markConsumedAction(formData: FormData): Promise<ActionResult> {
   try {
     const runId = RunIdSchema.parse(formData.get('runId'));
@@ -371,8 +378,9 @@ export async function markConsumedAction(formData: FormData): Promise<ActionResu
     safeRevalidate('/');
     safeRevalidate('/runs');
     safeRevalidate('/history');
+    safeRevalidate('/articles');
     safeRevalidate(`/runs/${runId}`);
-    return { ok: true, message: '已跳过平台投稿并提交本期新闻到已播历史库' };
+    return { ok: true, message: '已审核通过（不上传视频），本期新闻已记入已播历史' };
   } catch (err) {
     return { ok: false, error: err instanceof Error ? err.message : String(err) };
   }
@@ -929,5 +937,104 @@ export async function setRunBgmAction(formData: FormData): Promise<ActionResult>
     return { ok: true, message: '背景音乐已保存，请重新合成视频' };
   } catch (error) {
     return { ok: false, error: error instanceof Error ? error.message : String(error) };
+  }
+}
+
+const ArticleIdSchema = z.string().trim().min(1, '文章 ID 不能为空');
+
+/** 读取单篇已抓取新闻文章的正文全文与候选配图明细 */
+export async function getArticleDetailAction(
+  articleId: string,
+): Promise<ActionResult<ArticleDetail>> {
+  try {
+    const id = ArticleIdSchema.parse(articleId);
+    const core = await getCore();
+    const detail = await core.articles.getDetail(id);
+    return { ok: true, data: detail };
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+  }
+}
+
+/** 预演选择性或按时间范围删除已抓取新闻文章，返回受影响范围与预计回收空间 */
+export async function previewDeleteArticlesAction(
+  input: DeleteArticlesInput,
+): Promise<ActionResult<DeleteArticlesResult>> {
+  try {
+    const parsed = DeleteArticlesInputSchema.parse(input);
+    const core = await getCore();
+    const result = await core.articles.delete({ ...parsed, dryRun: true });
+    return { ok: true, data: result };
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+  }
+}
+
+/** 正式执行选择性或按时间范围删除已抓取新闻文章，并同步清理关联缓存文件 */
+export async function deleteArticlesAction(
+  input: DeleteArticlesInput,
+): Promise<ActionResult<DeleteArticlesResult>> {
+  try {
+    const parsed = DeleteArticlesInputSchema.parse(input);
+    const core = await getCore();
+    const result = await core.articles.delete({ ...parsed, dryRun: false });
+    safeRevalidate('/articles');
+    safeRevalidate('/');
+    const skippedNote =
+      result.skippedReservedCount > 0
+        ? `（另有 ${result.skippedReservedCount} 篇正被任务占用已自动跳过）`
+        : '';
+    return {
+      ok: true,
+      data: result,
+      message: `已删除 ${result.deletedCount} 篇爬取文章及 ${result.deletedFileCount} 个本地文件，释放 ${formatBytes(result.reclaimedBytes)}${skippedNote}`,
+    };
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+  }
+}
+
+/** 预演选择性或按时间范围删除任务记录或磁盘产物，返回受影响期数与空间统计 */
+export async function previewDeleteRunsAction(
+  input: DeleteRunsInput,
+): Promise<ActionResult<DeleteRunsResult>> {
+  try {
+    const parsed = DeleteRunsInputSchema.parse(input);
+    const core = await getCore();
+    const result = await core.tasks.deleteRuns({ ...parsed, dryRun: true });
+    return { ok: true, data: result };
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+  }
+}
+
+/** 正式执行选择性或按时间范围删除任务记录或仅清理任务磁盘产物 */
+export async function deleteRunsAction(
+  input: DeleteRunsInput,
+): Promise<ActionResult<DeleteRunsResult>> {
+  try {
+    const parsed = DeleteRunsInputSchema.parse(input);
+    const core = await getCore();
+    const result = await core.tasks.deleteRuns({ ...parsed, dryRun: false });
+    safeRevalidate('/');
+    safeRevalidate('/runs');
+    safeRevalidate('/articles');
+    for (const runId of result.affectedRunIds) {
+      safeRevalidate(`/runs/${runId}`);
+    }
+    const modeLabel = result.mode === 'artifacts_only' ? '清理磁盘产物' : '彻底删除任务及产物';
+    const skippedNote =
+      result.skippedProtectedRunIds.length > 0
+        ? `（另有 ${result.skippedProtectedRunIds.length} 期进行中或待核实投稿任务已跳过）`
+        : '';
+    const releasedNote =
+      result.releasedArticlesCount > 0 ? `，释放 ${result.releasedArticlesCount} 篇占用文章` : '';
+    return {
+      ok: true,
+      data: result,
+      message: `已对 ${result.affectedRunIds.length} 期任务执行「${modeLabel}」${releasedNote}，回收 ${formatBytes(result.reclaimedBytes)}${skippedNote}`,
+    };
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
   }
 }

@@ -262,63 +262,88 @@ export function PublishControls({
           </div>
 
           {canEdit && (
-            <div className="flex flex-wrap items-center gap-2 pt-2">
-              <button
-                type="submit"
-                disabled={isPending}
-                className="rounded-lg border border-slate-300 bg-white px-4 py-2 text-xs font-medium text-slate-800 hover:bg-slate-50 disabled:opacity-50"
-              >
-                保存修改文案
-              </button>
+            <div className="space-y-2 pt-2">
+              <div className="flex flex-wrap items-center gap-2">
+                <button
+                  type="submit"
+                  disabled={isPending}
+                  className="rounded-lg border border-slate-300 bg-white px-4 py-2 text-xs font-medium text-slate-800 hover:bg-slate-50 disabled:opacity-50"
+                >
+                  保存修改文案
+                </button>
 
-              {runStatus === 'awaiting_review' && (
+                {runStatus === 'awaiting_review' && (
+                  <button
+                    type="button"
+                    disabled={isPending || mediaDirty}
+                    onClick={() => {
+                      const fd = new FormData();
+                      fd.set('runId', runId);
+                      runActionWithAutoSave(() => approvePublishAction(fd));
+                    }}
+                    className="rounded-lg bg-slate-900 px-4 py-2 text-xs font-medium text-white hover:bg-slate-800 disabled:opacity-50"
+                  >
+                    确认审核通过并投稿 B 站
+                  </button>
+                )}
+
+                {runStatus === 'publish_failed' && (
+                  <button
+                    type="button"
+                    disabled={isPending || mediaDirty}
+                    onClick={() => {
+                      const fd = new FormData();
+                      fd.set('runId', runId);
+                      runActionWithAutoSave(() => retryPublishAction(fd));
+                    }}
+                    className="rounded-lg bg-slate-900 px-4 py-2 text-xs font-medium text-white hover:bg-slate-800 disabled:opacity-50"
+                  >
+                    重试投稿 B 站
+                  </button>
+                )}
+
                 <button
                   type="button"
-                  disabled={isPending || mediaDirty}
+                  disabled={isPending}
                   onClick={() => {
                     const fd = new FormData();
                     fd.set('runId', runId);
-                    runActionWithAutoSave(() => approvePublishAction(fd));
+                    runActionWithAutoSave(() => markConsumedAction(fd));
                   }}
-                  className="rounded-lg bg-slate-900 px-4 py-2 text-xs font-medium text-white hover:bg-slate-800 disabled:opacity-50"
+                  className="rounded-lg border border-emerald-600 bg-emerald-600 px-4 py-2 text-xs font-medium text-white hover:bg-emerald-700 disabled:opacity-50"
                 >
-                  确认审核通过并投稿 B 站
+                  审核通过（不上传视频）
                 </button>
-              )}
-
-              {runStatus === 'publish_failed' && (
-                <button
-                  type="button"
-                  disabled={isPending || mediaDirty}
-                  onClick={() => {
-                    const fd = new FormData();
-                    fd.set('runId', runId);
-                    runActionWithAutoSave(() => retryPublishAction(fd));
-                  }}
-                  className="rounded-lg bg-slate-900 px-4 py-2 text-xs font-medium text-white hover:bg-slate-800 disabled:opacity-50"
-                >
-                  重试投稿 B 站
-                </button>
-              )}
-
+              </div>
+              <p className="text-xs text-slate-500">
+                点击「审核通过（不上传视频）」会保存文案修改、把本期新闻记入已播历史并标记任务完成，但不会向
+                B 站上传视频。
+              </p>
+            </div>
+          )}
+        </form>
+      ) : (
+        <div className="space-y-3 rounded-xl border border-slate-200 bg-white p-5 text-sm text-slate-600 shadow-sm">
+          <p>整期编排与时间轴尚未生成，完成后此处将显示待审核投稿草稿。</p>
+          {canEdit && (
+            <div className="flex flex-wrap items-center gap-3">
               <button
                 type="button"
                 disabled={isPending}
                 onClick={() => {
                   const fd = new FormData();
                   fd.set('runId', runId);
-                  runActionWithAutoSave(() => markConsumedAction(fd));
+                  runAction(() => markConsumedAction(fd));
                 }}
-                className="rounded-lg border border-emerald-300 bg-emerald-50 px-4 py-2 text-xs font-medium text-emerald-800 hover:bg-emerald-100 disabled:opacity-50"
+                className="rounded-lg border border-emerald-600 bg-emerald-600 px-4 py-2 text-xs font-medium text-white hover:bg-emerald-700 disabled:opacity-50"
               >
-                不发布平台，仅计入已播历史
+                审核通过（不上传视频）
               </button>
+              <span className="text-xs text-slate-500">
+                仅将本期新闻记入已播历史并标记任务完成，不向 B 站上传视频。
+              </span>
             </div>
           )}
-        </form>
-      ) : (
-        <div className="rounded-xl border border-slate-200 bg-white p-5 text-sm text-slate-600 shadow-sm">
-          整期编排与时间轴尚未生成，完成后此处将显示待审核投稿草稿。
         </div>
       )}
 

@@ -35,7 +35,7 @@ export interface CleanupStorageResult {
 }
 
 /** 递归统计文件或目录占用的磁盘字节数，路径不存在时返回 0 */
-async function measurePathBytes(targetPath: string): Promise<number> {
+export async function measurePathBytes(targetPath: string): Promise<number> {
   try {
     const st = await fs.lstat(targetPath);
     if (!st.isDirectory()) {
@@ -53,6 +53,38 @@ async function measurePathBytes(targetPath: string): Promise<number> {
     }
     throw err;
   }
+}
+
+/**
+ * 在已有数据库事务内按外键依赖顺序级联删除单期任务全部关联记录，
+ * 释放该任务仍占用的文章、清空定时任务最近引用，并保留历史已播防重表。
+ */
+export function cascadeDeleteRunInTx(
+  ctx: CoreContext,
+  runId: string,
+): { removedRunEvents: number; removedLlmCalls: number; releasedArticles: number } {
+  const resCalls = ctx.db.prepare('DELETE FROM llm_calls WHERE run_id = ?').run(runId);
+  const resEvents = ctx.db.prepare('DELETE FROM run_events WHERE run_id = ?').run(runId);
+
+  ctx.db
+    .prepare(
+      'DELETE FROM item_versions WHERE item_id IN (SELECT id FROM run_items WHERE run_id = ?)',
+    )
+    .run(runId);
+  ctx.db.prepare('DELETE FROM run_items WHERE run_id = ?').run(runId);
+  ctx.db.prepare('DELETE FROM run_stages WHERE run_id = ?').run(runId);
+  ctx.db.prepare('DELETE FROM events WHERE run_id = ?').run(runId);
+  ctx.db.prepare('DELETE FROM publish_records WHERE run_id = ?').run(runId);
+
+  const releasedArticles = ctx.repos.articles.releaseByRun(runId);
+  ctx.db.prepare('UPDATE schedules SET last_run_id = NULL WHERE last_run_id = ?').run(runId);
+  ctx.db.prepare('DELETE FROM runs WHERE id = ?').run(runId);
+
+  return {
+    removedRunEvents: Number(resEvents.changes),
+    removedLlmCalls: Number(resCalls.changes),
+    releasedArticles,
+  };
 }
 
 /** 校验正整数清理阈值参数 */
@@ -153,23 +185,9 @@ export async function cleanupStorage(
   } else {
     inTransaction(ctx.db, () => {
       for (const candidate of candidateRuns) {
-        const resCalls = ctx.db.prepare('DELETE FROM llm_calls WHERE run_id = ?').run(candidate.id);
-        const resEvents = ctx.db
-          .prepare('DELETE FROM run_events WHERE run_id = ?')
-          .run(candidate.id);
-        removedLlmCalls += Number(resCalls.changes);
-        removedRunEvents += Number(resEvents.changes);
-
-        ctx.db
-          .prepare(
-            'DELETE FROM item_versions WHERE item_id IN (SELECT id FROM run_items WHERE run_id = ?)',
-          )
-          .run(candidate.id);
-        ctx.db.prepare('DELETE FROM run_items WHERE run_id = ?').run(candidate.id);
-        ctx.db.prepare('DELETE FROM run_stages WHERE run_id = ?').run(candidate.id);
-        ctx.db.prepare('DELETE FROM events WHERE run_id = ?').run(candidate.id);
-        ctx.db.prepare('DELETE FROM publish_records WHERE run_id = ?').run(candidate.id);
-        ctx.db.prepare('DELETE FROM runs WHERE id = ?').run(candidate.id);
+        const stats = cascadeDeleteRunInTx(ctx, candidate.id);
+        removedLlmCalls += stats.removedLlmCalls;
+        removedRunEvents += stats.removedRunEvents;
       }
 
       const orphanEvRes = ctx.db

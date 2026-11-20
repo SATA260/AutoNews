@@ -10,6 +10,7 @@ const NAV_ITEMS = [
   { href: '/runs', label: '任务列表' },
   { href: '/schedules', label: '定时任务' },
   { href: '/sources', label: '信源管理' },
+  { href: '/articles', label: '爬取新闻' },
   { href: '/history', label: '已播历史' },
   { href: '/settings', label: '系统设置' },
 ] as const;

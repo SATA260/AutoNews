@@ -5,6 +5,10 @@ import path from 'node:path';
 import {
   type Article,
   type ArticleMediaAsset,
+  type DeleteRunsInput,
+  DeleteRunsInputSchema,
+  type DeleteRunsResult,
+  DeleteRunsResultSchema,
   type HostMascotId,
   HostMascotIdSchema,
   type ItemVersion,
@@ -56,6 +60,8 @@ import {
   resumeRun,
   retryRunItems,
 } from '../workflow/runner.js';
+import { cascadeDeleteRunInTx, measurePathBytes } from './retention.js';
+import { resolveTimeRangeBounds } from './time-filter.js';
 
 /** 带有正文原文内容的新闻文章详情，用于管理后台核对出处与原稿 */
 export interface RunArticleWithContent extends Article {
@@ -146,8 +152,18 @@ export interface TaskService {
   abandon(runId: string): Promise<void>;
   /** 发出取消请求以安全停止正在执行中的任务 */
   cancel(runId: string): Promise<void>;
-  /** 分页或按状态筛选查询历史任务摘要列表 */
-  list(q?: { status?: RunStatus[]; limit?: number; before?: string }): Promise<RunSummary[]>;
+  /** 分页或按状态及创建时间范围筛选查询历史任务摘要列表 */
+  list(q?: {
+    status?: RunStatus[];
+    from?: string;
+    to?: string;
+    limit?: number;
+    before?: string;
+  }): Promise<RunSummary[]>;
+  /** 批量测算指定期次任务目录占用的本地磁盘空间字节数 */
+  listRunDiskUsage(runIds: string[]): Promise<Record<string, number>>;
+  /** 预演或执行选择性及按时间筛选删除任务记录或其本地磁盘产物，自动保护运行中及待核对投稿任务 */
+  deleteRuns(input: DeleteRunsInput): Promise<DeleteRunsResult>;
   /** 仅读取单期任务的核心状态摘要，不加载明细条目和扫描磁盘产物目录 */
   getSummary(runId: string): Promise<RunSummary>;
   /** 读取单期任务的完整执行详情、阶段进度、新闻条目、投稿记录及可选产物清单 */
@@ -480,6 +496,28 @@ async function saveCustomUploadedImage(runDir: string, bytes: Uint8Array): Promi
   const relative = path.posix.join('custom-assets', `${crypto.randomUUID()}.${extension}`);
   await writeFileAtomic(path.join(runDir, relative), data);
   return relative;
+}
+
+/** 禁止删除任务或清理本地产物的受保护运行状态集合 */
+const PROTECTED_RUN_STATUSES = new Set<RunStatus>([
+  'queued',
+  'running',
+  'publishing',
+  'publish_uncertain',
+]);
+
+/** 校验并解析位于任务根目录内部的单期任务目录路径，非法标识返回 null */
+function resolveSafeRunDirPath(ctx: CoreContext, runId: string): string | null {
+  try {
+    const candidate = path.resolve(ctx.paths.runDir(runId));
+    const baseRunsDir = path.resolve(ctx.paths.runsDir);
+    if (!candidate.startsWith(`${baseRunsDir}${path.sep}`)) {
+      return null;
+    }
+    return candidate;
+  } catch {
+    return null;
+  }
 }
 
 /** 创建任务管理服务，供命令行和网页后台管理任务、监听事件和读取产物 */
@@ -918,13 +956,199 @@ export function createTaskService(ctx: CoreContext): TaskService {
       cancelRun(ctx, runId);
     },
 
-    /** 查询任务历史摘要列表 */
+    /** 查询任务历史摘要列表（支持按状态与本地创建时间范围筛选） */
     async list(q?: {
       status?: RunStatus[];
+      from?: string;
+      to?: string;
       limit?: number;
       before?: string;
     }): Promise<RunSummary[]> {
-      return ctx.repos.runs.list(q);
+      const bounds =
+        q?.from || q?.to
+          ? resolveTimeRangeBounds({
+              from: q.from,
+              to: q.to,
+              timezone: ctx.settings.timezone,
+            })
+          : {};
+      return ctx.repos.runs.list({
+        status: q?.status,
+        fromIso: bounds.fromIso,
+        toIso: bounds.toIso,
+        limit: q?.limit,
+        before: q?.before,
+      });
+    },
+
+    /** 并发统计多个期次产物目录所占用的磁盘字节大小 */
+    async listRunDiskUsage(runIds: string[]): Promise<Record<string, number>> {
+      const uniqueIds = Array.from(new Set(runIds.map((id) => id.trim()).filter(Boolean)));
+      const entries = await Promise.all(
+        uniqueIds.map(async (runId): Promise<readonly [string, number]> => {
+          const safeDir = resolveSafeRunDirPath(ctx, runId);
+          if (!safeDir) {
+            return [runId, 0];
+          }
+          const bytes = await measurePathBytes(safeDir);
+          return [runId, bytes];
+        }),
+      );
+      return Object.fromEntries(entries);
+    },
+
+    /** 预演或执行批量删除任务或仅清理本地磁盘产物（保留已播防重历史并自动保护进行中任务） */
+    async deleteRuns(rawInput: DeleteRunsInput): Promise<DeleteRunsResult> {
+      const parsed = DeleteRunsInputSchema.parse(rawInput);
+      const uniqueRunIds = parsed.runIds
+        ? Array.from(new Set(parsed.runIds.map((id) => id.trim()).filter(Boolean)))
+        : undefined;
+
+      const hasIds = Boolean(uniqueRunIds && uniqueRunIds.length > 0);
+      const hasFilters = Boolean(
+        parsed.from || parsed.to || (parsed.statuses && parsed.statuses.length > 0),
+      );
+      if (!hasIds && !hasFilters) {
+        throw new Error('请至少勾选具体任务或指定时间范围/状态条件后再执行删除');
+      }
+
+      const { fromIso, toIso } = resolveTimeRangeBounds({
+        from: parsed.from,
+        to: parsed.to,
+        timezone: ctx.settings.timezone,
+      });
+
+      const matched = ctx.repos.runs.findMatching({
+        ...(uniqueRunIds !== undefined ? { runIds: uniqueRunIds } : {}),
+        statuses: parsed.statuses,
+        fromIso,
+        toIso,
+      });
+
+      const lockedRunId = ctx.repos.locks.get(PIPELINE_LOCK_NAME)?.ownerRun ?? null;
+      const candidates: RunSummary[] = [];
+      const skippedProtectedRunIds: string[] = [];
+
+      for (const run of matched) {
+        if (PROTECTED_RUN_STATUSES.has(run.status) || run.id === lockedRunId) {
+          skippedProtectedRunIds.push(run.id);
+        } else {
+          candidates.push(run);
+        }
+      }
+
+      const bytesByRunId = new Map<string, number>();
+      await Promise.all(
+        candidates.map(async (run) => {
+          const safeDir = resolveSafeRunDirPath(ctx, run.id);
+          const bytes = safeDir ? await measurePathBytes(safeDir) : 0;
+          bytesByRunId.set(run.id, bytes);
+        }),
+      );
+
+      const dryRun = Boolean(parsed.dryRun);
+      if (dryRun) {
+        let releasedArticlesCount = 0;
+        let reclaimedBytes = 0;
+        for (const run of candidates) {
+          reclaimedBytes += bytesByRunId.get(run.id) ?? 0;
+          if (parsed.mode === 'full') {
+            const reservedRow = ctx.db
+              .prepare(
+                "SELECT COUNT(*) AS cnt FROM articles WHERE reserved_by_run = ? AND status = 'reserved'",
+              )
+              .get(run.id) as { cnt: number };
+            releasedArticlesCount += reservedRow.cnt;
+          }
+        }
+        return DeleteRunsResultSchema.parse({
+          dryRun: true,
+          mode: parsed.mode,
+          matchedCount: matched.length,
+          affectedRunIds: candidates.map((c) => c.id),
+          skippedProtectedRunIds,
+          releasedArticlesCount,
+          reclaimedBytes,
+        });
+      }
+
+      const affectedRunIds: string[] = [];
+      let releasedArticlesCount = 0;
+      let reclaimedBytes = 0;
+
+      if (parsed.mode === 'full') {
+        inTransaction(ctx.db, () => {
+          const freshLockOwner = ctx.repos.locks.get(PIPELINE_LOCK_NAME)?.ownerRun ?? null;
+          for (const candidate of candidates) {
+            const freshRun = ctx.repos.runs.getById(candidate.id);
+            if (!freshRun) {
+              continue;
+            }
+            if (PROTECTED_RUN_STATUSES.has(freshRun.status) || freshRun.id === freshLockOwner) {
+              skippedProtectedRunIds.push(freshRun.id);
+              continue;
+            }
+            const stats = cascadeDeleteRunInTx(ctx, freshRun.id);
+            releasedArticlesCount += stats.releasedArticles;
+            affectedRunIds.push(freshRun.id);
+          }
+        });
+
+        for (const runId of affectedRunIds) {
+          const safeDir = resolveSafeRunDirPath(ctx, runId);
+          if (!safeDir) {
+            continue;
+          }
+          const dirBytes = await measurePathBytes(safeDir);
+          await fs.rm(safeDir, { recursive: true, force: true });
+          reclaimedBytes += dirBytes;
+        }
+      } else {
+        for (const candidate of candidates) {
+          const allowed = inTransaction(ctx.db, () => {
+            const freshLockOwner = ctx.repos.locks.get(PIPELINE_LOCK_NAME)?.ownerRun ?? null;
+            const freshRun = ctx.repos.runs.getById(candidate.id);
+            if (!freshRun) {
+              return false;
+            }
+            if (PROTECTED_RUN_STATUSES.has(freshRun.status) || freshRun.id === freshLockOwner) {
+              skippedProtectedRunIds.push(freshRun.id);
+              return false;
+            }
+            ctx.db
+              .prepare('UPDATE run_stages SET checkpoint_path = NULL WHERE run_id = ?')
+              .run(freshRun.id);
+            emitRunEvent(ctx, {
+              runId: freshRun.id,
+              level: 'info',
+              type: 'artifacts_cleared',
+              message: '已清理本期任务的本地磁盘产物目录（保留任务记录与数据库文稿）',
+            });
+            return true;
+          });
+          if (!allowed) {
+            continue;
+          }
+          affectedRunIds.push(candidate.id);
+          const safeDir = resolveSafeRunDirPath(ctx, candidate.id);
+          if (!safeDir) {
+            continue;
+          }
+          const dirBytes = await measurePathBytes(safeDir);
+          await fs.rm(safeDir, { recursive: true, force: true });
+          reclaimedBytes += dirBytes;
+        }
+      }
+
+      return DeleteRunsResultSchema.parse({
+        dryRun: false,
+        mode: parsed.mode,
+        matchedCount: matched.length,
+        affectedRunIds,
+        skippedProtectedRunIds,
+        releasedArticlesCount,
+        reclaimedBytes,
+      });
     },
 
     /** 仅查询单期任务摘要，避免走全量详情与磁盘目录递归 */

@@ -8,7 +8,13 @@ import { createRun, editSettingsFile, emitRunEvent, writeJsonAtomic } from '@aid
 import { afterEach, describe, expect, it } from 'vitest';
 import {
   createScheduleAction,
+  deleteArticlesAction,
+  deleteRunsAction,
+  getArticleDetailAction,
   loadModelRoutesAction,
+  markConsumedAction,
+  previewDeleteArticlesAction,
+  previewDeleteRunsAction,
   removeModelApiConnectionAction,
   runDoctorCheckAction,
   saveModelApiConnectionAction,
@@ -893,5 +899,129 @@ describe('apps/web routes and Server Actions', () => {
       }) as unknown as Parameters<typeof proxy>[0],
     );
     expect(validTokenProxy.status).toBe(200);
+  });
+
+  it('supports approve-without-upload, article detail lookup, and selective/time-based deletion Server Actions', async () => {
+    const rootDir = await setupWebTestWorkspace();
+    const core = await getCore();
+
+    // 1. 测试审核通过但不上传视频（markConsumedAction）
+    const { runId: reviewRunId } = await seedReviewReadyRun();
+    const consumeFd = new FormData();
+    consumeFd.set('runId', reviewRunId);
+    const consumeRes = await markConsumedAction(consumeFd);
+    expect(consumeRes.ok).toBe(true);
+    expect(consumeRes.message).toContain('不上传视频');
+    const updatedDetail = await core.tasks.get(reviewRunId, { includeArtifacts: false });
+    expect(updatedDetail.status).toBe('published');
+    expect(updatedDetail.publishRecord?.status).toBe('consumed_only');
+    expect(updatedDetail.publishRecord?.bvid).toBeNull();
+    expect(core.context.repos.articles.getById('art-web-1')?.status).toBe('consumed');
+
+    // 2. 测试文章详情读取及按 ID/时间筛选删除
+    await fs.mkdir(core.context.paths.articlesDir, { recursive: true });
+    await writeJsonAtomic(path.join(core.context.paths.articlesDir, 'art-web-old.json'), {
+      url: 'https://openai.com/news/old-web',
+      title: '旧爬取新闻正文',
+      lang: 'en',
+      publishedAt: '2026-11-01T02:00:00.000Z',
+      text: '这是网页端文章查看弹窗应当展示的正文全文。',
+      feedContent: null,
+      mediaAssets: [],
+    });
+    core.context.repos.articles.insertIfAbsent({
+      id: 'art-web-old',
+      sourceId: 'openai-news',
+      canonicalUrl: 'https://openai.com/news/old-web',
+      title: '旧爬取新闻正文',
+      titleNorm: '旧爬取新闻正文',
+      lang: 'en',
+      publishedAt: '2026-11-01T02:00:00.000Z',
+      firstSeenAt: '2026-11-01T03:00:00.000Z',
+      excerpt: 'Old web article excerpt',
+      contentPath: 'storage/articles/art-web-old.json',
+      contentChars: 22,
+      imagePath: null,
+      extractStatus: 'ok',
+    });
+
+    const detailRes = await getArticleDetailAction('art-web-old');
+    expect(detailRes.ok).toBe(true);
+    expect(detailRes.data?.contentText).toBe('这是网页端文章查看弹窗应当展示的正文全文。');
+    expect((await getArticleDetailAction('missing-id')).ok).toBe(false);
+
+    // 禁止没有任何条件的空删除
+    expect((await deleteArticlesAction({})).ok).toBe(false);
+
+    // 构造一篇被待审任务占用的文章，验证按时间删除时会自动跳过受保护文章
+    const activeRunId = createRun(core.context, { itemCount: 1, trigger: 'manual-web' });
+    core.context.repos.articles.insertIfAbsent({
+      id: 'art-web-reserved',
+      sourceId: 'openai-news',
+      canonicalUrl: 'https://openai.com/news/reserved-web',
+      title: '占用中文章',
+      titleNorm: '占用中文章',
+      lang: 'en',
+      publishedAt: '2026-11-01T04:00:00.000Z',
+      firstSeenAt: '2026-11-01T04:10:00.000Z',
+      excerpt: 'Reserved excerpt',
+      contentPath: null,
+      contentChars: 50,
+      imagePath: null,
+      extractStatus: 'ok',
+    });
+    core.context.repos.articles.markReserved(['art-web-reserved'], activeRunId);
+
+    const previewArtDel = await previewDeleteArticlesAction({
+      from: '2026-11-01',
+      to: '2026-11-01',
+    });
+    expect(previewArtDel.ok).toBe(true);
+    expect(previewArtDel.data?.matchedCount).toBe(2);
+    expect(previewArtDel.data?.deletableCount).toBe(1);
+    expect(previewArtDel.data?.skippedReservedCount).toBe(1);
+
+    const execArtDel = await deleteArticlesAction({
+      from: '2026-11-01',
+      to: '2026-11-01',
+    });
+    expect(execArtDel.ok).toBe(true);
+    expect(execArtDel.data?.deletedIds).toEqual(['art-web-old']);
+    await expect(
+      fs.stat(path.join(rootDir, 'storage', 'articles', 'art-web-old.json')),
+    ).rejects.toThrow();
+    expect(core.context.repos.articles.getById('art-web-reserved')).not.toBeNull();
+
+    // 3. 测试任务产物的 artifacts_only 与 full 两种模式删除以及受保护状态跳过
+    const clearRunsPreview = await previewDeleteRunsAction({
+      runIds: [reviewRunId],
+      mode: 'artifacts_only',
+    });
+    expect(clearRunsPreview.ok).toBe(true);
+    expect(clearRunsPreview.data?.reclaimedBytes).toBeGreaterThan(0);
+
+    const clearRunsRes = await deleteRunsAction({
+      runIds: [reviewRunId],
+      mode: 'artifacts_only',
+    });
+    expect(clearRunsRes.ok).toBe(true);
+    await expect(fs.stat(core.context.paths.runDir(reviewRunId))).rejects.toThrow();
+    expect(core.context.repos.runs.getById(reviewRunId)).not.toBeNull();
+
+    core.context.repos.runs.updateStatus(activeRunId, 'failed');
+    const uncertainId = createRun(core.context, { itemCount: 1, trigger: 'manual-web' });
+    core.context.repos.runs.updateStatus(uncertainId, 'publish_uncertain');
+
+    const fullDelRes = await deleteRunsAction({
+      runIds: [activeRunId, uncertainId],
+      mode: 'full',
+    });
+    expect(fullDelRes.ok).toBe(true);
+    expect(fullDelRes.data?.affectedRunIds).toEqual([activeRunId]);
+    expect(fullDelRes.data?.skippedProtectedRunIds).toEqual([uncertainId]);
+    expect(fullDelRes.data?.releasedArticlesCount).toBe(1);
+    expect(core.context.repos.runs.getById(activeRunId)).toBeNull();
+    expect(core.context.repos.articles.getById('art-web-reserved')?.status).toBe('new');
+    expect((await deleteRunsAction({ mode: 'full' })).ok).toBe(false);
   });
 });

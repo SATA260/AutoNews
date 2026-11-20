@@ -6,7 +6,9 @@ import type { CoreContext } from './context.js';
 import { createCoreContext } from './context.js';
 import type { Notifier } from './notify/index.js';
 import {
+  type ArticleService,
   type ConfigService,
+  createArticleService,
   createConfigService,
   createPublishService,
   createSchedulerService,
@@ -48,6 +50,7 @@ export * from './workflow/index.js';
 /** 对命令行和网页后台暴露的核心业务引擎实例 */
 export interface Core {
   context: CoreContext;
+  articles: ArticleService;
   tasks: TaskService;
   publish: PublishService;
   config: ConfigService;
@@ -76,6 +79,7 @@ export async function createCore(opts?: {
   const context = await createCoreContext(opts);
   recoverStaleRuns(context);
 
+  const articles = createArticleService(context);
   const tasks = createTaskService(context);
   const publish = createPublishService(context, {
     spawnDetachedPublish: async ({ action, runId, dtimeUnixSec }) => {
@@ -107,6 +111,7 @@ export async function createCore(opts?: {
 
   return {
     context,
+    articles,
     tasks,
     publish,
     config,

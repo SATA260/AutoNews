@@ -256,8 +256,14 @@ export function createRunsRepo(db: DatabaseSync) {
       return row ? mapRunRowDetail(row) : null;
     },
 
-    /** 按状态和游标分页查询任务摘要列表（游标支持 `<createdAt>` 或 `<createdAt>|<id>`） */
-    list(q?: { status?: RunStatus[]; limit?: number; before?: string }): RunSummary[] {
+    /** 按状态、创建时间区间和游标分页查询任务摘要列表（游标支持 `<createdAt>` 或 `<createdAt>|<id>`） */
+    list(q?: {
+      status?: RunStatus[];
+      fromIso?: string;
+      toIso?: string;
+      limit?: number;
+      before?: string;
+    }): RunSummary[] {
       const conditions: string[] = [];
       const params: Array<string | number> = [];
 
@@ -265,6 +271,14 @@ export function createRunsRepo(db: DatabaseSync) {
         const placeholders = q.status.map(() => '?').join(', ');
         conditions.push(`status IN (${placeholders})`);
         params.push(...q.status);
+      }
+      if (q?.fromIso) {
+        conditions.push('created_at >= ?');
+        params.push(q.fromIso);
+      }
+      if (q?.toIso) {
+        conditions.push('created_at <= ?');
+        params.push(q.toIso);
       }
       if (q?.before) {
         const sepIdx = q.before.indexOf('|');
@@ -286,6 +300,62 @@ export function createRunsRepo(db: DatabaseSync) {
       const rows = db
         .prepare(`SELECT * FROM runs ${where} ORDER BY created_at DESC, id DESC LIMIT ?`)
         .all(...params) as unknown as RunRow[];
+      return rows.map(mapRunSummary);
+    },
+
+    /** 查询符合指定编号清单、状态集合或创建时间范围的任务摘要列表 */
+    findMatching(q: {
+      runIds?: string[];
+      statuses?: RunStatus[];
+      fromIso?: string;
+      toIso?: string;
+    }): RunSummary[] {
+      const baseConditions: string[] = [];
+      const baseParams: Array<string | number> = [];
+
+      if (q.statuses && q.statuses.length > 0) {
+        const placeholders = q.statuses.map(() => '?').join(', ');
+        baseConditions.push(`status IN (${placeholders})`);
+        baseParams.push(...q.statuses);
+      }
+      if (q.fromIso) {
+        baseConditions.push('created_at >= ?');
+        baseParams.push(q.fromIso);
+      }
+      if (q.toIso) {
+        baseConditions.push('created_at <= ?');
+        baseParams.push(q.toIso);
+      }
+
+      if (q.runIds !== undefined) {
+        const uniqueIds = Array.from(new Set(q.runIds.map((id) => id.trim()).filter(Boolean)));
+        if (uniqueIds.length === 0) {
+          return [];
+        }
+        const collected: RunSummary[] = [];
+        for (let i = 0; i < uniqueIds.length; i += 400) {
+          const chunk = uniqueIds.slice(i, i + 400);
+          const placeholders = chunk.map(() => '?').join(', ');
+          const conditions = [`id IN (${placeholders})`, ...baseConditions];
+          const params = [...chunk, ...baseParams];
+          const rows = db
+            .prepare(`SELECT * FROM runs WHERE ${conditions.join(' AND ')}`)
+            .all(...params) as unknown as RunRow[];
+          collected.push(...rows.map(mapRunSummary));
+        }
+        collected.sort((a, b) => {
+          if (b.createdAt !== a.createdAt) {
+            return b.createdAt.localeCompare(a.createdAt);
+          }
+          return b.id.localeCompare(a.id);
+        });
+        return collected;
+      }
+
+      const where = baseConditions.length > 0 ? `WHERE ${baseConditions.join(' AND ')}` : '';
+      const rows = db
+        .prepare(`SELECT * FROM runs ${where} ORDER BY created_at DESC, id DESC`)
+        .all(...baseParams) as unknown as RunRow[];
       return rows.map(mapRunSummary);
     },
 

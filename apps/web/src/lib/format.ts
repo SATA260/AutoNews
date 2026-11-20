@@ -1,4 +1,6 @@
 import type {
+  ArticleStatus,
+  ExtractStatus,
   PublishStatus,
   RunItemStatus,
   RunStatus,
@@ -67,8 +69,41 @@ export const PUBLISH_STATUS_TEXT: Record<PublishStatus, string> = {
   published: '已发布',
   failed: '上传失败',
   uncertain: '状态待人工核对',
-  consumed_only: '仅本地完结',
+  consumed_only: '审核通过（未上传）',
 };
+
+/** 爬取文章流转状态的中文标签 */
+export const ARTICLE_STATUS_TEXT: Record<ArticleStatus, string> = {
+  new: '待选',
+  reserved: '任务占用中',
+  consumed: '已播出',
+  expired: '已过期',
+  rejected: '已拒绝',
+};
+
+/** 爬取文章正文提取状态的中文标签 */
+export const EXTRACT_STATUS_TEXT: Record<ExtractStatus, string> = {
+  pending: '待提取',
+  ok: '正文完整',
+  feed_only: '仅摘要',
+  failed: '提取失败',
+};
+
+/** 为爬取文章状态返回对应的徽标样式类名 */
+export function articleStatusBadgeClass(status: ArticleStatus): string {
+  switch (status) {
+    case 'new':
+      return 'bg-sky-100 text-sky-800 border-sky-200';
+    case 'reserved':
+      return 'bg-amber-100 text-amber-800 border-amber-200';
+    case 'consumed':
+      return 'bg-emerald-100 text-emerald-800 border-emerald-200';
+    case 'rejected':
+      return 'bg-rose-100 text-rose-800 border-rose-200';
+    default:
+      return 'bg-slate-100 text-slate-600 border-slate-200';
+  }
+}
 
 /** 为任务整体状态返回对应的徽标样式类名 */
 export function runStatusBadgeClass(status: RunStatus): string {
@@ -143,4 +178,40 @@ export function formatDuration(startedAt: string | null, finishedAt: string | nu
 /** 按 Unicode 码点统计文本字符长度，与投稿字数限制口径保持一致 */
 export function countCodepoints(text: string): number {
   return Array.from(text).length;
+}
+
+/** 将字节数格式化为易读的磁盘容量文本 */
+export function formatBytes(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes <= 0) {
+    return '0 B';
+  }
+  if (bytes < 1024) {
+    return `${Math.round(bytes)} B`;
+  }
+  if (bytes < 1024 * 1024) {
+    return `${(bytes / 1024).toFixed(1)} KB`;
+  }
+  if (bytes < 1024 * 1024 * 1024) {
+    return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  }
+  return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`;
+}
+
+/** 将时间对象按指定时区格式化为网页日期时间输入框所需的 `YYYY-MM-DDTHH:mm` 字符串 */
+export function formatDateTimeLocalInTz(date: Date, timezone: string): string {
+  try {
+    const parts = new Intl.DateTimeFormat('en-CA', {
+      timeZone: timezone,
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      hourCycle: 'h23',
+    }).formatToParts(date);
+    const byType = new Map(parts.map((p) => [p.type, p.value]));
+    return `${byType.get('year')}-${byType.get('month')}-${byType.get('day')}T${byType.get('hour')}:${byType.get('minute')}`;
+  } catch {
+    return date.toISOString().slice(0, 16);
+  }
 }
