@@ -10,6 +10,7 @@ import {
   VOICE_DYNAMICS_FILTER,
 } from '@aidaily/tts';
 import { execa } from 'execa';
+import { writeFileAtomic } from '../storage/files.js';
 
 const DEFAULT_FFMPEG_TIMEOUT_MS = 180_000;
 
@@ -428,7 +429,7 @@ export async function composeSlidesVideoMp4(opts: {
     }
 
     const concatFile = path.join(workDir, 'frames.ffconcat');
-    await fs.writeFile(concatFile, `${lines.join('\n')}\n`, 'utf8');
+    await writeFileAtomic(concatFile, `${lines.join('\n')}\n`);
 
     const vf = `scale=${opts.width}:${opts.height}:force_original_aspect_ratio=decrease,pad=${opts.width}:${opts.height}:(ow-iw)/2:(oh-ih)/2,fps=${opts.fps},format=yuv420p`;
 
@@ -777,7 +778,7 @@ export async function composeSectionVideosMp4(opts: {
       lines.push(`file '${escapeConcatPath(path.resolve(mp4File))}'`);
     }
     const concatFile = path.join(workDir, 'sections.ffconcat');
-    await fs.writeFile(concatFile, `${lines.join('\n')}\n`, 'utf8');
+    await writeFileAtomic(concatFile, `${lines.join('\n')}\n`);
 
     await withAtomicMediaWrite(opts.outMp4, '.mp4', async (tmpOut) => {
       await runMediaCommand(

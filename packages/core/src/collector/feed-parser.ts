@@ -182,7 +182,7 @@ const ENGLISH_MONTH_MAP: Record<string, number> = {
 
 /** 检查日期字符串末尾是否已包含明确时区偏移信息 */
 function hasExplicitTimezone(raw: string): boolean {
-  return /(?:Z|[+-]\d{2}:?\d{2}|GMT|UTC|UT|[ECMP][DS]T)$/i.test(raw.trim());
+  return /(?:Z|[+-]\d{2}:?\d{2}|GMT|UTC|UT|[ECMP][DS]T)(?:\s*\([^)]+\))?$/i.test(raw.trim());
 }
 
 /** 将无时区偏移的年月日时分秒毫秒按目标时区构造为精确的 UTC ISO 时间字符串 */
@@ -278,23 +278,76 @@ function parseTimezoneLessEnglishMonthDate(raw: string, defaultTimezone: string)
   return buildWallClockIso(year, month, day, hour, minute, second, 0, defaultTimezone);
 }
 
-/** 将中文年月日或斜杠分隔日期规整为标准连字符格式 */
+/** 将 12 小时制可选上午/下午时间片段规范化为两位小数的 `HH:mm[:ss]` 文本 */
+function normalizeOptionalTimeToken(rawTime: string | undefined, ampm?: string): string | null {
+  if (!rawTime) {
+    return null;
+  }
+  const m = /^(\d{1,2}):(\d{2})(?::(\d{2})(?:\.(\d{1,3}))?)?$/.exec(rawTime.trim());
+  if (!m) {
+    return rawTime.trim();
+  }
+  let hour = Number.parseInt(m[1] ?? '0', 10);
+  const minute = m[2] ?? '00';
+  const second = m[3];
+  const ms = m[4];
+  const period = ampm?.toUpperCase();
+  if (period === 'PM' && hour < 12) {
+    hour += 12;
+  } else if (period === 'AM' && hour === 12) {
+    hour = 0;
+  }
+  const base = `${String(hour).padStart(2, '0')}:${minute}${second ? `:${second}` : ''}`;
+  return ms ? `${base}.${ms}` : base;
+}
+
+/** 将中文年月日、斜杠分隔及单数月日格式规整为标准连字符日期格式 */
 function normalizeDateSeparators(raw: string): string {
   const cnMatch =
-    /^(\d{4})\s*年\s*(\d{1,2})\s*月\s*(\d{1,2})\s*日(?:\s+(\d{1,2}:\d{2}(?::\d{2})?))?$/.exec(raw);
+    /^(\d{4})\s*年\s*(\d{1,2})\s*月\s*(\d{1,2})\s*日(?:\s+(\d{1,2}:\d{2}(?::\d{2})?)(?:\s*(AM|PM))?)?$/i.exec(
+      raw,
+    );
   if (cnMatch) {
     const y = cnMatch[1];
     const m = cnMatch[2]?.padStart(2, '0');
     const d = cnMatch[3]?.padStart(2, '0');
-    const time = cnMatch[4];
+    const time = normalizeOptionalTimeToken(cnMatch[4], cnMatch[5]);
     return time ? `${y}-${m}-${d}T${time}` : `${y}-${m}-${d}`;
   }
-  const slashMatch = /^(\d{4})\/(\d{1,2})\/(\d{1,2})(?:\s+(\d{1,2}:\d{2}(?::\d{2})?))?$/.exec(raw);
+  const slashMatch =
+    /^(\d{4})\/(\d{1,2})\/(\d{1,2})(?:[T\s]+(\d{1,2}:\d{2}(?::\d{2})?)(?:\s*(AM|PM))?)?$/i.exec(
+      raw,
+    );
   if (slashMatch) {
     const y = slashMatch[1];
     const m = slashMatch[2]?.padStart(2, '0');
     const d = slashMatch[3]?.padStart(2, '0');
-    const time = slashMatch[4];
+    const time = normalizeOptionalTimeToken(slashMatch[4], slashMatch[5]);
+    return time ? `${y}-${m}-${d}T${time}` : `${y}-${m}-${d}`;
+  }
+  const mdySlashMatch =
+    /^(\d{1,2})\/(\d{1,2})\/(\d{4})(?:[T\s,]+(\d{1,2}:\d{2}(?::\d{2})?)(?:\s*(AM|PM))?)?$/i.exec(
+      raw,
+    );
+  if (mdySlashMatch) {
+    const first = Number.parseInt(mdySlashMatch[1] ?? '0', 10);
+    const second = Number.parseInt(mdySlashMatch[2] ?? '0', 10);
+    const y = mdySlashMatch[3];
+    const [monthNum, dayNum] = first > 12 && second <= 12 ? [second, first] : [first, second];
+    const m = String(monthNum).padStart(2, '0');
+    const d = String(dayNum).padStart(2, '0');
+    const time = normalizeOptionalTimeToken(mdySlashMatch[4], mdySlashMatch[5]);
+    return time ? `${y}-${m}-${d}T${time}` : `${y}-${m}-${d}`;
+  }
+  const dashLocalMatch =
+    /^(\d{4})-(\d{1,2})-(\d{1,2})(?:[T\s]+(\d{1,2}:\d{2}(?::\d{2}(?:\.\d{1,3})?)?)(?:\s*(AM|PM))?)?$/i.exec(
+      raw,
+    );
+  if (dashLocalMatch) {
+    const y = dashLocalMatch[1];
+    const m = dashLocalMatch[2]?.padStart(2, '0');
+    const d = dashLocalMatch[3]?.padStart(2, '0');
+    const time = normalizeOptionalTimeToken(dashLocalMatch[4], dashLocalMatch[5]);
     return time ? `${y}-${m}-${d}T${time}` : `${y}-${m}-${d}`;
   }
   return raw;
@@ -310,8 +363,8 @@ export function parsePublishedAt(raw: string | null, defaultTimezone = 'UTC'): s
     return null;
   }
 
-  // 纯日期格式 YYYY-MM-DD 按配置时区的当天零点转换
-  const dateOnlyMatch = /^(\d{4})-(\d{2})-(\d{2})$/.exec(trimmed);
+  // 纯日期格式 YYYY-MM-DD（兼容单位月日）按配置时区的当天零点转换
+  const dateOnlyMatch = /^(\d{4})-(\d{1,2})-(\d{1,2})$/.exec(trimmed);
   if (dateOnlyMatch) {
     return buildWallClockIso(
       Number.parseInt(dateOnlyMatch[1] ?? '', 10),
@@ -327,7 +380,9 @@ export function parsePublishedAt(raw: string | null, defaultTimezone = 'UTC'): s
 
   // 不带时区的 YYYY-MM-DD HH:mm(:ss)?(.sss)? 按配置时区解释
   const localDateTimeMatch =
-    /^(\d{4})-(\d{2})-(\d{2})[T\s](\d{2}):(\d{2})(?::(\d{2})(?:\.(\d{1,3}))?)?$/.exec(trimmed);
+    /^(\d{4})-(\d{1,2})-(\d{1,2})[T\s](\d{1,2}):(\d{2})(?::(\d{2})(?:\.(\d{1,3}))?)?$/.exec(
+      trimmed,
+    );
   if (localDateTimeMatch && !hasExplicitTimezone(trimmed)) {
     const msRaw = localDateTimeMatch[7] ?? '0';
     return buildWallClockIso(
@@ -352,7 +407,20 @@ export function parsePublishedAt(raw: string | null, defaultTimezone = 'UTC'): s
   if (Number.isNaN(ms)) {
     return null;
   }
-  return new Date(ms).toISOString();
+  if (hasExplicitTimezone(trimmed)) {
+    return new Date(ms).toISOString();
+  }
+  const wallClock = new Date(ms);
+  return buildWallClockIso(
+    wallClock.getFullYear(),
+    wallClock.getMonth() + 1,
+    wallClock.getDate(),
+    wallClock.getHours(),
+    wallClock.getMinutes(),
+    wallClock.getSeconds(),
+    wallClock.getMilliseconds(),
+    defaultTimezone,
+  );
 }
 
 /** 将疑似相对链接解析为绝对 http/https 地址，无效地址返回 null */

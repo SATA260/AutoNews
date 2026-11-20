@@ -3,9 +3,10 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { IssuePackage, QaReport, Timeline } from '@aidaily/contracts';
-import { type TtsProvider, TtsService } from '@aidaily/tts';
+import { saveToCache, type TtsProvider, TtsService, tryRestoreFromCache } from '@aidaily/tts';
 import { execa } from 'execa';
 import { afterEach, describe, expect, it } from 'vitest';
+import { z } from 'zod';
 import {
   buildMasterAudioWav,
   buildNarrationSections,
@@ -21,13 +22,16 @@ import {
   type PipelineError,
   type RenderCheckpoint,
   readJsonOrNull,
+  readJsonOrNullWithSchema,
   resolveRenderTheme,
   resumeRun,
   runMediaCommand,
   runQaStage,
   runRenderStage,
+  toErrorCode,
   updateSettingsFile,
   updateSourcesFile,
+  validateMp4Segment,
   writeJsonAtomic,
 } from '../src/index.js';
 
@@ -67,6 +71,9 @@ async function setupRenderWorkspace(templateName: 'solid-color' | 'daily-deck') 
     doc.setIn(['ai', 'providers'], {});
     doc.setIn(['tts', 'provider'], 'silent');
     doc.deleteIn(['issue', 'minScore']);
+    doc.setIn(['issue', 'allowPartial'], false);
+    doc.setIn(['editorial', 'compactStyle'], false);
+    doc.setIn(['editorial', 'requireImageOptIn'], false);
   });
   await updateSettingsFile(settingsFile, {
     clis: {
@@ -608,7 +615,9 @@ describe('template rendering, Playwright capture, ffmpeg composition, and QA', (
     const tplData = await readJsonOrNull<Record<string, unknown>>(
       path.join(runDir, 'template-data.json'),
     );
-    expect(tplData?.hostLive2dUrl).toBe('/__mascot_assets__/fullbody/gemini/gemini.model3.json');
+    expect(tplData?.hostLive2dUrl).toBe(
+      '/__mascot_assets__/fullbody/deepseek/deepseek.model3.json',
+    );
     expect(Array.isArray(tplData?.coverLipSync)).toBe(true);
 
     const stagedAssetStat = await fs.stat(path.join(runDir, 'assets', 'item-01.png'));
@@ -954,6 +963,85 @@ describe('template rendering, Playwright capture, ffmpeg composition, and QA', (
       expect(core.context.repos.runItems.getById('item-dual-1')?.selectedMediaIds).toEqual({
         primary: 'cand-tw',
       });
+    } finally {
+      await core.close();
+    }
+  });
+
+  it('区分探测工具缺失与分片损坏，支持结构化校验、阶段错误归类、原子缓存恢复与 render 清脏标志', async () => {
+    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'aidaily-m5-m14-'));
+    tempDirs.push(tmpDir);
+
+    // 验证探测工具缺失时返回 probe_error 且不会把真实分片误删
+    const fakeMp4 = path.join(tmpDir, 'seg.mp4');
+    await fs.writeFile(fakeMp4, Buffer.alloc(2048, 0xaa));
+    const probeRes = await validateMp4Segment({
+      filePath: fakeMp4,
+      expectedDurationMs: 2000,
+      width: 1920,
+      height: 1080,
+      fps: 30,
+      ffprobeBin: path.join(tmpDir, 'nonexistent-ffprobe'),
+    });
+    expect(probeRes.status).toBe('probe_error');
+    await expect(fs.stat(fakeMp4)).resolves.toBeDefined();
+
+    // 验证非大模型阶段异常按所在步骤映射到对应错误码，而非一律归为 llm_unavailable
+    expect(toErrorCode(new Error('校验失败'), 'package')).toBe('package_failed');
+    expect(toErrorCode(new Error('核查失败'), 'edit')).toBe('editorial_failed');
+
+    // 验证 readJsonOrNullWithSchema 对损坏 JSON 结构给出明确校验异常
+    const badJsonFile = path.join(tmpDir, 'bad-ckpt.json');
+    await fs.writeFile(badJsonFile, JSON.stringify({ unexpected: true }), 'utf8');
+    await expect(
+      readJsonOrNullWithSchema(badJsonFile, z.object({ packageData: z.object({}) }), {
+        label: '测试检查点',
+      }),
+    ).rejects.toThrow(/JSON 文件格式校验失败/);
+
+    // 验证 TTS 缓存原子写恢复不残留临时文件
+    const cacheDir = path.join(tmpDir, 'tts-cache');
+    const srcWav = path.join(tmpDir, 'src.wav');
+    const destWav = path.join(tmpDir, 'out', 'restored.wav');
+    await fs.writeFile(srcWav, Buffer.from('RIFFtestwavdata'));
+    await saveToCache(cacheDir, 'k1', srcWav);
+    expect(await tryRestoreFromCache(cacheDir, 'k1', destWav)).toBe(true);
+    expect(await fs.readFile(destWav)).toEqual(Buffer.from('RIFFtestwavdata'));
+    const outFiles = await fs.readdir(path.dirname(destWav));
+    expect(outFiles).toEqual(['restored.wav']);
+
+    // 验证 render 阶段成功后（即使止步于 render 或后续 qa 失败）立即清除 media_dirty 标记
+    const { rootDir } = await setupRenderWorkspace('solid-color');
+    const core = await createCore({ rootDir });
+    try {
+      const runId = createRun(core.context, { itemCount: 1, trigger: 'manual-cli' });
+      core.context.db.prepare('UPDATE runs SET media_dirty = 1 WHERE id = ?').run(runId);
+      await expect(
+        executeRun(core.context, runId, {
+          stageOverrides: {
+            collect: async () => ({
+              sourcesOk: [],
+              sourcesFailed: [],
+              sourcesSkipped: [],
+              newArticleIds: [],
+              expiredCount: 0,
+            }),
+            select: async () => ({ selectedCount: 1 }),
+            edit: async () => ({ passedItemIds: ['item-1'], droppedItemIds: [] }),
+            package: async () => ({ packaged: true }),
+            narrate: async () => ({ narrated: true }),
+            render: async () => ({ rendered: true }),
+            qa: async () => {
+              throw new Error('qa check rejected');
+            },
+          },
+        }),
+      ).rejects.toThrow('qa check rejected');
+
+      const dirtyRow = core.context.db
+        .prepare('SELECT media_dirty FROM runs WHERE id = ?')
+        .get(runId) as { media_dirty: number } | undefined;
+      expect(dirtyRow?.media_dirty).toBe(0);
     } finally {
       await core.close();
     }

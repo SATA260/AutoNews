@@ -17,8 +17,8 @@ import { chromium } from 'playwright';
 import type { CoreContext } from '../context.js';
 import { deriveFallbackCoverText, normalizeCoverText } from '../editorial/cover-text.js';
 import { loadPersonas } from '../editorial/personas.js';
-import type { PackageCheckpoint } from '../editorial/s6-package.js';
-import { readJsonOrNull, writeJsonAtomic } from '../storage/files.js';
+import { PackageCheckpointSchema } from '../editorial/s6-package.js';
+import { readJsonOrNull, readJsonOrNullWithSchema, writeJsonAtomic } from '../storage/files.js';
 import { startTemplateHttpServer } from '../templates/server.js';
 import { emitRunEvent } from '../workflow/events.js';
 import { STAGE_CHECKPOINT_REL_PATH } from '../workflow/stages.js';
@@ -91,8 +91,10 @@ export async function readCoverState(ctx: CoreContext, runId: string): Promise<C
     return { ...base, text: manual, source: 'manual' };
   }
 
-  const pkgCheckpoint = await readJsonOrNull<PackageCheckpoint>(
+  const pkgCheckpoint = await readJsonOrNullWithSchema(
     path.join(runDir, STAGE_CHECKPOINT_REL_PATH.package),
+    PackageCheckpointSchema,
+    { fallbackNullOnInvalid: true },
   );
   const pkg = pkgCheckpoint?.packageData;
   if (!pkg) {
@@ -144,9 +146,11 @@ export async function buildCoverTemplateData(
   const hostRow = ctx.db.prepare('SELECT host_id FROM runs WHERE id = ?').get(runId) as
     | { host_id: string | null }
     | undefined;
-  const host = HostMascotIdSchema.safeParse(hostRow?.host_id);
-  const hostId: HostMascotId = host.success ? host.data : 'gemini';
   const personas = await loadPersonas(ctx).catch(() => []);
+  const host = HostMascotIdSchema.safeParse(hostRow?.host_id);
+  const hostId: HostMascotId = host.success
+    ? host.data
+    : (personas[0]?.id ?? HostMascotIdSchema.parse(HostMascotIdSchema.options[0]));
   const persona = personas.find((p) => p.id === hostId);
 
   const mascotFile = path.join(ctx.paths.rootDir, 'assets', 'mascots', `${hostId}.png`);

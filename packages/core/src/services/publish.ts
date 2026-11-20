@@ -261,6 +261,7 @@ export function createPublishService(
           const pub = ctx.repos.publish.getByRun(runId);
           if (pub) {
             ctx.repos.publish.updateStatus(runId, 'failed', {
+              bvid: null,
               error: '经人工核实尚未在 B 站发布成功，可重新发起投稿重试',
               updatedAt: nowIso,
             });

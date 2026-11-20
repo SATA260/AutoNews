@@ -25,6 +25,7 @@ import {
 import { PipelineError } from '../errors.js';
 import { executeBilibiliUpload } from '../publish/bilibili.js';
 import { ensurePublishDraftForRun } from '../publish/description.js';
+import { cleanupStorage } from '../services/retention.js';
 import { inTransaction } from '../storage/db.js';
 import {
   archiveRunArtifacts,
@@ -76,6 +77,11 @@ export function toErrorCode(err: unknown, currentStage?: PipelineStage): ErrorCo
   switch (currentStage) {
     case 'collect':
       return 'collect_all_failed';
+    case 'select':
+    case 'edit':
+      return 'editorial_failed';
+    case 'package':
+      return 'package_failed';
     case 'narrate':
       return 'tts_failed';
     case 'render':
@@ -83,7 +89,7 @@ export function toErrorCode(err: unknown, currentStage?: PipelineStage): ErrorCo
     case 'qa':
       return 'qa_failed';
     default:
-      return 'llm_unavailable';
+      return 'editorial_failed';
   }
 }
 
@@ -513,6 +519,9 @@ async function executePipelineStagesLocked(opts: {
         checkpointPath: relCheckpoint,
         error: null,
       });
+      if (stage === 'render') {
+        ctx.db.prepare('UPDATE runs SET media_dirty = 0 WHERE id = ?').run(runId);
+      }
 
       emitRunEvent(ctx, {
         runId,
@@ -522,7 +531,7 @@ async function executePipelineStagesLocked(opts: {
         message: `阶段执行完成：${stage}`,
       });
       if (
-        settings.issue.minScore !== undefined &&
+        settings.issue.allowPartial &&
         !stageOverrides?.[stage] &&
         stageOut &&
         typeof stageOut === 'object' &&
@@ -746,6 +755,11 @@ export async function executeRun(
     });
   } finally {
     releasePipelineLock(ctx, runId);
+  }
+  if (settings.retention.autoCleanup) {
+    await cleanupStorage(ctx, { settings }).catch((err: unknown) => {
+      ctx.logger.warn({ err, runId }, '任务结束后自动清理过期存储时出错');
+    });
   }
 }
 

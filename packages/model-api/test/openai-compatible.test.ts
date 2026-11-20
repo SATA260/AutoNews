@@ -369,4 +369,32 @@ describe('OpenAI 兼容模型 API', () => {
     expect(calls.map(({ status }) => status)).toEqual(['auth_error']);
     expect(JSON.stringify([...invalid.calls, ...calls])).not.toContain(key);
   });
+
+  it('blocks SSRF targets resolved via DNS or loopback literals before sending credentials', async () => {
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(chatResult('{"title":"nope"}'));
+    const calls: CallRecord[] = [];
+    const api = new ModelApi({
+      fetchImpl: fetchMock,
+      resolveApiKey: async () => key,
+      lookupFn: async () => [{ address: '169.254.169.254' }],
+      logCall: (record) => {
+        calls.push(record);
+      },
+    });
+
+    await expect(api.invoke({ ...request, retries: 1 }, provider)).rejects.toMatchObject({
+      retryable: false,
+    });
+    expect(fetchMock).not.toHaveBeenCalled();
+
+    const apiLoopbackLiteral = new ModelApi({
+      fetchImpl: fetchMock,
+      resolveApiKey: async () => key,
+      logCall: () => {},
+    });
+    await expect(
+      apiLoopbackLiteral.invoke(request, { ...provider, baseUrl: 'http://127.0.0.1:8080/v1' }),
+    ).rejects.toMatchObject({ retryable: false });
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
 });

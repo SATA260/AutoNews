@@ -94,6 +94,8 @@ export const ErrorCodeSchema = z.enum([
   'collect_all_failed',
   'insufficient_items',
   'llm_unavailable',
+  'editorial_failed',
+  'package_failed',
   'tts_failed',
   'render_failed',
   'qa_failed',

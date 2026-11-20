@@ -457,10 +457,9 @@ export async function selectCandidateEvents(opts: {
   }
 
   return {
-    selected:
-      settings.issue.minScore === undefined
-        ? selected
-        : selected.sort((a, b) => b.candidate.score - a.candidate.score).slice(0, itemCount + 2),
+    selected: !settings.issue.allowPartial
+      ? selected
+      : selected.sort((a, b) => b.candidate.score - a.candidate.score).slice(0, itemCount + 2),
     consideredArticleIds: dedupedGroups.flatMap((g) => g.aliases),
   };
 }

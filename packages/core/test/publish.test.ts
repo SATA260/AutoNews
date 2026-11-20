@@ -1008,4 +1008,112 @@ describe('Bilibili publishing, AI declaration, consumption, and uncertain recove
 
     await core.close();
   }, 60_000);
+
+  it('biliup 返回 BV 号后若消费提交失败必须转入状态不明保护并禁止重传', async () => {
+    const { rootDir } = await setupPublishWorkspace({ mode: 'manual-review' });
+    const cookieFile = path.join(rootDir, 'cookies.json');
+    await updateSettingsFile(path.join(rootDir, 'config', 'settings.yaml'), {
+      publish: { bilibili: { cookieFile } },
+    });
+    const stateFile = path.join(rootDir, 'biliup-commit-fail-state.json');
+    process.env.FAKE_BILIUP_STATE_FILE = stateFile;
+    await fs.writeFile(
+      stateFile,
+      JSON.stringify({ mode: 'ok', bvid: 'BV1CL411P7a3', calls: [] }),
+      'utf8',
+    );
+
+    const core = await createCore({ rootDir });
+    const runId = createRun(core.context, { itemCount: 1, trigger: 'manual-cli' });
+    const runDir = core.context.paths.runDir(runId);
+    await fs.mkdir(path.join(runDir, 'output'), { recursive: true });
+    await fs.writeFile(path.join(runDir, 'output', 'video.mp4'), 'fake-mp4');
+    await fs.writeFile(path.join(runDir, 'output', 'cover.jpg'), 'fake-jpg');
+    await fs.writeFile(cookieFile, '{}');
+
+    core.context.repos.articles.insertIfAbsent({
+      id: 'art-h1-1',
+      sourceId: 'openai-blog',
+      canonicalUrl: 'https://openai.com/news/post-commit-fail',
+      title: 'Post-upload Commit Failure Regression',
+      titleNorm: 'post-upload commit failure regression',
+      lang: 'en',
+      publishedAt: '2026-11-16T10:00:00.000Z',
+      firstSeenAt: '2026-11-16T10:00:00.000Z',
+      excerpt: 'Body',
+      contentPath: null,
+      contentChars: 300,
+      imagePath: null,
+      extractStatus: 'ok',
+    });
+    core.context.repos.articles.markReserved(['art-h1-1'], runId);
+    core.context.repos.events.insertMany([
+      {
+        id: 'ev-h1-1',
+        runId,
+        rank: 1,
+        role: 'primary',
+        refillRound: 0,
+        title: '提交落盘失败事件',
+        category: '大模型',
+        entity: 'OpenAI',
+        score: 8,
+        publicAppeal: 8,
+        reason: 'r',
+        articleIds: ['art-h1-1'],
+      },
+    ]);
+    core.context.repos.runItems.createMany([
+      {
+        id: 'item-h1-1',
+        runId,
+        eventId: 'ev-h1-1',
+        position: 1,
+        status: 'passed',
+        revision: 0,
+        dropReason: null,
+        finalJson: null,
+        updatedAt: '2026-11-16T10:00:00.000Z',
+      },
+    ]);
+    core.context.repos.runs.updateStatus(runId, 'awaiting_review', {
+      currentStage: 'qa',
+    });
+    core.context.repos.publish.upsertDraft({
+      runId,
+      title: '上传提交失败回归测试标题',
+      description: '上传提交失败回归测试简介',
+      tags: ['AI'],
+      updatedAt: '2026-11-16T10:00:00.000Z',
+    });
+
+    const originalMarkConsumed = core.context.repos.articles.markConsumed.bind(
+      core.context.repos.articles,
+    );
+    core.context.repos.articles.markConsumed = () => {
+      throw new Error('simulated post-upload commit failure');
+    };
+
+    await expect(core.publish.approve(runId, { retryDelaysMs: [0] })).rejects.toThrow(
+      /状态不明保护/,
+    );
+    expect(core.context.repos.runs.getById(runId)?.status).toBe('publish_uncertain');
+    expect(core.context.repos.publish.getByRun(runId)).toMatchObject({
+      status: 'uncertain',
+      bvid: 'BV1CL411P7a3',
+    });
+
+    // 状态不明下严禁再次上传
+    await expect(core.publish.retry(runId, { retryDelaysMs: [0] })).rejects.toThrow(/禁止自动重传/);
+    const stateAfter = JSON.parse(await fs.readFile(stateFile, 'utf8')) as { calls: string[][] };
+    expect(stateAfter.calls).toHaveLength(1);
+
+    // 恢复正常仓储方法后，人工核对定案可以顺利闭合
+    core.context.repos.articles.markConsumed = originalMarkConsumed;
+    await core.publish.confirmUncertain(runId, { published: true, bvid: 'BV1CL411P7a3' });
+    expect(core.context.repos.runs.getById(runId)?.status).toBe('published');
+    expect(core.context.repos.articles.getById('art-h1-1')?.status).toBe('consumed');
+
+    await core.close();
+  }, 60_000);
 });

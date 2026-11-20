@@ -1,18 +1,19 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import type {
-  BrowserPageLike,
-  ContentLimits,
-  InfoCard,
-  MascotMood,
-  PagePlan,
-  RenderableIssue,
-  RenderableNewsItem,
-  RenderSectionsOptions,
-  TemplateAdapter,
-  Timeline,
-  TimelineSection,
+import {
+  type BrowserPageLike,
+  type ContentLimits,
+  HostMascotIdSchema,
+  type InfoCard,
+  type MascotMood,
+  type PagePlan,
+  type RenderableIssue,
+  type RenderableNewsItem,
+  type RenderSectionsOptions,
+  type TemplateAdapter,
+  type Timeline,
+  type TimelineSection,
 } from '@aidaily/contracts';
 import { execa } from 'execa';
 import { resolveLogoAssetsRoot } from '../../media/company-logos.js';
@@ -481,7 +482,7 @@ export function createDailyDeckAdapter(): TemplateAdapter {
         headline: issue.headline,
         footerCta: issue.outro.cta,
         fps: targetFps,
-        hostMascotId: issue.hostId ?? 'gemini',
+        hostMascotId: issue.hostId ?? HostMascotIdSchema.parse(HostMascotIdSchema.options[0]),
         hostDisplayName: issue.hostDisplayName ?? undefined,
         hostMascotUrl: toRunAssetUrl(issue.hostMascotPath),
         hostLive2dUrl: issue.hostLive2dModelUrl ?? null,
@@ -574,7 +575,7 @@ export function createDailyDeckAdapter(): TemplateAdapter {
       const distDir = await ensureDailyDeckBuilt(opts.templateDir, opts.signal);
       const distHash = await computeDirectoryContentHash(distDir);
       const mascotRoot = await resolveMascotAssetsRoot(opts.templateDir, opts.rootDir);
-      const hostKey = opts.issue.hostId ?? 'gemini';
+      const hostKey = opts.issue.hostId ?? HostMascotIdSchema.parse(HostMascotIdSchema.options[0]);
       const mascotDir =
         mascotRoot && hostKey
           ? await resolveMascotModelDirectory(mascotRoot, opts.issue.hostLive2dModelUrl, hostKey)

@@ -50,9 +50,16 @@ export class TtsService {
     this.ffprobeBin = opts.ffprobeBin ?? 'ffprobe';
 
     const rootDir = opts.rootDir ?? process.cwd();
+    const fetchImpl = opts.fetchImpl;
     this.register(createSilentTtsProvider(this.settings, this.ffmpegBin));
-    this.register(createIndexTtsProvider(rootDir, this.settings.providers.indextts ?? {}));
-    this.register(createQwenLocalTtsProvider(rootDir, this.settings.providers['qwen-local'] ?? {}));
+    this.register(
+      createIndexTtsProvider(rootDir, this.settings.providers.indextts ?? {}, { fetchImpl }),
+    );
+    this.register(
+      createQwenLocalTtsProvider(rootDir, this.settings.providers['qwen-local'] ?? {}, {
+        fetchImpl,
+      }),
+    );
   }
 
   /** 注册或替换一个语音合成引擎实例 */

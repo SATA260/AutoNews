@@ -739,13 +739,7 @@ export async function toggleSourceAction(formData: FormData): Promise<ActionResu
     const sourceId = parseRequiredString(formData.get('sourceId'), '信源 ID');
     const enabled = parseBooleanField(formData.get('enabled'));
     const core = await getCore();
-    const currentSources = core.config.getSources();
-    const found = currentSources.some((s) => s.id === sourceId);
-    if (!found) {
-      throw new Error(`未找到信源: ${sourceId}`);
-    }
-    const nextSources = currentSources.map((s) => (s.id === sourceId ? { ...s, enabled } : s));
-    await core.config.updateSources(nextSources);
+    await core.config.toggleSource(sourceId, enabled);
     safeRevalidate('/sources');
     safeRevalidate('/');
     return { ok: true, message: `信源 ${sourceId} 已${enabled ? '启用' : '停用'}` };

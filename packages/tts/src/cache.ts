@@ -31,7 +31,26 @@ export function computeTtsCacheKey(
   return crypto.createHash('sha1').update(payload, 'utf8').digest('hex');
 }
 
-/** 尝试从本地缓存目录读取已合成过的音频文件并复制到目标路径 */
+/** 转发原子文件写入函数，保证缓存与语音服务配置均采用临时文件加原子重命名方式 */
+export { writeTtsFileAtomic } from './atomic.mjs';
+
+/** 通过先拷贝至同目录临时文件再原子重命名的方式复制文件，防止中途崩溃产生残缺文件 */
+async function copyFileAtomic(srcFile: string, destFile: string): Promise<void> {
+  await fs.mkdir(path.dirname(destFile), { recursive: true });
+  const tmpFile = path.join(
+    path.dirname(destFile),
+    `.${path.basename(destFile)}.${process.pid}.${crypto.randomBytes(4).toString('hex')}.tmp`,
+  );
+  try {
+    await fs.copyFile(srcFile, tmpFile);
+    await fs.rename(tmpFile, destFile);
+  } catch (err) {
+    await fs.rm(tmpFile, { force: true }).catch(() => undefined);
+    throw err;
+  }
+}
+
+/** 尝试从本地缓存目录读取已合成过的音频文件并原子写入目标路径 */
 export async function tryRestoreFromCache(
   cacheDir: string,
   key: string,
@@ -40,8 +59,7 @@ export async function tryRestoreFromCache(
   const cachedFile = path.join(cacheDir, `${key}.wav`);
   try {
     await fs.access(cachedFile);
-    await fs.mkdir(path.dirname(destFile), { recursive: true });
-    await fs.copyFile(cachedFile, destFile);
+    await copyFileAtomic(cachedFile, destFile);
     return true;
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
@@ -53,17 +71,6 @@ export async function tryRestoreFromCache(
 
 /** 将标准化后的音频文件以原子写方式存入本地缓存目录，供后续断点续跑复用 */
 export async function saveToCache(cacheDir: string, key: string, srcFile: string): Promise<void> {
-  await fs.mkdir(cacheDir, { recursive: true });
   const target = path.join(cacheDir, `${key}.wav`);
-  const tmpFile = path.join(
-    cacheDir,
-    `.${key}.${process.pid}.${crypto.randomBytes(4).toString('hex')}.tmp`,
-  );
-  try {
-    await fs.copyFile(srcFile, tmpFile);
-    await fs.rename(tmpFile, target);
-  } catch (err) {
-    await fs.rm(tmpFile, { force: true }).catch(() => undefined);
-    throw err;
-  }
+  await copyFileAtomic(srcFile, target);
 }

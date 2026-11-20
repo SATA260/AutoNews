@@ -3,10 +3,10 @@ import {
   type QaReport,
   QaReportSchema,
   RETRYABLE_RUN_STATUSES,
-  type RunEvent,
   type Timeline,
   TimelineSchema,
 } from '@aidaily/contracts';
+import { NotFoundError } from '@aidaily/core';
 import Link from 'next/link';
 import { notFound } from 'next/navigation';
 import { PublishControls } from '@/components/PublishControls';
@@ -47,27 +47,6 @@ function resolveTab(rawTab: string | undefined): DetailTab {
   return matched ? matched.key : 'progress';
 }
 
-/** 分页拉取任务最近 500 条运行日志，避免超长任务因截取开头而漏掉末尾状态事件 */
-async function loadRecentRunEvents(
-  core: Awaited<ReturnType<typeof getCore>>,
-  runId: string,
-): Promise<RunEvent[]> {
-  const all: RunEvent[] = [];
-  let afterId = 0;
-  while (true) {
-    const batch = await core.tasks.events(runId, afterId, 500);
-    if (batch.length === 0) {
-      break;
-    }
-    all.push(...batch);
-    afterId = batch[batch.length - 1]?.id ?? afterId;
-    if (batch.length < 500) {
-      break;
-    }
-  }
-  return all.length > 500 ? all.slice(-500) : all;
-}
-
 /** 单期任务详情页：提供进度日志、原文对照、候选替补、音画质检、发布审核与模型调用六个视图页签 */
 export default async function RunDetailPage({
   params,
@@ -82,9 +61,9 @@ export default async function RunDetailPage({
   const core = await getCore();
   let detail: Awaited<ReturnType<typeof core.tasks.get>>;
   try {
-    detail = await core.tasks.get(id);
+    detail = await core.tasks.get(id, { includeArtifacts: activeTab === 'media' });
   } catch (err) {
-    if (err instanceof Error && err.message.includes('未找到任务')) {
+    if (err instanceof NotFoundError) {
       notFound();
     }
     throw err;
@@ -174,7 +153,7 @@ export default async function RunDetailPage({
 
       {activeTab === 'progress'
         ? await (async () => {
-            const runEvents = await loadRecentRunEvents(core, detail.id);
+            const runEvents = await core.tasks.recentEvents(detail.id, 500);
             return (
               <RunProgressTab
                 detail={detail}

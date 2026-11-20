@@ -1,4 +1,6 @@
+import { NotFoundError } from '@aidaily/core';
 import { getCore } from '@/lib/core';
+import { verifyLocalWebRequest } from '@/lib/request-security';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -29,6 +31,11 @@ export async function GET(
   request: Request,
   context: { params: Promise<{ id: string }> },
 ): Promise<Response> {
+  const sec = verifyLocalWebRequest(request);
+  if (!sec.ok) {
+    return Response.json({ error: sec.error }, { status: sec.status });
+  }
+
   const { id } = await context.params;
   const afterId = parseAfterIdCursor(request);
   if (afterId === null) {
@@ -37,12 +44,12 @@ export async function GET(
 
   const core = await getCore();
   try {
-    await core.tasks.get(id);
+    await core.tasks.getSummary(id);
   } catch (err) {
-    return Response.json(
-      { error: err instanceof Error ? err.message : `未找到任务: ${id}` },
-      { status: 404 },
-    );
+    if (err instanceof NotFoundError) {
+      return Response.json({ error: err.message }, { status: 404 });
+    }
+    throw err;
   }
 
   const encoder = new TextEncoder();
@@ -108,7 +115,7 @@ export async function GET(
           watchCtrl.signal,
           { afterId, pollMs: 200 },
         );
-        enqueueText(': done\n\n');
+        enqueueText('event: done\ndata: {"done":true}\n\n: done\n\n');
       } catch (err) {
         if (!watchCtrl.signal.aborted && !closed) {
           enqueueText(

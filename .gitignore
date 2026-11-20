@@ -28,3 +28,6 @@ coverage/
 .idea/
 .vscode/*
 !.vscode/extensions.json
+.VSCodeCounter/
+.baocut-out/
+/apps/web/AGENTS.md

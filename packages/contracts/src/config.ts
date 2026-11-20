@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { isAllowedUrlTarget } from './ssrf.js';
 import { ContentLimitsSchema } from './template.js';
 
 /** 支持在配置文件中单独指定调用方式与模型的五个 AI 处理环节 */
@@ -37,25 +38,36 @@ export const CliConfigSchema = z.object({
 /** 命令行工具配置类型 */
 export type CliConfig = z.infer<typeof CliConfigSchema>;
 
-/** 校验模型 API 的地址前缀，密钥单独通过配置引用读取 */
-function isModelApiBaseUrl(value: string): boolean {
+/** 判断当前运行环境是否显式允许模型接口连接本机回环地址 */
+export function isLocalModelApiAllowed(): boolean {
+  return typeof process !== 'undefined' && process.env?.AIDAILY_ALLOW_LOCAL_MODEL_API === '1';
+}
+
+/** 校验模型 API 的地址前缀，拒绝内网、元数据与非法地址格式 */
+export function isModelApiBaseUrl(value: string): boolean {
   if (!URL.canParse(value)) {
     return false;
   }
   const url = new URL(value);
-  return (
-    (url.protocol === 'https:' || url.protocol === 'http:') &&
-    !url.username &&
-    !url.password &&
-    !url.search &&
-    !url.hash
-  );
+  if (
+    (url.protocol !== 'https:' && url.protocol !== 'http:') ||
+    url.username ||
+    url.password ||
+    url.search ||
+    url.hash
+  ) {
+    return false;
+  }
+  return isAllowedUrlTarget(url, { allowLoopback: isLocalModelApiAllowed() });
 }
 
 const ModelApiBaseUrlSchema = z
   .string()
   .trim()
-  .refine(isModelApiBaseUrl, '请填写 HTTP(S) API 地址前缀，省略用户名、密码和查询参数');
+  .refine(
+    isModelApiBaseUrl,
+    '请填写公网可访问的 HTTP(S) API 地址前缀，禁止包含用户名、密码、查询参数或指向内网与元数据地址',
+  );
 const ModelApiProtocolSchema = z.enum(['chat-completions', 'responses']);
 const ModelApiJsonModeSchema = z.enum(['json-object', 'prompt']);
 
@@ -144,6 +156,16 @@ export const CollectorSettingsSchema = z.object({
 /** 采集配置类型 */
 export type CollectorSettings = z.infer<typeof CollectorSettingsSchema>;
 
+/** 历史产物、运行日志与临时文件自动清理保留策略 */
+export const RetentionSettingsSchema = z.object({
+  keepRuns: z.number().int().min(1).max(1000).default(30),
+  maxAgeDays: z.number().int().min(1).max(3650).default(30),
+  maxLogAgeDays: z.number().int().min(1).max(3650).default(30),
+  autoCleanup: z.boolean().default(false),
+});
+/** 数据保留与清理配置类型 */
+export type RetentionSettings = z.infer<typeof RetentionSettingsSchema>;
+
 /** 系统全局配置字段 */
 const SettingsFieldsSchema = z.object({
   version: z.literal(1),
@@ -154,9 +176,17 @@ const SettingsFieldsSchema = z.object({
     captureWebTables: true,
     captureTweetScreenshots: true,
   }),
+  retention: RetentionSettingsSchema.default({
+    keepRuns: 30,
+    maxAgeDays: 30,
+    maxLogAgeDays: 30,
+    autoCleanup: false,
+  }),
   issue: z.object({
     reserveFactor: z.number().int().min(1).max(5),
     minScore: z.number().min(1).max(10).optional(),
+    /** 是否允许少于目标条数直接出片或 0 条时自动跳过本期，默认关闭 */
+    allowPartial: z.boolean().default(false),
     freshnessHours: z.number().int().positive(),
     itemConcurrency: z.number().int().min(1).max(20),
     refill: z.object({
@@ -176,6 +206,10 @@ const SettingsFieldsSchema = z.object({
     /** 兼容旧配置快照保留的可选字段，当前选题不再按标题字符相似度直接删除候选 */
     titleSimilarityThreshold: z.number().min(0).max(1).optional(),
     metaTextBlacklist: z.array(z.string()),
+    /** 是否启用紧凑型口播提示词与精简文风约束，默认关闭 */
+    compactStyle: z.boolean().default(false),
+    /** 是否仅在高价值或显式指定配图时展示文章插图，默认关闭 */
+    requireImageOptIn: z.boolean().default(false),
   }),
   contentLimits: ContentLimitsSchema,
   ai: z.object({
@@ -239,6 +273,8 @@ const SettingsFieldsSchema = z.object({
       defaultTags: z.array(z.string()),
       aiDeclaration: z.literal(true),
       aiDisclaimerText: z.string().min(1),
+      /** 上传视频单次命令执行的超时秒数，省略时默认 600 秒 */
+      uploadTimeoutSec: z.number().int().min(30).max(7200).optional(),
     }),
   }),
   notify: z.object({

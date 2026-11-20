@@ -2,7 +2,25 @@ import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { execa } from 'execa';
+import { z } from 'zod';
+import { writeTtsFileAtomic } from './cache.js';
 import { levelSpeechPhrasesWav } from './leveling.js';
+
+const FfprobeDurationSchema = z.object({
+  format: z
+    .object({
+      duration: z.union([z.string(), z.number()]).optional(),
+    })
+    .optional(),
+});
+
+const LoudnormStatsSchema = z.object({
+  input_i: z.union([z.string(), z.number()]),
+  input_tp: z.union([z.string(), z.number()]),
+  input_lra: z.union([z.string(), z.number()]),
+  input_thresh: z.union([z.string(), z.number()]),
+  target_offset: z.union([z.string(), z.number()]),
+});
 
 /** 音频片段统一标准化参数 */
 export interface NormalizeSegmentOptions {
@@ -111,7 +129,7 @@ export async function probeAudioDurationMs(
   if (res.exitCode !== 0) {
     throw new Error(`ffprobe 读取音频时长失败 (${filePath}): ${res.stderr}`);
   }
-  const parsed = JSON.parse(res.stdout) as { format?: { duration?: string } };
+  const parsed = FfprobeDurationSchema.parse(JSON.parse(res.stdout));
   const sec = Number(parsed.format?.duration ?? '0');
   if (!Number.isFinite(sec) || sec <= 0) {
     throw new Error(`无法解析音频时长: ${filePath} (stdout=${res.stdout})`);
@@ -251,10 +269,14 @@ async function polishLoudness(opts: NormalizeSegmentOptions): Promise<void> {
   if (analysis.exitCode !== 0) throw new Error(`测量语音响度失败: ${analysis.stderr}`);
   const match = analysis.stderr.match(/\{[^{}]*"input_i"[^{}]*\}/s);
   if (!match) throw new Error('无法读取语音响度测量结果');
-  const stats = JSON.parse(match[0]) as Record<string, string>;
-  const values = ['input_i', 'input_tp', 'input_lra', 'input_thresh', 'target_offset'].map((key) =>
-    Number(stats[key]),
-  );
+  const rawStats = LoudnormStatsSchema.parse(JSON.parse(match[0]));
+  const values = [
+    rawStats.input_i,
+    rawStats.input_tp,
+    rawStats.input_lra,
+    rawStats.input_thresh,
+    rawStats.target_offset,
+  ].map((item) => Number(item));
   if (values.some((value) => !Number.isFinite(value))) throw new Error('语音响度测量结果无效');
   const postGate =
     opts.denoise !== false ? ',agate=threshold=0.002:ratio=2:range=0.25:attack=5:release=180' : '';
@@ -358,7 +380,7 @@ export async function concatSentenceWavs(
     }
 
     const listFile = path.join(workDir, 'concat.txt');
-    await fs.writeFile(listFile, `${lines.join('\n')}\n`, 'utf8');
+    await writeTtsFileAtomic(listFile, `${lines.join('\n')}\n`);
 
     await withAtomicWavWrite(opts.outFile, async (tmpOut) => {
       const res = await execa(

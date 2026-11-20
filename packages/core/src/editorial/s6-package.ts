@@ -9,7 +9,9 @@ import {
 import { buildNarrationParagraph } from '@aidaily/tts';
 import { TZDate } from '@date-fns/tz';
 import { format } from 'date-fns';
+import { z } from 'zod';
 import type { CoreContext } from '../context.js';
+import { PipelineError } from '../errors.js';
 import { lockRunBgm } from '../media/bgm.js';
 import {
   alignOrderByCompanyOverview,
@@ -26,6 +28,13 @@ import { renderPromptTemplate } from './prompts.js';
 import { resolveContentLimits } from './s4-polish.js';
 
 const MAX_PACKAGE_PRECHECK_RETRIES = 2;
+
+/** 整期节目编排检查点文件的契约校验结构 */
+export const PackageCheckpointSchema = z.object({
+  issueNumber: z.string().optional(),
+  date: z.string().optional(),
+  packageData: IssuePackageSchema,
+});
 
 /** 整期节目编排阶段完成后写入检查点的结果数据 */
 export interface PackageCheckpoint {
@@ -65,7 +74,10 @@ export async function runPackageStage(
     });
 
   if (passedItems.length === 0) {
-    throw new Error(`任务 ${runId} 没有已过审的新闻条目，无法进行整期编排`);
+    throw new PipelineError(
+      'package_failed',
+      `任务 ${runId} 没有已过审的新闻条目，无法进行整期编排`,
+    );
   }
 
   const limits = resolveContentLimits(settings, opts?.limitsOverride);
@@ -139,7 +151,7 @@ export async function runPackageStage(
       limits,
       publishConfig: settings.publish.bilibili,
       metaTextBlacklist: settings.editorial.metaTextBlacklist,
-      compact: settings.issue.minScore !== undefined,
+      compact: settings.editorial.compactStyle,
       forbiddenTokens: persona?.forbiddenTokens,
       hostSelfName: persona?.selfName,
     });
@@ -205,5 +217,8 @@ export async function runPackageStage(
     prompt = `${basePrompt}\n\n[上次编排输出未通过规则校验，请逐条修正以下问题后重新输出]:\n${check.errors.map((e) => `- ${e}`).join('\n')}`;
   }
 
-  throw new Error(`整期编排经过重试后仍未通过规则校验: ${lastErrors.join('; ')}`);
+  throw new PipelineError(
+    'package_failed',
+    `整期编排经过重试后仍未通过规则校验: ${lastErrors.join('; ')}`,
+  );
 }

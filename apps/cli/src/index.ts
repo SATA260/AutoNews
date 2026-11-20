@@ -1,6 +1,7 @@
 import { spawn } from 'node:child_process';
 import fsSync from 'node:fs';
 import fs from 'node:fs/promises';
+import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
@@ -52,6 +53,18 @@ const DEFAULT_IO: CliIo = {
   stdout: (text) => process.stdout.write(text),
   stderr: (text) => process.stderr.write(text),
 };
+
+/** 展开命令行文件路径前缀中的波浪号为用户主目录，并规范化为绝对路径 */
+function resolveCliInputPath(rawPath: string): string {
+  const trimmed = rawPath.trim();
+  if (trimmed === '~') {
+    return os.homedir();
+  }
+  if (trimmed.startsWith('~/') || trimmed.startsWith('~\\')) {
+    return path.join(os.homedir(), trimmed.slice(2));
+  }
+  return path.resolve(trimmed);
+}
 
 const EDIT_SUB_STEPS = ['summarize', 'polish', 'factcheck'] as const;
 
@@ -303,7 +316,7 @@ export function buildProgram(io: CliIo = DEFAULT_IO, onExitCode?: (code: number)
     }
   };
 
-  // 1. aidaily run -n <N> [--since <expr>] [--detach] [--trigger ...] [--schedule-id ...]
+  // 启动单期新闻视频生产任务
   program
     .command('run')
     .description('生成并运行一期 AI 每日报任务（必须通过 -n 指定新闻条数）')
@@ -446,7 +459,7 @@ export function buildProgram(io: CliIo = DEFAULT_IO, onExitCode?: (code: number)
       },
     );
 
-  // 2. aidaily resume <runId> [--from <stage>] [--latest-config] [--detach]
+  // 从中断或指定历史阶段恢复执行任务
   program
     .command('resume')
     .description('恢复中断/失败的任务，或从指定历史阶段重新执行')
@@ -514,7 +527,7 @@ export function buildProgram(io: CliIo = DEFAULT_IO, onExitCode?: (code: number)
       },
     );
 
-  // 3. aidaily retry-item <runId> <itemIds...> [--from summarize|polish|factcheck] [--latest-config] [--detach]
+  // 针对单条或多条新闻单独重新执行总结、润色或核查
   program
     .command('retry-item')
     .description(
@@ -601,7 +614,7 @@ export function buildProgram(io: CliIo = DEFAULT_IO, onExitCode?: (code: number)
       },
     );
 
-  // 4. aidaily retry-options <runId>
+  // 查看指定期次当前允许的重跑入口与宽限期信息
   program
     .command('retry-options')
     .description('查询指定任务当前允许的断点续跑点、可重跑阶段与截止时间')
@@ -617,7 +630,7 @@ export function buildProgram(io: CliIo = DEFAULT_IO, onExitCode?: (code: number)
       setExit(code);
     });
 
-  // 5. aidaily abandon <runId>
+  // 放弃尚未完成的任务并释放预留文章
   program
     .command('abandon')
     .description('放弃未完成或不再发布的任务，并立即释放其预留的新闻文章')
@@ -633,7 +646,7 @@ export function buildProgram(io: CliIo = DEFAULT_IO, onExitCode?: (code: number)
       setExit(code);
     });
 
-  // 6. aidaily cancel <runId>
+  // 向正在运行或排队中的任务发送取消信号
   program
     .command('cancel')
     .description('向排队中或正在执行的任务发出停止信号（停止后仍可随时恢复）')
@@ -649,7 +662,7 @@ export function buildProgram(io: CliIo = DEFAULT_IO, onExitCode?: (code: number)
       setExit(code);
     });
 
-  // 7. aidaily runs [--status <s,...>] [--limit 20]
+  // 按状态筛选或分页列出历史任务摘要
   program
     .command('runs')
     .description('查看历史与当前视频生成任务列表')
@@ -686,7 +699,7 @@ export function buildProgram(io: CliIo = DEFAULT_IO, onExitCode?: (code: number)
       setExit(code);
     });
 
-  // 8. aidaily show <runId> [--items]
+  // 展示单期任务的阶段详情与条目明细
   program
     .command('show')
     .description('查看单期任务的阶段进展、新闻条目与产物清单')
@@ -721,7 +734,7 @@ export function buildProgram(io: CliIo = DEFAULT_IO, onExitCode?: (code: number)
       setExit(code);
     });
 
-  // 9. aidaily logs <runId> [-f]
+  // 查看或实时跟踪单期任务的运行事件日志
   program
     .command('logs')
     .description('查看或实时追踪某期任务的执行事件日志')
@@ -787,7 +800,7 @@ export function buildProgram(io: CliIo = DEFAULT_IO, onExitCode?: (code: number)
       setExit(code);
     });
 
-  // 10. aidaily review <runId> [--open]
+  // 查看待审核投稿草稿或打开成品目录
   program
     .command('review')
     .description('查看待审核成片标题、章节简介、标签与文件位置')
@@ -819,7 +832,7 @@ export function buildProgram(io: CliIo = DEFAULT_IO, onExitCode?: (code: number)
       setExit(code);
     });
 
-  // 10b. aidaily cover <runId> [--title <t>] [--subtitle <s>]
+  // 读取或修改指定期次的视频封面文案并重绘封面图
   program
     .command('cover')
     .description('查看本期封面文字；传入 --title / --subtitle 时修改文字并只重新生成封面图片')
@@ -853,7 +866,7 @@ export function buildProgram(io: CliIo = DEFAULT_IO, onExitCode?: (code: number)
       setExit(code);
     });
 
-  // 11. aidaily approve <runId> [--title <t>] [--desc-file <f>] [--tags a,b] [--detach]
+  // 审核通过并投稿发布至 B 站
   program
     .command('approve')
     .description('确认成片审核通过，可选更新文案后立即投稿 B 站（强制开启 AI 声明）')
@@ -873,7 +886,7 @@ export function buildProgram(io: CliIo = DEFAULT_IO, onExitCode?: (code: number)
 
         let description: string | undefined;
         if (opts.descFile) {
-          description = await fs.readFile(path.resolve(opts.descFile), 'utf8');
+          description = await fs.readFile(resolveCliInputPath(opts.descFile), 'utf8');
         }
         const tags =
           opts.tags !== undefined
@@ -905,7 +918,7 @@ export function buildProgram(io: CliIo = DEFAULT_IO, onExitCode?: (code: number)
       },
     );
 
-  // 12. aidaily reject <runId> [--reason <r>]
+  // 人工审核驳回本期内容并释放占用文章
   program
     .command('reject')
     .description('人工审核驳回本期内容，并立即释放所占用的候选文章')
@@ -922,7 +935,7 @@ export function buildProgram(io: CliIo = DEFAULT_IO, onExitCode?: (code: number)
       setExit(code);
     });
 
-  // 13. aidaily consume <runId>
+  // 不上传平台，直接标记本期为仅本地消费完结
   program
     .command('consume')
     .description('不向 B 站投稿发布，仅将本期已选新闻计入历史已播库并释放多余文章')
@@ -938,7 +951,7 @@ export function buildProgram(io: CliIo = DEFAULT_IO, onExitCode?: (code: number)
       setExit(code);
     });
 
-  // 14. aidaily publish-retry <runId> [--detach]
+  // 在投稿明确失败后重新尝试向 B 站上传
   program
     .command('publish-retry')
     .description('对明确发布失败的期次重新发起 B 站上传（不适用于状态不明任务）')
@@ -961,7 +974,7 @@ export function buildProgram(io: CliIo = DEFAULT_IO, onExitCode?: (code: number)
       setExit(code);
     });
 
-  // 15. aidaily publish-confirm <runId> (--not-published | --bvid <BV>)
+  // 对上传状态不明的任务执行人工核实定案
   program
     .command('publish-confirm')
     .description('对上传途中中断且状态不明的期次人工核对定案')
@@ -997,7 +1010,7 @@ export function buildProgram(io: CliIo = DEFAULT_IO, onExitCode?: (code: number)
       setExit(code);
     });
 
-  // 16. aidaily config get [path] / set <path> <value>
+  // 读取或修改全局配置文件字段
   const configCmd = program.command('config').description('读写全局系统配置（支持点号嵌套路径）');
 
   configCmd
@@ -1053,7 +1066,7 @@ export function buildProgram(io: CliIo = DEFAULT_IO, onExitCode?: (code: number)
       },
     );
 
-  // 17. aidaily sources [list | test <id>]
+  // 查看与测试订阅信源状态
   const sourcesCmd = program
     .command('sources')
     .description('查看订阅信源健康状态或试抓单个信源')
@@ -1097,7 +1110,7 @@ export function buildProgram(io: CliIo = DEFAULT_IO, onExitCode?: (code: number)
       setExit(code);
     });
 
-  // 18. aidaily schedule list | create | update | remove | sync
+  // 管理本地定时生成任务并与系统调度器同步
   const scheduleCmd = program.command('schedule').description('管理每天自动运行的 macOS 定时任务');
 
   scheduleCmd
@@ -1290,28 +1303,36 @@ export function buildProgram(io: CliIo = DEFAULT_IO, onExitCode?: (code: number)
       setExit(code);
     });
 
-  // 19. aidaily models [--cli agy]
+  // 查询指定调用方式支持的模型名称列表
   program
     .command('models')
     .description('查询指定调用方式提供的模型列表')
-    .option('--cli <cli>', '本机 CLI 或 HTTP API 的配置名称', 'agy')
-    .action(async (opts: { cli: string }, cmd: Command) => {
+    .option('--cli <cli>', '本机 CLI 或 HTTP API 的配置名称（省略时默认取配置列表第一项）')
+    .action(async (opts: { cli?: string }, cmd: Command) => {
       const gOpts = getGlobals(cmd);
       const print = createPrinter(io, Boolean(gOpts.json));
       const code = await withCore(gOpts, async (core) => {
-        const models = await core.system.listModels(opts.cli);
+        const settings = core.config.getSettings();
+        const routeName =
+          opts.cli?.trim() ||
+          Object.values(settings.ai.stages)[0]?.cli ||
+          core.system.getModelRoutes()[0];
+        if (!routeName) {
+          throw new Error('当前未配置任何可用的模型调用方式，请先在 settings.yaml 中配置');
+        }
+        const models = await core.system.listModels(routeName);
         const text =
           models.length > 0 ? models.map((m) => `  - ${m}`).join('\n') : '未查询到可用模型。';
         print(
-          { cli: opts.cli, models },
-          `调用方式「${opts.cli}」的模型列表（共 ${models.length} 个）\n${text}`,
+          { cli: routeName, models },
+          `调用方式「${routeName}」的模型列表（共 ${models.length} 个）\n${text}`,
         );
         return 0;
       });
       setExit(code);
     });
 
-  // 20. aidaily doctor
+  // 执行环境与存储依赖自检
   program
     .command('doctor')
     .description('检查 Node、大模型工具、音视频依赖、Chromium、投稿工具、语音合成与磁盘空间')
@@ -1326,7 +1347,42 @@ export function buildProgram(io: CliIo = DEFAULT_IO, onExitCode?: (code: number)
       setExit(code);
     });
 
-  // 21. aidaily bili login
+  // 按保留策略清理过期历史任务产物与游离日志
+  program
+    .command('cleanup')
+    .description('按保留策略安全清理过期历史任务目录、游离运行日志与残留临时文件')
+    .option('--keep-runs <N>', '至少保留最近多少期任务')
+    .option('--max-age-days <days>', '仅清理早于指定天数的已完结历史任务')
+    .option('--dry-run', '仅预演并输出待清理范围，不实际删除文件', false)
+    .action(
+      async (opts: { keepRuns?: string; maxAgeDays?: string; dryRun: boolean }, cmd: Command) => {
+        const gOpts = getGlobals(cmd);
+        const print = createPrinter(io, Boolean(gOpts.json));
+        const keepRuns =
+          opts.keepRuns !== undefined ? parsePositiveInt(opts.keepRuns, '--keep-runs') : undefined;
+        const maxAgeDays =
+          opts.maxAgeDays !== undefined
+            ? parsePositiveInt(opts.maxAgeDays, '--max-age-days')
+            : undefined;
+        const code = await withCore(gOpts, async (core) => {
+          const result = await core.system.cleanup({
+            keepRuns,
+            maxAgeDays,
+            dryRun: opts.dryRun,
+          });
+          const reclaimedMiB = (result.reclaimedBytes / (1024 * 1024)).toFixed(2);
+          const prefix = result.dryRun ? '[预演] ' : '';
+          print(
+            result,
+            `${prefix}清理完成：移除历史任务 ${result.removedRunIds.length} 期、孤立目录 ${result.removedOrphanDirs.length} 个、事件日志 ${result.removedRunEvents} 条、模型记录 ${result.removedLlmCalls} 条、临时残留 ${result.removedTmpEntries} 项，释放空间 ${reclaimedMiB} MiB。`,
+          );
+          return 0;
+        });
+        setExit(code);
+      },
+    );
+
+  // 调用投稿工具交互式扫码登录 B 站账号
   const biliCmd = program.command('bili').description('B 站账号登录与凭据辅助操作');
 
   biliCmd
@@ -1341,7 +1397,7 @@ export function buildProgram(io: CliIo = DEFAULT_IO, onExitCode?: (code: number)
       setExit(code);
     });
 
-  // 22. aidaily x-login [--import <file>] [--status]
+  // 管理 X 平台网页抓取登录态凭据
   program
     .command('x-login')
     .description('管理 X (Twitter) 网页抓取登录态 Cookie（支持交互式浏览器登录或导入 Cookie 文件）')
@@ -1362,7 +1418,7 @@ export function buildProgram(io: CliIo = DEFAULT_IO, onExitCode?: (code: number)
           return 0;
         }
         if (opts.import) {
-          const absFile = path.resolve(opts.import);
+          const absFile = resolveCliInputPath(opts.import);
           const raw = await fs.readFile(absFile, 'utf8');
           const status = await core.sources.importXCookies(raw);
           print(status, `X Cookie 导入成功：${status.detail}\n已保存至: ${status.cookiePath}`);

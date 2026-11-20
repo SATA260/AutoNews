@@ -129,7 +129,7 @@ export function computeNextScheduleRunAt(
   return new Date(target.getTime()).toISOString();
 }
 
-/** 构造 macOS `launchd` 定时任务的 XML plist 配置内容 */
+/** 构造 macOS `launchd` 定时任务的 XML plist 配置内容，按宿主本地时钟换算触发时刻并注入配置时区环境变量 */
 export function buildLaunchAgentPlist(opts: {
   id: string;
   time: string;
@@ -139,10 +139,29 @@ export function buildLaunchAgentPlist(opts: {
   logsDir: string;
   cliScriptPath: string;
   extraBins?: string[];
+  timezone?: string;
+  hostTimezone?: string;
+  now?: Date;
 }): string {
   const [hhStr, mmStr] = ScheduleTimeSchema.parse(opts.time).split(':');
-  const hour = Number(hhStr);
-  const minute = Number(mmStr);
+  let hour = Number(hhStr);
+  let minute = Number(mmStr);
+  if (opts.timezone) {
+    const nextIso = computeNextScheduleRunAt(
+      opts.time,
+      true,
+      opts.now ?? new Date(),
+      opts.timezone,
+    );
+    if (nextIso) {
+      const nextMs = Date.parse(nextIso);
+      const localDate = opts.hostTimezone
+        ? new TZDate(nextMs, opts.hostTimezone)
+        : new Date(nextMs);
+      hour = localDate.getHours();
+      minute = localDate.getMinutes();
+    }
+  }
   const label = buildScheduleLabel(opts.id);
   const logFile = path.join(opts.logsDir, 'scheduler.log');
 
@@ -204,6 +223,9 @@ export function buildLaunchAgentPlist(opts: {
     '    <dict>',
     '      <key>PATH</key>',
     `      <string>${escapeXml(pathList)}</string>`,
+    ...(opts.timezone
+      ? ['      <key>TZ</key>', `      <string>${escapeXml(opts.timezone)}</string>`]
+      : []),
     '    </dict>',
     '    <key>StandardOutPath</key>',
     `    <string>${escapeXml(logFile)}</string>`,
@@ -311,6 +333,8 @@ export function createSchedulerService(
         logsDir: ctx.paths.logsDir,
         cliScriptPath: resolveCliScriptPath(ctx.paths.rootDir, opts?.cliScriptPath),
         extraBins: collectExtraBins(),
+        timezone: ctx.settings.timezone,
+        now: ctx.now(),
       });
       await writeFileAtomic(plistPath, plistXml, { mode: 0o644 });
       const res = await launchctlExec(['bootstrap', domain, plistPath]);

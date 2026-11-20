@@ -7,24 +7,40 @@ import {
   type Settings,
   type Timeline,
 } from '@aidaily/contracts';
+import { z } from 'zod';
 import type { CoreContext } from '../context.js';
 import { PipelineError } from '../errors.js';
 import { writeJsonAtomic } from '../storage/files.js';
 import { mediaTimeoutMs, runMediaCommand } from './ffmpeg.js';
 
-interface FfprobeStream {
-  codec_type?: string;
-  width?: number;
-  height?: number;
-  r_frame_rate?: string;
-  avg_frame_rate?: string;
-  duration?: string;
-}
-
-interface FfprobeOutput {
-  streams?: FfprobeStream[];
-  format?: { duration?: string };
-}
+/** 质检阶段解析 `ffprobe` 音视频流参数输出的契约结构 */
+const FfprobeOutputSchema = z.object({
+  streams: z
+    .array(
+      z.object({
+        codec_type: z.string().optional(),
+        width: z.number().optional(),
+        height: z.number().optional(),
+        r_frame_rate: z.string().optional(),
+        avg_frame_rate: z.string().optional(),
+        duration: z
+          .union([z.string(), z.number()])
+          .transform((v) => String(v))
+          .optional(),
+      }),
+    )
+    .optional(),
+  format: z
+    .object({
+      duration: z
+        .union([z.string(), z.number()])
+        .transform((v) => String(v))
+        .optional(),
+    })
+    .optional(),
+});
+/** 解析 `ffprobe` 输出的媒体流与容器信息类型 */
+type FfprobeOutput = z.infer<typeof FfprobeOutputSchema>;
 
 /** 解析 ffprobe 返回的分数格式帧率（如 `30/1` 或 `30000/1001`） */
 function parseFpsFraction(raw?: string): number {
@@ -143,7 +159,7 @@ export async function runQaStage(opts: {
       ],
       { signal, actionLabel: 'ffprobe 检查成片流参数' },
     );
-    parsed = JSON.parse(probeOut.stdout) as FfprobeOutput;
+    parsed = FfprobeOutputSchema.parse(JSON.parse(probeOut.stdout));
   } catch (err) {
     if (err instanceof Error && err.name === 'AbortError') {
       throw err;

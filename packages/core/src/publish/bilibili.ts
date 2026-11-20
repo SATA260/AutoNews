@@ -223,12 +223,14 @@ function markPublishUncertainAtomic(
   runId: string,
   errorDetail: string,
   eventMessage: string,
+  bvid?: string | null,
 ): void {
   const nowIso = ctx.now().toISOString();
   inTransaction(ctx.db, () => {
     const pub = ctx.repos.publish.getByRun(runId);
     if (pub) {
       ctx.repos.publish.updateStatus(runId, 'uncertain', {
+        ...(bvid ? { bvid } : {}),
         error: errorDetail,
         updatedAt: nowIso,
       });
@@ -246,6 +248,7 @@ function markPublishUncertainAtomic(
       stage: 'publish',
       type: 'publish_uncertain',
       message: eventMessage,
+      ...(bvid ? { data: { bvid } } : {}),
     });
   });
 }
@@ -328,6 +331,7 @@ export async function executeBilibiliUpload(opts: {
   let lostLock = false;
   let hb: ReturnType<typeof startRunHeartbeat> | null = null;
   let enteredPublishingState = false;
+  let uploadedBvid: string | null = null;
   let committed = false;
 
   try {
@@ -407,7 +411,6 @@ export async function executeBilibiliUpload(opts: {
 
     let lastErr: Error | null = null;
     let lastAttemptFailedCleanly = false;
-    let uploadedBvid: string | null = null;
     const totalAttempts = MAX_UPLOAD_RETRIES + 1;
 
     for (let attempt = 1; attempt <= totalAttempts; attempt++) {
@@ -416,7 +419,9 @@ export async function executeBilibiliUpload(opts: {
       }
       if (combinedSignal.aborted) {
         if (lastAttemptFailedCleanly) {
-          throw new PipelineError('publish_failed', '重试等待期间收到取消信号，已停止继续上传');
+          const abortMsg = '重试等待期间收到取消信号，已停止继续上传';
+          await markPublishFailedAtomic(ctx, runId, settings, abortMsg);
+          throw new PipelineError('publish_failed', abortMsg);
         }
         throw new DOMException('已取消', 'AbortError');
       }
@@ -440,7 +445,7 @@ export async function executeBilibiliUpload(opts: {
         const res = await ctx.bridge.exec(bilibiliCfg.cli, uploadArgs, {
           cwd: ctx.paths.rootDir,
           env: { PATH: Array.from(new Set(pathEntries)).join(path.delimiter) },
-          timeoutMs: 600_000,
+          timeoutMs: (bilibiliCfg.uploadTimeoutSec ?? 600) * 1000,
           signal: combinedSignal,
         });
 
@@ -505,7 +510,9 @@ export async function executeBilibiliUpload(opts: {
               });
             }
             if (sleepErr instanceof Error && sleepErr.name === 'AbortError') {
-              throw new PipelineError('publish_failed', '重试等待期间收到取消信号，已停止重传', {
+              const abortMsg = '重试等待期间收到取消信号，已停止重传';
+              await markPublishFailedAtomic(ctx, runId, settings, abortMsg);
+              throw new PipelineError('publish_failed', abortMsg, {
                 cause: sleepErr,
               });
             }
@@ -522,7 +529,10 @@ export async function executeBilibiliUpload(opts: {
     }
 
     if (lostLock) {
-      throw new PipelineError('interrupted', '运行锁已被其他进程接管，禁止提交发布结果');
+      throw new PipelineError(
+        'publish_uncertain',
+        '运行锁已被其他进程接管，投稿已成功返回 BV 号但禁止自动提交',
+      );
     }
 
     const doneIso = ctx.now().toISOString();
@@ -549,14 +559,18 @@ export async function executeBilibiliUpload(opts: {
     );
     committed = true;
 
-    emitRunEvent(ctx, {
-      runId,
-      level: 'info',
-      stage: 'publish',
-      type: 'run_published',
-      message: `B 站投稿成功（BV 号：${uploadedBvid}），已消耗 ${stats.consumedArticleCount} 篇文章并释放 ${stats.releasedUnusedCount} 篇未用文章`,
-      data: { bvid: uploadedBvid, ...stats, aiDeclaration: true },
-    });
+    try {
+      emitRunEvent(ctx, {
+        runId,
+        level: 'info',
+        stage: 'publish',
+        type: 'run_published',
+        message: `B 站投稿成功（BV 号：${uploadedBvid}），已消耗 ${stats.consumedArticleCount} 篇文章并释放 ${stats.releasedUnusedCount} 篇未用文章`,
+        data: { bvid: uploadedBvid, ...stats, aiDeclaration: true },
+      });
+    } catch (eventErr) {
+      ctx.logger.warn({ err: eventErr, runId, bvid: uploadedBvid }, '记录发布成功事件时出错');
+    }
 
     try {
       await ctx.notifier.notify({
@@ -572,7 +586,20 @@ export async function executeBilibiliUpload(opts: {
     return { bvid: uploadedBvid };
   } catch (err) {
     if (committed) {
-      return { bvid: ctx.repos.publish.getByRun(runId)?.bvid ?? '' };
+      return { bvid: uploadedBvid ?? ctx.repos.publish.getByRun(runId)?.bvid ?? '' };
+    }
+    if (uploadedBvid) {
+      const detailMsg = err instanceof Error ? err.message : String(err);
+      const uncertainMsg = `B 站已返回收稿 BV 号 ${uploadedBvid}，但后续提交保存失败（${detailMsg}），已转为状态不明保护并禁止重传`;
+      try {
+        markPublishUncertainAtomic(ctx, runId, uncertainMsg, uncertainMsg, uploadedBvid);
+      } catch (markErr) {
+        ctx.logger.warn(
+          { err: markErr, runId, bvid: uploadedBvid },
+          '投稿已返回 BV 号但回写状态不明保护记录时出错',
+        );
+      }
+      throw new PipelineError('publish_uncertain', uncertainMsg, { cause: err });
     }
     if (lostLock) {
       throw new PipelineError('interrupted', '运行锁已被其他进程接管，停止投稿上传', {

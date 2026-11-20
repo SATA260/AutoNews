@@ -1,7 +1,8 @@
 import fs from 'node:fs/promises';
-import type { SourceDef } from '@aidaily/contracts';
-import { type Browser, chromium } from 'playwright';
+import { isAllowedUrlTarget, type SourceDef } from '@aidaily/contracts';
+import { type Browser, type BrowserContext, chromium } from 'playwright';
 import { closeBrowserSafely, resolveChromiumExecutablePath } from '../media/browser.js';
+import { assertSafeFetchTarget } from './ssrf.js';
 import { extractTweetsFromGraphQlPayload, parseXCookiesFromText } from './x-collector.js';
 
 /** 从 X 时间线抓取或公开接口查询得到的单条推文结构化数据 */
@@ -52,7 +53,7 @@ export interface CollectorBrowserDriver {
   /** 加载并渲染动态网页列表后返回完整 HTML 文本 */
   fetchRenderedHtml(
     url: string,
-    opts?: { timeoutMs?: number; signal?: AbortSignal },
+    opts?: { timeoutMs?: number; allowedOrigins?: readonly string[]; signal?: AbortSignal },
   ): Promise<string>;
   /** 使用本机保存的 X 登录凭证读取指定账号或列表时间线推文 */
   fetchXTimeline(
@@ -337,38 +338,133 @@ function buildDomFragmentHtml(fragment: DomChartFragment): string {
 }
 
 /** 创建基于 Playwright Chromium 的采集与局部截图驱动（懒启动并在同轮采集中复用同一浏览器） */
+/** 在已绑定取消信号监听的浏览器上下文内执行页面任务，确保中止时立即关闭上下文释放资源 */
+async function withAbortableContext<T>(
+  context: BrowserContext,
+  signal: AbortSignal | undefined,
+  run: (ctx: BrowserContext) => Promise<T>,
+): Promise<T> {
+  if (signal?.aborted) {
+    await context.close().catch(() => undefined);
+    throw new DOMException('已取消', 'AbortError');
+  }
+  const onAbort = () => {
+    void context.close().catch(() => undefined);
+  };
+  signal?.addEventListener('abort', onAbort, { once: true });
+  try {
+    return await run(context);
+  } finally {
+    signal?.removeEventListener('abort', onAbort);
+    await context.close().catch(() => undefined);
+  }
+}
+
+/** 创建基于 Playwright Chromium 的默认采集浏览器驱动 */
 export function createPlaywrightCollectorDriver(): CollectorBrowserDriver {
   let browserPromise: Promise<Browser> | null = null;
   let browserInstance: Browser | null = null;
+  let closed = false;
 
   const getBrowser = async (signal?: AbortSignal): Promise<Browser> => {
-    if (signal?.aborted) {
+    if (closed || signal?.aborted) {
       throw new DOMException('已取消', 'AbortError');
     }
-    if (!browserPromise) {
-      browserPromise = (async () => {
-        const executablePath = await resolveChromiumExecutablePath();
-        const launched = await chromium.launch({
-          headless: true,
-          ...(executablePath ? { executablePath } : {}),
-        });
-        browserInstance = launched;
-        return launched;
-      })();
+    if (browserInstance && !browserInstance.isConnected()) {
+      browserInstance = null;
+      browserPromise = null;
     }
-    return browserPromise;
+    if (!browserPromise) {
+      let pending: Promise<Browser> | null = null;
+      pending = (async () => {
+        try {
+          const executablePath = await resolveChromiumExecutablePath();
+          const launched = await chromium.launch({
+            headless: true,
+            ...(executablePath ? { executablePath } : {}),
+          });
+          if (closed) {
+            await closeBrowserSafely(launched);
+            throw new DOMException('已取消', 'AbortError');
+          }
+          browserInstance = launched;
+          launched.once('disconnected', () => {
+            if (browserInstance === launched) {
+              browserInstance = null;
+              browserPromise = null;
+            }
+          });
+          return launched;
+        } catch (err) {
+          if (pending !== null && browserPromise === pending) {
+            browserPromise = null;
+            browserInstance = null;
+          }
+          throw err;
+        }
+      })();
+      browserPromise = pending;
+    }
+
+    if (!signal) {
+      return browserPromise;
+    }
+    return await new Promise<Browser>((resolve, reject) => {
+      const onAbort = () => reject(new DOMException('已取消', 'AbortError'));
+      if (signal.aborted) {
+        onAbort();
+        return;
+      }
+      signal.addEventListener('abort', onAbort, { once: true });
+      browserPromise?.then(
+        (browser) => {
+          signal.removeEventListener('abort', onAbort);
+          resolve(browser);
+        },
+        (err) => {
+          signal.removeEventListener('abort', onAbort);
+          reject(err);
+        },
+      );
+    });
   };
 
   return {
     /** 打开无头浏览器加载动态网页，等待主内容渲染后返回完整 HTML */
     async fetchRenderedHtml(url, opts) {
+      await assertSafeFetchTarget(new URL(url), {
+        fetchImpl: globalThis.fetch,
+        allowedOrigins: opts?.allowedOrigins,
+      });
       const browser = await getBrowser(opts?.signal);
       const context = await browser.newContext({
         userAgent: BROWSER_USER_AGENT,
         viewport: { width: 1366, height: 900 },
       });
-      try {
-        const page = await context.newPage();
+      return withAbortableContext(context, opts?.signal, async (ctx) => {
+        await ctx.route('**/*', async (route) => {
+          const reqUrl = route.request().url();
+          if (
+            reqUrl.startsWith('data:') ||
+            reqUrl.startsWith('blob:') ||
+            reqUrl === 'about:blank'
+          ) {
+            await route.continue();
+            return;
+          }
+          try {
+            const parsed = new URL(reqUrl);
+            if (!isAllowedUrlTarget(parsed, { allowedOrigins: opts?.allowedOrigins })) {
+              await route.abort('blockedbyclient');
+              return;
+            }
+          } catch {
+            await route.abort('blockedbyclient');
+            return;
+          }
+          await route.continue();
+        });
+        const page = await ctx.newPage();
         await page.goto(url, {
           waitUntil: 'domcontentloaded',
           timeout: opts?.timeoutMs ?? 25_000,
@@ -380,13 +476,14 @@ export function createPlaywrightCollectorDriver(): CollectorBrowserDriver {
           .catch(() => undefined);
         await page.waitForTimeout(1_200);
         return await page.content();
-      } finally {
-        await context.close().catch(() => undefined);
-      }
+      });
     },
 
     /** 加载本机 X 登录凭证并抓取账号主页或列表最新推文，优先解析接口结构化数据并以 DOM 提取兜底 */
     async fetchXTimeline(source, cookieFileAbs, opts) {
+      if (opts?.signal?.aborted || closed) {
+        throw new DOMException('已取消', 'AbortError');
+      }
       const rawCookieText = await fs.readFile(cookieFileAbs, 'utf8');
       const cookies = parseXCookiesFromText(rawCookieText);
       const browser = await getBrowser(opts?.signal);
@@ -395,10 +492,10 @@ export function createPlaywrightCollectorDriver(): CollectorBrowserDriver {
         viewport: { width: 1366, height: 1100 },
       });
 
-      const collectedTweets = new Map<string, RawXTweet>();
-      try {
-        await context.addCookies(cookies);
-        const page = await context.newPage();
+      return withAbortableContext(context, opts?.signal, async (ctx) => {
+        const collectedTweets = new Map<string, RawXTweet>();
+        await ctx.addCookies(cookies);
+        const page = await ctx.newPage();
 
         page.on('response', async (res) => {
           const resUrl = res.url();
@@ -502,9 +599,7 @@ export function createPlaywrightCollectorDriver(): CollectorBrowserDriver {
         }
 
         return Array.from(collectedTweets.values());
-      } finally {
-        await context.close().catch(() => undefined);
-      }
+      });
     },
 
     /** 优先用官方短推嵌入卡片、在超长或超时时自动用高保真原帖卡片渲染为 2 倍分辨率 PNG */
@@ -520,31 +615,38 @@ export function createPlaywrightCollectorDriver(): CollectorBrowserDriver {
           deviceScaleFactor: 2,
         });
         try {
-          const page = await embedCtx.newPage();
-          const embedUrl = `https://platform.twitter.com/embed/Tweet.html?id=${tweet.tweetId}&theme=light&dnt=true`;
-          await page.goto(embedUrl, { waitUntil: 'domcontentloaded', timeout: 5_000 });
-          const cardLocator = page.locator('article, .twitter-tweet-rendered, #app').first();
-          await cardLocator.waitFor({ state: 'visible', timeout: 5_000 });
-          await page.waitForTimeout(400);
-          const box = await cardLocator.boundingBox();
-          const bodyText = await page.evaluate(() => document.body?.textContent ?? '');
-          const looksValid =
-            box &&
-            box.width >= 280 &&
-            box.height >= 120 &&
-            !/this post is unavailable|nothing to see here|something went wrong/i.test(bodyText);
-          if (looksValid) {
+          const embedRes = await withAbortableContext(embedCtx, opts?.signal, async (ctx) => {
+            const page = await ctx.newPage();
+            const embedUrl = `https://platform.twitter.com/embed/Tweet.html?id=${tweet.tweetId}&theme=light&dnt=true`;
+            await page.goto(embedUrl, { waitUntil: 'domcontentloaded', timeout: 5_000 });
+            const cardLocator = page.locator('article, .twitter-tweet-rendered, #app').first();
+            await cardLocator.waitFor({ state: 'visible', timeout: 5_000 });
+            await page.waitForTimeout(400);
+            const box = await cardLocator.boundingBox();
+            const bodyText = await page.evaluate(() => document.body?.textContent ?? '');
+            const looksValid =
+              box &&
+              box.width >= 280 &&
+              box.height >= 120 &&
+              !/this post is unavailable|nothing to see here|something went wrong/i.test(bodyText);
+            if (!looksValid) {
+              return null;
+            }
             const png = await cardLocator.screenshot({ type: 'png' });
             return {
               png,
               width: Math.round(box.width * 2),
               height: Math.round(box.height * 2),
             };
+          });
+          if (embedRes) {
+            return embedRes;
           }
-        } catch {
+        } catch (err) {
+          if (opts?.signal?.aborted) {
+            throw err;
+          }
           // 官方嵌入页超时或网络受阻时无缝切换本地高保真卡片截图
-        } finally {
-          await embedCtx.close().catch(() => undefined);
         }
       }
 
@@ -554,23 +656,26 @@ export function createPlaywrightCollectorDriver(): CollectorBrowserDriver {
         javaScriptEnabled: false,
       });
       try {
-        const page = await fallbackCtx.newPage();
-        await page.setContent(buildTweetCardHtml(tweet), { waitUntil: 'load', timeout: 8_000 });
-        const locator = page.locator('#tweet-card');
-        const box = await locator.boundingBox();
-        if (!box || box.width < 100 || box.height < 60) {
-          return null;
+        return await withAbortableContext(fallbackCtx, opts?.signal, async (ctx) => {
+          const page = await ctx.newPage();
+          await page.setContent(buildTweetCardHtml(tweet), { waitUntil: 'load', timeout: 8_000 });
+          const locator = page.locator('#tweet-card');
+          const box = await locator.boundingBox();
+          if (!box || box.width < 100 || box.height < 60) {
+            return null;
+          }
+          const png = await locator.screenshot({ type: 'png' });
+          return {
+            png,
+            width: Math.round(box.width * 2),
+            height: Math.round(box.height * 2),
+          };
+        });
+      } catch (err) {
+        if (opts?.signal?.aborted) {
+          throw err;
         }
-        const png = await locator.screenshot({ type: 'png' });
-        return {
-          png,
-          width: Math.round(box.width * 2),
-          height: Math.round(box.height * 2),
-        };
-      } catch {
         return null;
-      } finally {
-        await fallbackCtx.close().catch(() => undefined);
       }
     },
 
@@ -583,35 +688,41 @@ export function createPlaywrightCollectorDriver(): CollectorBrowserDriver {
         javaScriptEnabled: false,
       });
       try {
-        const page = await context.newPage();
-        await page.setContent(buildDomFragmentHtml(fragment), {
-          waitUntil: 'load',
-          timeout: 8_000,
+        return await withAbortableContext(context, opts?.signal, async (ctx) => {
+          const page = await ctx.newPage();
+          await page.setContent(buildDomFragmentHtml(fragment), {
+            waitUntil: 'load',
+            timeout: 8_000,
+          });
+          const locator = page.locator('#chart-frame');
+          const box = await locator.boundingBox();
+          if (!box || box.width < 120 || box.height < 60) {
+            return null;
+          }
+          const png = await locator.screenshot({ type: 'png' });
+          return {
+            png,
+            width: Math.round(box.width * 2),
+            height: Math.round(box.height * 2),
+          };
         });
-        const locator = page.locator('#chart-frame');
-        const box = await locator.boundingBox();
-        if (!box || box.width < 120 || box.height < 60) {
-          return null;
+      } catch (err) {
+        if (opts?.signal?.aborted) {
+          throw err;
         }
-        const png = await locator.screenshot({ type: 'png' });
-        return {
-          png,
-          width: Math.round(box.width * 2),
-          height: Math.round(box.height * 2),
-        };
-      } catch {
         return null;
-      } finally {
-        await context.close().catch(() => undefined);
       }
     },
 
-    /** 安全销毁复用的无头浏览器进程 */
+    /** 安全销毁复用的无头浏览器进程并阻止后续重复拉起 */
     async close() {
+      closed = true;
+      const pending = browserPromise;
       const active = browserInstance;
       browserInstance = null;
       browserPromise = null;
-      await closeBrowserSafely(active);
+      const resolved = active ?? (await pending?.catch(() => null)) ?? null;
+      await closeBrowserSafely(resolved);
     },
   };
 }

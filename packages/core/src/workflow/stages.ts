@@ -3,13 +3,12 @@ import {
   type ContentLimits,
   type PIPELINE_STAGES,
   type Settings,
-  type Timeline,
   TimelineSchema,
 } from '@aidaily/contracts';
 import { collectSources } from '../collector/index.js';
 import type { CoreContext } from '../context.js';
 import {
-  type PackageCheckpoint,
+  PackageCheckpointSchema,
   runEditStage,
   runPackageStage,
   runSelectStage,
@@ -17,7 +16,7 @@ import {
 import { runRenderStage } from '../media/compositor.js';
 import { runNarrateStage } from '../media/narration.js';
 import { runQaStage } from '../media/qa.js';
-import { readJsonOrNull } from '../storage/files.js';
+import { readJsonOrNullWithSchema } from '../storage/files.js';
 import { resolveEffectiveContentLimits } from '../templates/registry.js';
 
 /** 自动化流程中按顺序执行的步骤名称类型 */
@@ -91,7 +90,9 @@ export const DEFAULT_STAGE_EXECUTORS: Record<PipelineStage, StageExecutor> = {
   /** 调用语音合成并生成整期视频时间轴 */
   async narrate({ ctx, runId, settings, signal }) {
     const pkgFile = path.join(ctx.paths.runDir(runId), STAGE_CHECKPOINT_REL_PATH.package);
-    const pkgCheckpoint = await readJsonOrNull<PackageCheckpoint>(pkgFile);
+    const pkgCheckpoint = await readJsonOrNullWithSchema(pkgFile, PackageCheckpointSchema, {
+      label: '整期编排检查点',
+    });
     if (!pkgCheckpoint?.packageData) {
       throw new Error(`任务 ${runId} 缺少整期编排检查点，无法开始配音合成`);
     }
@@ -108,15 +109,20 @@ export const DEFAULT_STAGE_EXECUTORS: Record<PipelineStage, StageExecutor> = {
   /** 调用前端视觉模板截图并合成带响度均衡音轨的高清成片与封面图 */
   async render({ ctx, runId, settings, signal }) {
     const runDir = ctx.paths.runDir(runId);
-    const pkgCheckpoint = await readJsonOrNull<PackageCheckpoint>(
+    const pkgCheckpoint = await readJsonOrNullWithSchema(
       path.join(runDir, STAGE_CHECKPOINT_REL_PATH.package),
+      PackageCheckpointSchema,
+      { label: '整期编排检查点' },
     );
     if (!pkgCheckpoint?.packageData) {
       throw new Error(`任务 ${runId} 缺少整期编排检查点，无法开始视频渲染`);
     }
-    const rawTimeline = await readJsonOrNull<Timeline>(path.join(runDir, 'timeline.json'));
-    const parsedTimeline = TimelineSchema.safeParse(rawTimeline);
-    if (!parsedTimeline.success) {
+    const parsedTimeline = await readJsonOrNullWithSchema(
+      path.join(runDir, 'timeline.json'),
+      TimelineSchema,
+      { label: '视频时间轴 timeline.json' },
+    );
+    if (!parsedTimeline) {
       throw new Error(`任务 ${runId} 缺少合法的时间轴文件，无法开始视频渲染`);
     }
     return runRenderStage({
@@ -124,7 +130,7 @@ export const DEFAULT_STAGE_EXECUTORS: Record<PipelineStage, StageExecutor> = {
       runId,
       settings,
       packageData: pkgCheckpoint.packageData,
-      timeline: parsedTimeline.data,
+      timeline: parsedTimeline,
       signal,
     });
   },
@@ -132,16 +138,19 @@ export const DEFAULT_STAGE_EXECUTORS: Record<PipelineStage, StageExecutor> = {
   /** 对合成的成片视频执行自动化音画参数、时长同步与空白画面检查 */
   async qa({ ctx, runId, settings, signal }) {
     const runDir = ctx.paths.runDir(runId);
-    const rawTimeline = await readJsonOrNull<Timeline>(path.join(runDir, 'timeline.json'));
-    const parsedTimeline = TimelineSchema.safeParse(rawTimeline);
-    if (!parsedTimeline.success) {
+    const parsedTimeline = await readJsonOrNullWithSchema(
+      path.join(runDir, 'timeline.json'),
+      TimelineSchema,
+      { label: '视频时间轴 timeline.json' },
+    );
+    if (!parsedTimeline) {
       throw new Error(`任务 ${runId} 缺少合法的时间轴文件，无法执行成片质检`);
     }
     return runQaStage({
       ctx,
       runId,
       settings,
-      timeline: parsedTimeline.data,
+      timeline: parsedTimeline,
       signal,
     });
   },

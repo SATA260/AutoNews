@@ -117,6 +117,9 @@ async function setupDrillWorkspace() {
     doc.setIn(['ai', 'providers'], {});
     doc.setIn(['tts', 'provider'], 'silent');
     doc.deleteIn(['issue', 'minScore']);
+    doc.setIn(['issue', 'allowPartial'], false);
+    doc.setIn(['editorial', 'compactStyle'], false);
+    doc.setIn(['editorial', 'requireImageOptIn'], false);
   });
   await updateSettingsFile(path.join(rootDir, 'config', 'settings.yaml'), {
     clis: {
@@ -172,7 +175,7 @@ async function openDrillCore(opts: Parameters<typeof createCore>[0]): Promise<Co
   return core;
 }
 
-describe('M11 fault recovery and resilience drills', () => {
+describe('fault recovery and resilience drills', () => {
   it('Drill 1: recovers from collect_all_failed after network disconnect and emits run_failed + recovery events', async () => {
     const { rootDir } = await setupDrillWorkspace();
     let currentNow = new Date('2026-11-16T10:00:00.000Z');

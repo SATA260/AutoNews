@@ -12,3 +12,15 @@ export class PipelineError extends Error {
     this.code = code;
   }
 }
+
+/**
+ * 资源不存在异常，便于上层接口或页面统一识别并映射为 404 状态。
+ */
+export class NotFoundError extends Error {
+  readonly code = 'NOT_FOUND';
+
+  constructor(message: string, options?: ErrorOptions) {
+    super(message, options);
+    this.name = 'NotFoundError';
+  }
+}

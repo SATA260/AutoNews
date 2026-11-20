@@ -9,10 +9,15 @@ import { emitRunEvent } from '../workflow/events.js';
 import type { CollectorBrowserDriver, RawXTweet } from './browser-driver.js';
 import { canonicalizeUrl, computeArticleId, normalizeTitle } from './canonical-url.js';
 import { expireOldArticles } from './expiry.js';
-import { extractArticleContent, fetchArticleHtml, type StoredArticleContent } from './extractor.js';
+import {
+  extractArticleContent,
+  fetchArticleHtmlDetailed,
+  type StoredArticleContent,
+} from './extractor.js';
 import type { ParsedFeedItem } from './feed-parser.js';
 import { fetchFeedWithRetry } from './fetcher.js';
 import { fetchHtmlListWithRetry } from './html-list-fetcher.js';
+import { resolveConfiguredLocalOrigins } from './ssrf.js';
 import { captureArticleVisualMedia } from './visual-capture.js';
 import { fetchXSourceItems, XCookieMissingError } from './x-collector.js';
 
@@ -97,6 +102,7 @@ async function collectSingleSource(
 ): Promise<string[]> {
   const prevState = ctx.repos.sourceState.get(source.id);
   const sourceTimezone = resolveSourceTimezone(source, opts.settings.timezone);
+  const allowedLocalOrigins = resolveConfiguredLocalOrigins(source.url);
   const lookbackCutoffIso = new Date(opts.lookbackCutoffMs).toISOString();
   const hasRecentFailed =
     source.kind === 'rss' &&
@@ -193,11 +199,12 @@ async function collectSingleSource(
     }
 
     const articleId = computeArticleId(canonicalUrl);
-    const existingArticle = ctx.repos.articles.getById(articleId);
+    const existingArticle = ctx.repos.articles.getWithRetryState(articleId);
     const retryExistingFailed = Boolean(
       existingArticle &&
         existingArticle.status === 'new' &&
-        existingArticle.extractStatus === 'failed',
+        existingArticle.extractStatus === 'failed' &&
+        existingArticle.extractRetryable,
     );
 
     if (existingArticle && !retryExistingFailed) {
@@ -246,188 +253,230 @@ async function collectSingleSource(
     });
   }
 
-  const processed = await Promise.all(
+  const sourceAbort = new AbortController();
+  const itemSignal = opts.signal
+    ? AbortSignal.any([opts.signal, sourceAbort.signal])
+    : sourceAbort.signal;
+
+  const settledItems = await Promise.allSettled(
     pendingItems.map((entry) =>
       articleLimit(async () => {
-        if (opts.signal?.aborted) {
-          throw createAbortError();
-        }
-
-        const preferRenderedHtml =
-          source.kind === 'html-list' && Boolean(source.listConfig?.renderJs);
-        let html =
-          source.kind === 'x-timeline'
-            ? null
-            : await fetchArticleHtml(entry.canonicalUrl, ctx.fetchImpl, {
-                retries: preferRenderedHtml ? 0 : 2,
-                retryDelayMs: opts.retryDelayMs,
-                signal: opts.signal,
-              });
-        if (opts.signal?.aborted) {
-          throw createAbortError();
-        }
-
-        const minContentChars =
-          source.kind === 'x-timeline' ? (source.xConfig?.minChars ?? 20) : undefined;
-        let extracted = extractArticleContent({
-          url: entry.canonicalUrl,
-          html,
-          feedContent: entry.content,
-          feedSummary: entry.summary,
-          minContentChars,
-          defaultTimezone: sourceTimezone,
-        });
-
-        // 对明确需要动态渲染的网页来源，当普通抓取被拦截或正文不足时自动改用无头浏览器加载详情页
-        if (preferRenderedHtml && (html === null || extracted.extractStatus === 'failed')) {
-          const renderedHtml = await driver
-            .fetchRenderedHtml(entry.canonicalUrl, {
-              timeoutMs: 25_000,
-              signal: opts.signal,
-            })
-            .catch((err: unknown) => {
-              if (isAbortError(err) || opts.signal?.aborted) {
-                throw err;
-              }
-              return '';
-            });
-          if (renderedHtml.trim().length > 0) {
-            html = renderedHtml;
-            extracted = extractArticleContent({
-              url: entry.canonicalUrl,
-              html,
-              feedContent: entry.content,
-              feedSummary: entry.summary,
-              minContentChars,
-              defaultTimezone: sourceTimezone,
-            });
-          }
-        }
-
-        if (opts.signal?.aborted) {
-          throw createAbortError();
-        }
-
-        const resolvedPublishedAt = mergeListAndDetailPublishedAt(
-          entry.publishedAt,
-          extracted.detectedPublishedAt,
-          source.kind,
-        );
-        const resolvedMs = resolvedPublishedAt ? Date.parse(resolvedPublishedAt) : Number.NaN;
-        const finalItemMs = Number.isNaN(resolvedMs) ? null : resolvedMs;
-        const minWindowMs = entry.retryExistingFailed ? opts.lookbackCutoffMs : earliestItemMs;
-
-        // 详情页识别到真实发布时间且明显早于本次抓取窗口下限时，直接跳过不入库
-        if (finalItemMs !== null && finalItemMs < minWindowMs) {
-          return {
-            articleId: null,
-            itemMs: null,
-            transientFetchFailed: false,
-          };
-        }
-
-        const transientFetchFailed =
-          source.kind !== 'x-timeline' && html === null && extracted.extractStatus === 'failed';
-        if (entry.retryExistingFailed && extracted.extractStatus === 'failed') {
-          return {
-            articleId: null,
-            itemMs: null,
-            transientFetchFailed,
-          };
-        }
-
-        const firstSeenAt = ctx.now().toISOString();
-        const publishedAt = resolvedPublishedAt ?? null;
-
-        let contentPath: string | null = null;
-        let writtenContentFile: string | null = null;
-        let primaryImagePath: string | null = null;
-        let writtenVisualFiles: string[] = [];
-
         try {
-          if (extracted.extractStatus !== 'failed') {
-            const visualResult = await captureArticleVisualMedia({
-              articleId: entry.articleId,
-              source,
-              extracted,
-              tweetData: entry.tweetData,
-              imagesDir: ctx.paths.imagesDir,
-              rootDir: ctx.paths.rootDir,
-              settings: opts.settings,
-              fetchImpl: ctx.fetchImpl,
-              driver,
-              signal: opts.signal,
-            });
-            primaryImagePath = visualResult.primaryImagePath;
-            writtenVisualFiles = visualResult.writtenFiles;
-
-            if (opts.signal?.aborted) {
-              throw createAbortError();
-            }
-
-            const contentFile = path.join(ctx.paths.articlesDir, `${entry.articleId}.json`);
-            const storedPayload: StoredArticleContent = {
-              url: entry.canonicalUrl,
-              title: entry.title,
-              lang: source.lang,
-              publishedAt,
-              hasExplicitPublishedAt: publishedAt !== null,
-              text: extracted.text,
-              feedContent: entry.content ?? entry.summary,
-              ...(visualResult.mediaAssets.length > 0
-                ? { mediaAssets: visualResult.mediaAssets }
-                : {}),
-            };
-            await writeJsonAtomic(contentFile, storedPayload);
-            writtenContentFile = contentFile;
-            contentPath = path.relative(ctx.paths.rootDir, contentFile);
-          }
-
-          if (opts.signal?.aborted) {
+          if (itemSignal.aborted) {
             throw createAbortError();
           }
 
-          const articleRecord = {
-            id: entry.articleId,
-            sourceId: source.id,
-            canonicalUrl: entry.canonicalUrl,
-            title: entry.title,
-            titleNorm: normalizeTitle(entry.title),
-            lang: source.lang,
-            publishedAt,
-            excerpt: extracted.excerpt || null,
-            contentPath,
-            contentChars: extracted.contentChars,
-            imagePath: primaryImagePath,
-            extractStatus: extracted.extractStatus,
-          };
+          const preferRenderedHtml =
+            source.kind === 'html-list' && Boolean(source.listConfig?.renderJs);
+          const htmlFetchOutcome =
+            source.kind === 'x-timeline'
+              ? { html: null, retryable: false }
+              : await fetchArticleHtmlDetailed(entry.canonicalUrl, ctx.fetchImpl, {
+                  retries: preferRenderedHtml ? 0 : 2,
+                  retryDelayMs: opts.retryDelayMs,
+                  allowedOrigins: allowedLocalOrigins,
+                  signal: itemSignal,
+                });
+          let html = htmlFetchOutcome.html;
+          if (itemSignal.aborted) {
+            throw createAbortError();
+          }
 
-          const saved = entry.retryExistingFailed
-            ? ctx.repos.articles.upgradeFailedExtraction(articleRecord)
-            : ctx.repos.articles.insertIfAbsent({
-                ...articleRecord,
-                firstSeenAt,
+          const minContentChars =
+            source.kind === 'x-timeline' ? (source.xConfig?.minChars ?? 20) : undefined;
+          let extracted = extractArticleContent({
+            url: entry.canonicalUrl,
+            html,
+            feedContent: entry.content,
+            feedSummary: entry.summary,
+            minContentChars,
+            defaultTimezone: sourceTimezone,
+          });
+
+          // 对明确需要动态渲染的网页来源，当普通抓取被拦截或正文不足时自动改用无头浏览器加载详情页
+          if (preferRenderedHtml && (html === null || extracted.extractStatus === 'failed')) {
+            const renderedHtml = await driver
+              .fetchRenderedHtml(entry.canonicalUrl, {
+                timeoutMs: 25_000,
+                allowedOrigins: allowedLocalOrigins,
+                signal: itemSignal,
+              })
+              .catch((err: unknown) => {
+                if (isAbortError(err) || itemSignal.aborted) {
+                  throw err;
+                }
+                return '';
               });
-
-          return {
-            articleId: saved && extracted.extractStatus !== 'failed' ? entry.articleId : null,
-            itemMs: transientFetchFailed ? null : finalItemMs,
-            transientFetchFailed,
-          };
-        } catch (err) {
-          if (isAbortError(err)) {
-            if (writtenContentFile) {
-              await fs.rm(writtenContentFile, { force: true }).catch(() => undefined);
-            }
-            for (const filePath of writtenVisualFiles) {
-              await fs.rm(filePath, { force: true }).catch(() => undefined);
+            if (renderedHtml.trim().length > 0) {
+              html = renderedHtml;
+              extracted = extractArticleContent({
+                url: entry.canonicalUrl,
+                html,
+                feedContent: entry.content,
+                feedSummary: entry.summary,
+                minContentChars,
+                defaultTimezone: sourceTimezone,
+              });
             }
           }
-          throw err;
+
+          if (itemSignal.aborted) {
+            throw createAbortError();
+          }
+
+          const resolvedPublishedAt = mergeListAndDetailPublishedAt(
+            entry.publishedAt,
+            extracted.detectedPublishedAt,
+            source.kind,
+          );
+          const resolvedMs = resolvedPublishedAt ? Date.parse(resolvedPublishedAt) : Number.NaN;
+          const finalItemMs = Number.isNaN(resolvedMs) ? null : resolvedMs;
+          const minWindowMs = entry.retryExistingFailed ? opts.lookbackCutoffMs : earliestItemMs;
+
+          // 详情页识别到真实发布时间且明显早于本次抓取窗口下限时，直接跳过不入库
+          if (finalItemMs !== null && finalItemMs < minWindowMs) {
+            return {
+              articleId: null,
+              itemMs: null,
+              transientFetchFailed: false,
+            };
+          }
+
+          const transientFetchFailed =
+            source.kind !== 'x-timeline' &&
+            html === null &&
+            htmlFetchOutcome.retryable &&
+            extracted.extractStatus === 'failed';
+          if (entry.retryExistingFailed && extracted.extractStatus === 'failed') {
+            ctx.repos.articles.recordFailedRetry(entry.articleId, transientFetchFailed);
+            return {
+              articleId: null,
+              itemMs: null,
+              transientFetchFailed,
+            };
+          }
+
+          const firstSeenAt = ctx.now().toISOString();
+          const publishedAt = resolvedPublishedAt ?? null;
+
+          let contentPath: string | null = null;
+          let writtenContentFile: string | null = null;
+          let primaryImagePath: string | null = null;
+          let writtenVisualFiles: string[] = [];
+
+          try {
+            if (extracted.extractStatus !== 'failed') {
+              const visualResult = await captureArticleVisualMedia({
+                articleId: entry.articleId,
+                source,
+                extracted,
+                tweetData: entry.tweetData,
+                imagesDir: ctx.paths.imagesDir,
+                rootDir: ctx.paths.rootDir,
+                settings: opts.settings,
+                fetchImpl: ctx.fetchImpl,
+                driver,
+                signal: itemSignal,
+              });
+              primaryImagePath = visualResult.primaryImagePath;
+              writtenVisualFiles = visualResult.writtenFiles;
+
+              if (itemSignal.aborted) {
+                throw createAbortError();
+              }
+
+              const contentFile = path.join(ctx.paths.articlesDir, `${entry.articleId}.json`);
+              const storedPayload: StoredArticleContent = {
+                url: entry.canonicalUrl,
+                title: entry.title,
+                lang: source.lang,
+                publishedAt,
+                hasExplicitPublishedAt: publishedAt !== null,
+                text: extracted.text,
+                feedContent: entry.content ?? entry.summary,
+                ...(visualResult.mediaAssets.length > 0
+                  ? { mediaAssets: visualResult.mediaAssets }
+                  : {}),
+              };
+              await writeJsonAtomic(contentFile, storedPayload);
+              writtenContentFile = contentFile;
+              contentPath = path.relative(ctx.paths.rootDir, contentFile);
+            }
+
+            if (itemSignal.aborted) {
+              throw createAbortError();
+            }
+
+            const articleRecord = {
+              id: entry.articleId,
+              sourceId: source.id,
+              canonicalUrl: entry.canonicalUrl,
+              title: entry.title,
+              titleNorm: normalizeTitle(entry.title),
+              lang: source.lang,
+              publishedAt,
+              excerpt: extracted.excerpt || null,
+              contentPath,
+              contentChars: extracted.contentChars,
+              imagePath: primaryImagePath,
+              extractStatus: extracted.extractStatus,
+            };
+
+            const saved = entry.retryExistingFailed
+              ? ctx.repos.articles.upgradeFailedExtraction(articleRecord)
+              : ctx.repos.articles.insertIfAbsent({
+                  ...articleRecord,
+                  firstSeenAt,
+                  extractRetryable:
+                    extracted.extractStatus === 'failed' ? transientFetchFailed : true,
+                  extractAttempts: extracted.extractStatus === 'failed' ? 1 : 0,
+                });
+
+            return {
+              articleId: saved && extracted.extractStatus !== 'failed' ? entry.articleId : null,
+              itemMs: transientFetchFailed ? null : finalItemMs,
+              transientFetchFailed,
+            };
+          } catch (innerErr) {
+            if (isAbortError(innerErr) || itemSignal.aborted) {
+              if (writtenContentFile) {
+                await fs.rm(writtenContentFile, { force: true }).catch(() => undefined);
+              }
+              for (const filePath of writtenVisualFiles) {
+                await fs.rm(filePath, { force: true }).catch(() => undefined);
+              }
+            }
+            throw innerErr;
+          }
+        } catch (itemErr) {
+          sourceAbort.abort(itemErr);
+          throw itemErr;
         }
       }),
     ),
   );
+
+  const processed: Array<{
+    articleId: string | null;
+    itemMs: number | null;
+    transientFetchFailed: boolean;
+  }> = [];
+  let rootFailure: unknown = null;
+  for (const res of settledItems) {
+    if (res.status === 'fulfilled') {
+      processed.push(res.value);
+      continue;
+    }
+    if (
+      !rootFailure ||
+      (!opts.signal?.aborted && isAbortError(rootFailure) && !isAbortError(res.reason))
+    ) {
+      rootFailure = res.reason;
+    }
+  }
+  if (rootFailure) {
+    throw rootFailure;
+  }
 
   if (opts.signal?.aborted) {
     throw createAbortError();

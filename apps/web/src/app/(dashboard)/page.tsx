@@ -38,8 +38,8 @@ export default async function DashboardPage() {
   );
   const [activeDetail, activeEvents] = activeRunSummary
     ? await Promise.all([
-        core.tasks.get(activeRunSummary.id).catch(() => null),
-        core.tasks.events(activeRunSummary.id, 0, 200).catch((): RunEvent[] => []),
+        core.tasks.get(activeRunSummary.id, { includeArtifacts: false }).catch(() => null),
+        core.tasks.recentEvents(activeRunSummary.id, 200).catch((): RunEvent[] => []),
       ])
     : [null, [] as RunEvent[]];
 

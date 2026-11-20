@@ -555,7 +555,7 @@ export async function processSingleItem(opts: {
         articlesById: articlesForPrecheck,
         limits,
         metaTextBlacklist: settings.editorial.metaTextBlacklist,
-        compact: settings.issue.minScore !== undefined,
+        compact: settings.editorial.compactStyle,
         forbiddenTokens: persona?.forbiddenTokens,
         hostSelfName: persona?.selfName,
       });
@@ -696,10 +696,9 @@ export async function runEditStage(
   const hasCutoff = !Number.isNaN(notBeforeMs);
   const defaultSinceMs = ctx.now().getTime() - settings.issue.freshnessHours * 3600_000;
 
-  const itemCount =
-    settings.issue.minScore === undefined
-      ? run.itemCount
-      : ctx.repos.events.listByRun(runId).filter((event) => event.role === 'primary').length;
+  const itemCount = !settings.issue.allowPartial
+    ? run.itemCount
+    : ctx.repos.events.listByRun(runId).filter((event) => event.role === 'primary').length;
   const limits = resolveContentLimits(settings, opts?.limitsOverride);
   const parentSignal = opts?.signal;
 
@@ -752,7 +751,7 @@ export async function runEditStage(
     }
 
     if (pendingQueue.length === 0) {
-      if (settings.issue.minScore !== undefined) break;
+      if (settings.issue.allowPartial) break;
       const cutoffPreventsWindowExpand =
         hasCutoff &&
         notBeforeMs >= defaultSinceMs &&
@@ -962,10 +961,9 @@ export async function retryMultipleEditItems(opts: {
   }
 
   const targetIdSet = new Set(uniqueItemIds);
-  const targetPassCount =
-    settings.issue.minScore === undefined
-      ? run.itemCount
-      : Math.max(uniqueItemIds.length, events.filter((event) => event.role === 'primary').length);
+  const targetPassCount = !settings.issue.allowPartial
+    ? run.itemCount
+    : Math.max(uniqueItemIds.length, events.filter((event) => event.role === 'primary').length);
 
   const otherPassed = allItems
     .filter((i) => !targetIdSet.has(i.id) && i.status === 'passed')

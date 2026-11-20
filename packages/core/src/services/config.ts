@@ -4,7 +4,7 @@ import {
   removeModelApiConnection,
   saveModelApiConnection,
 } from '../config/model-connections.js';
-import { updateSettingsFile, updateSourcesFile } from '../config/writer.js';
+import { editSourcesFile, updateSettingsFile, updateSourcesFile } from '../config/writer.js';
 import type { CoreContext } from '../context.js';
 
 /** 系统配置与信源清单读写服务接口（支持随时切换模型与更新订阅源） */
@@ -23,6 +23,8 @@ export interface ConfigService {
   getSources(): SourceDef[];
   /** 校验并全量更新订阅信源列表，保留原有注释后即时刷新内存配置 */
   updateSources(next: SourceDef[]): Promise<void>;
+  /** 在写锁内基于最新磁盘配置切换单个信源的启停状态，防止并发修改互相覆盖 */
+  toggleSource(sourceId: string, enabled: boolean): Promise<SourceDef[]>;
 }
 
 /** 创建系统配置服务实例 */
@@ -94,6 +96,21 @@ export function createConfigService(ctx: CoreContext): ConfigService {
       await serializeConfigUpdate(async () => {
         await updateSourcesFile(ctx.paths.sourcesFile, next);
         await ctx.reloadConfig();
+      });
+    },
+
+    /** 在配置写锁内读取磁盘最新信源列表并切换指定信源启用状态 */
+    async toggleSource(sourceId: string, enabled: boolean): Promise<SourceDef[]> {
+      return serializeConfigUpdate(async () => {
+        const updated = await editSourcesFile(ctx.paths.sourcesFile, (current) => {
+          const found = current.some((s) => s.id === sourceId);
+          if (!found) {
+            throw new Error(`未找到信源: ${sourceId}`);
+          }
+          return current.map((s) => (s.id === sourceId ? { ...s, enabled } : s));
+        });
+        await ctx.reloadConfig();
+        return updated;
       });
     },
   };

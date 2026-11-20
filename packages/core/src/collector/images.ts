@@ -1,5 +1,6 @@
 import path from 'node:path';
 import { writeFileAtomic } from '../storage/files.js';
+import { fetchWithSsrfGuard } from './ssrf.js';
 
 const DEFAULT_IMAGE_TIMEOUT_MS = 15_000;
 const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
@@ -106,9 +107,9 @@ export async function downloadArticleImage(opts: {
     : timeoutSignal;
 
   try {
-    const res = await opts.fetchImpl(parsedUrl.toString(), {
+    const res = await fetchWithSsrfGuard(parsedUrl, {
+      fetchImpl: opts.fetchImpl,
       signal: combinedSignal,
-      redirect: 'follow',
       headers: {
         'User-Agent': BROWSER_USER_AGENT,
         Accept: 'image/avif,image/webp,image/png,image/jpeg,image/gif,*/*;q=0.5',

@@ -9,6 +9,11 @@ import { getModelRouteNames } from '../config/model-connections.js';
 import type { CoreContext } from '../context.js';
 import { resolveChromiumExecutablePath } from '../media/compositor.js';
 import { resolveBiliCookieFile, resolveBiliupExecutable } from '../publish/bilibili.js';
+import {
+  type CleanupStorageOptions,
+  type CleanupStorageResult,
+  cleanupStorage,
+} from './retention.js';
 
 const MIN_DISK_FREE_BYTES = 1024 * 1024 * 1024;
 const DOCTOR_CACHE_TTL_MS = 10 * 60 * 1000;
@@ -68,6 +73,8 @@ export interface SystemService {
   getCachedModelsSnapshot(): CachedModelRoutesSnapshot;
   /** 按需并发查询并缓存指定调用方式的模型列表，失败项单独记录错误而不写入空列表缓存 */
   warmModelRoutes(opts?: WarmModelRoutesOptions): Promise<WarmModelRoutesResult>;
+  /** 按保留策略安全清理过期历史任务产物、关联数据库日志及临时文件 */
+  cleanup(opts?: CleanupStorageOptions): Promise<CleanupStorageResult>;
 }
 
 /** 计算字节或文本数据的 SHA-256 十六进制摘要 */
@@ -323,7 +330,7 @@ async function executeDoctorChecks(ctx: CoreContext): Promise<DoctorReport> {
         ok,
         detail: ok
           ? `存储分区可用空间 ${freeGiB} GiB`
-          : `存储分区可用空间仅剩 ${freeGiB} GiB，低于建议的 1.00 GiB，请清理 storage/runs`,
+          : `存储分区可用空间仅剩 ${freeGiB} GiB，低于建议的 1.00 GiB，请运行 aidaily cleanup 清理过期任务产物与日志`,
         required: true,
       };
     } catch (err) {
@@ -644,6 +651,11 @@ export function createSystemService(ctx: CoreContext): SystemService {
         modelsByCli: this.getCachedModelsByRoute(),
         errorsByCli,
       };
+    },
+
+    /** 清理过期历史任务目录、相关运行日志与残留临时文件 */
+    async cleanup(cleanupOpts?: CleanupStorageOptions): Promise<CleanupStorageResult> {
+      return cleanupStorage(ctx, cleanupOpts);
     },
   };
 }

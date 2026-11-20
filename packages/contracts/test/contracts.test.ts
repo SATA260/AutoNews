@@ -4,6 +4,7 @@ import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { parse } from 'yaml';
 import {
+  ModelApiProviderSchema,
   PolishedItemSchema,
   RETRYABLE_RUN_STATUSES,
   RunStatusSchema,
@@ -220,5 +221,64 @@ describe('@aidaily/contracts', () => {
       ],
     });
     expect(parsed.totalMs).toBe(12000);
+  });
+
+  it('blocks private, loopback, and metadata URLs in ModelApiProviderSchema by default', () => {
+    const prev = process.env.AIDAILY_ALLOW_LOCAL_MODEL_API;
+    delete process.env.AIDAILY_ALLOW_LOCAL_MODEL_API;
+    try {
+      const blockedByDefault = [
+        'http://127.0.0.1:8080/v1',
+        'http://localhost:11434/v1',
+        'http://[::1]:11434/v1',
+        'http://[::ffff:127.0.0.1]:8080/v1',
+        'http://169.254.169.254/latest/meta-data',
+        'http://metadata.google.internal/v1',
+        'http://100.100.100.200/latest/meta-data',
+        'http://[fd00:ec2::254]/v1',
+        'http://10.0.0.5:8080/v1',
+        'http://172.16.10.1:8080/v1',
+        'http://192.168.1.2:8080/v1',
+      ];
+      for (const baseUrl of blockedByDefault) {
+        expect(
+          ModelApiProviderSchema.safeParse({
+            adapter: 'openai-compatible',
+            protocol: 'chat-completions',
+            baseUrl,
+          }).success,
+        ).toBe(false);
+      }
+
+      process.env.AIDAILY_ALLOW_LOCAL_MODEL_API = '1';
+      // 显式允许本机回环时放行 localhost/127.0.0.1，但云元数据与局域私网仍必须严格拦截
+      expect(
+        ModelApiProviderSchema.safeParse({
+          adapter: 'openai-compatible',
+          protocol: 'chat-completions',
+          baseUrl: 'http://127.0.0.1:11434/v1',
+        }).success,
+      ).toBe(true);
+      expect(
+        ModelApiProviderSchema.safeParse({
+          adapter: 'openai-compatible',
+          protocol: 'chat-completions',
+          baseUrl: 'http://169.254.169.254/latest/meta-data',
+        }).success,
+      ).toBe(false);
+      expect(
+        ModelApiProviderSchema.safeParse({
+          adapter: 'openai-compatible',
+          protocol: 'chat-completions',
+          baseUrl: 'http://10.0.0.5:8080/v1',
+        }).success,
+      ).toBe(false);
+    } finally {
+      if (prev === undefined) {
+        delete process.env.AIDAILY_ALLOW_LOCAL_MODEL_API;
+      } else {
+        process.env.AIDAILY_ALLOW_LOCAL_MODEL_API = prev;
+      }
+    }
   });
 });

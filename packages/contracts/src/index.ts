@@ -6,4 +6,5 @@ export * from './persona.js';
 export * from './publish.js';
 export * from './run.js';
 export * from './schema-utils.js';
+export * from './ssrf.js';
 export * from './template.js';

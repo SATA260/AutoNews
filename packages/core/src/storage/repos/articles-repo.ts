@@ -35,6 +35,14 @@ interface SourceStateRow {
   last_error: string | null;
 }
 
+const MAX_EXTRACT_RETRY_ATTEMPTS = 2;
+
+/** 文章提取状态检查结果，用于判断是否值得在下轮抓取绕过条件缓存重试 */
+export interface ArticleRetryabilityRow extends Article {
+  extractRetryable: boolean;
+  extractAttempts: number;
+}
+
 /** 数据库 `articles` 表行结构 */
 interface ArticleRow {
   id: string;
@@ -50,6 +58,8 @@ interface ArticleRow {
   content_chars: number | null;
   image_path: string | null;
   extract_status: ExtractStatus;
+  extract_retryable?: number;
+  extract_attempts?: number;
   status: ArticleStatus;
   reserved_by_run: string | null;
 }
@@ -180,13 +190,20 @@ export function createSourceStateRepo(db: DatabaseSync) {
 export function createArticlesRepo(db: DatabaseSync) {
   return {
     /** 若标准化链接尚未入库则插入新文章，已存在时静默跳过并返回 false */
-    insertIfAbsent(article: Omit<Article, 'status' | 'reservedByRun'>): boolean {
+    insertIfAbsent(
+      article: Omit<Article, 'status' | 'reservedByRun'> & {
+        extractRetryable?: boolean;
+        extractAttempts?: number;
+      },
+    ): boolean {
+      const retryable = article.extractRetryable === false ? 0 : 1;
+      const attempts = article.extractAttempts ?? (article.extractStatus === 'failed' ? 1 : 0);
       const res = db
         .prepare(`
           INSERT OR IGNORE INTO articles (
             id, source_id, canonical_url, title, title_norm, lang, published_at, first_seen_at,
-            excerpt, content_path, content_chars, image_path, extract_status, status, reserved_by_run
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'new', NULL)
+            excerpt, content_path, content_chars, image_path, extract_status, extract_retryable, extract_attempts, status, reserved_by_run
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'new', NULL)
         `)
         .run(
           article.id,
@@ -202,8 +219,27 @@ export function createArticlesRepo(db: DatabaseSync) {
           article.contentChars,
           article.imagePath,
           article.extractStatus,
+          retryable,
+          attempts,
         );
       return Number(res.changes) > 0;
+    },
+
+    /** 按文章 ID 查询单篇文章及抽取失败重试状态 */
+    getWithRetryState(id: string): ArticleRetryabilityRow | null {
+      const row = db.prepare('SELECT * FROM articles WHERE id = ?').get(id) as
+        | ArticleRow
+        | undefined;
+      if (!row) {
+        return null;
+      }
+      return {
+        ...mapArticle(row),
+        extractRetryable:
+          (row.extract_retryable ?? 1) === 1 &&
+          (row.extract_attempts ?? 0) < MAX_EXTRACT_RETRY_ATTEMPTS,
+        extractAttempts: row.extract_attempts ?? 0,
+      };
     },
 
     /** 按文章 ID 查询单篇文章 */
@@ -291,7 +327,7 @@ export function createArticlesRepo(db: DatabaseSync) {
       return rows.map(mapArticle);
     },
 
-    /** 检查指定信源是否存在尚处于回溯窗口内但此前详情抽取失败的待选文章 */
+    /** 检查指定信源是否存在尚处于回溯窗口内、且属于可恢复网络故障并仍未耗尽重试次数的失败文章 */
     hasRecentFailedForSource(sourceId: string, sinceIso: string): boolean {
       const row = db
         .prepare(`
@@ -299,11 +335,26 @@ export function createArticlesRepo(db: DatabaseSync) {
           WHERE source_id = ?
             AND status = 'new'
             AND extract_status = 'failed'
+            AND extract_retryable = 1
+            AND extract_attempts < ?
             AND COALESCE(published_at, first_seen_at) >= ?
           LIMIT 1
         `)
-        .get(sourceId, sinceIso) as { found: number } | undefined;
+        .get(sourceId, MAX_EXTRACT_RETRY_ATTEMPTS, sinceIso) as { found: number } | undefined;
       return Boolean(row?.found);
+    },
+
+    /** 在重抓尝试再次失败时累加尝试次数，若为永久性失败或已达重试上限则不再触发条件缓存旁路 */
+    recordFailedRetry(articleId: string, stillRetryable: boolean): void {
+      db.prepare(`
+        UPDATE articles
+        SET extract_attempts = extract_attempts + 1,
+            extract_retryable = CASE
+              WHEN ? = 1 AND extract_attempts + 1 < ? THEN 1
+              ELSE 0
+            END
+        WHERE id = ? AND status = 'new' AND extract_status = 'failed'
+      `).run(stillRetryable ? 1 : 0, MAX_EXTRACT_RETRY_ATTEMPTS, articleId);
     },
 
     /** 对此前详情抓取失败的待选文章执行原地正文与配图元信息补全升级 */

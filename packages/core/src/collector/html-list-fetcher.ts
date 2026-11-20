@@ -4,6 +4,7 @@ import type { CollectorBrowserDriver } from './browser-driver.js';
 import { readTextWithLimit } from './extractor.js';
 import { type ParsedFeedItem, parsePublishedAt, resolveHttpUrl } from './feed-parser.js';
 import { sleepWithAbort } from './fetcher.js';
+import { BlockedSsrfError, fetchWithSsrfGuard, resolveConfiguredLocalOrigins } from './ssrf.js';
 
 const DEFAULT_HTML_LIST_TIMEOUT_MS = 18_000;
 const DEFAULT_HTML_LIST_RETRIES = 2;
@@ -413,6 +414,7 @@ export async function fetchHtmlListWithRetry(
   const maxAttempts = 1 + Math.max(0, opts.retries ?? DEFAULT_HTML_LIST_RETRIES);
   const retryDelayMs = opts.retryDelayMs ?? DEFAULT_HTML_LIST_RETRY_DELAY_MS;
   const timezone = opts.timezone ?? 'UTC';
+  const allowedOrigins = resolveConfiguredLocalOrigins(source.url);
 
   let lastError: unknown;
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
@@ -424,6 +426,7 @@ export async function fetchHtmlListWithRetry(
       if (renderJs && opts.driver) {
         const html = await opts.driver.fetchRenderedHtml(source.url, {
           timeoutMs,
+          allowedOrigins,
           signal: opts.signal,
         });
         return {
@@ -437,9 +440,10 @@ export async function fetchHtmlListWithRetry(
         ? AbortSignal.any([opts.signal, timeoutSignal])
         : timeoutSignal;
 
-      const res = await opts.fetchImpl(source.url, {
+      const res = await fetchWithSsrfGuard(source.url, {
+        fetchImpl: opts.fetchImpl,
         signal: combinedSignal,
-        redirect: 'follow',
+        allowedOrigins,
         headers: {
           'User-Agent': BROWSER_USER_AGENT,
           Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
@@ -454,6 +458,9 @@ export async function fetchHtmlListWithRetry(
       return { items, statusCode: res.status };
     } catch (err) {
       if (opts.signal?.aborted) {
+        throw err;
+      }
+      if (err instanceof BlockedSsrfError) {
         throw err;
       }
       lastError = err;

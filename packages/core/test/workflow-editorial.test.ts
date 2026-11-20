@@ -74,6 +74,9 @@ async function setupWorkflowWorkspace(
     doc.setIn(['ai', 'providers'], {});
     doc.setIn(['tts', 'provider'], 'silent');
     doc.deleteIn(['issue', 'minScore']);
+    doc.setIn(['issue', 'allowPartial'], false);
+    doc.setIn(['editorial', 'compactStyle'], false);
+    doc.setIn(['editorial', 'requireImageOptIn'], false);
   });
   await updateSettingsFile(settingsFile, {
     clis: {
@@ -759,8 +762,60 @@ describe('editorial workflow, TTS timeline, interruption recovery, and retry eng
     // 传入其他进程号尝试释放不应删除当前存活进程持有的锁
     core.context.repos.locks.releaseLock('pipeline', 'same-run', process.pid + 12345);
     expect(core.context.repos.locks.get('pipeline')?.pid).toBe(process.pid);
+    // 同一进程在同一任务已正式持锁后，二次调用 tryAcquire 也必须被拒绝，防止并发互相踩锁
+    const sameProcessReentrant = core.context.repos.locks.tryAcquire({
+      name: 'pipeline',
+      ownerRun: 'same-run',
+      pid: process.pid,
+      now: currentTime.toISOString(),
+      staleMs: 60_000,
+      isProcessAlive: () => true,
+    });
+    expect(sameProcessReentrant.acquired).toBe(false);
+    // 验证 releaseIfStale 不会误删存活进程的新锁
+    expect(
+      core.context.repos.locks.releaseIfStale({
+        name: 'pipeline',
+        expectedOwnerRun: 'same-run',
+        expectedPid: 999999,
+        now: currentTime.toISOString(),
+        staleMs: 60_000,
+        isProcessAlive: (pid) => pid === process.pid,
+      }),
+    ).toBe(false);
     core.context.repos.locks.releaseLock('pipeline', 'same-run', process.pid);
     expect(core.context.repos.locks.get('pipeline')).toBeNull();
+
+    // 验证父进程 reserved 占位锁仅允许目标子进程认领一次，认领后再次并发仍拒接
+    const reservedChildLock = core.context.repos.locks.tryAcquire({
+      name: 'pipeline',
+      ownerRun: 'child-run',
+      pid: process.pid,
+      now: currentTime.toISOString(),
+      staleMs: 60_000,
+      isProcessAlive: () => true,
+      reserved: true,
+    });
+    expect(reservedChildLock.acquired).toBe(true);
+    const childClaimOnce = core.context.repos.locks.tryAcquire({
+      name: 'pipeline',
+      ownerRun: 'child-run',
+      pid: process.pid,
+      now: currentTime.toISOString(),
+      staleMs: 60_000,
+      isProcessAlive: () => true,
+    });
+    expect(childClaimOnce.acquired).toBe(true);
+    const childClaimTwice = core.context.repos.locks.tryAcquire({
+      name: 'pipeline',
+      ownerRun: 'child-run',
+      pid: process.pid,
+      now: currentTime.toISOString(),
+      staleMs: 60_000,
+      isProcessAlive: () => true,
+    });
+    expect(childClaimTwice.acquired).toBe(false);
+    core.context.repos.locks.releaseLock('pipeline', 'child-run', process.pid);
 
     // 验证缺失本地检查点文件时，可重试查询会自动将其识别为需从该步骤继续
     const qaCkpt = path.join(core.context.paths.runDir(runId), 'qa.json');
@@ -774,7 +829,8 @@ describe('editorial workflow, TTS timeline, interruption recovery, and retry eng
   it('重跑选题时重新选择自动主播并保留手动主播', async () => {
     const { rootDir, scriptFile } = await setupWorkflowWorkspace();
     await updateSettingsFile(path.join(rootDir, 'config', 'settings.yaml'), {
-      issue: { minScore: 7.5 },
+      issue: { minScore: 7.5, allowPartial: true },
+      editorial: { compactStyle: true, requireImageOptIn: true },
     });
     await fs.copyFile(
       path.join(REPO_ROOT, 'config', 'personas.yaml'),
@@ -842,7 +898,8 @@ describe('editorial workflow, TTS timeline, interruption recovery, and retry eng
   it('允许少于上限的新闻继续制作，并在没有重点新闻时跳过', async () => {
     const { rootDir } = await setupWorkflowWorkspace();
     await updateSettingsFile(path.join(rootDir, 'config', 'settings.yaml'), {
-      issue: { minScore: 7.5 },
+      issue: { minScore: 7.5, allowPartial: true },
+      editorial: { compactStyle: true, requireImageOptIn: true },
     });
     await fs.copyFile(
       path.join(REPO_ROOT, 'config', 'personas.yaml'),
@@ -954,7 +1011,8 @@ describe('editorial workflow, TTS timeline, interruption recovery, and retry eng
         path.join(rootDir, 'config', 'personas.yaml'),
       );
       await updateSettingsFile(path.join(rootDir, 'config', 'settings.yaml'), {
-        issue: { minScore: 7.5 },
+        issue: { minScore: 7.5, allowPartial: true },
+        editorial: { compactStyle: true, requireImageOptIn: true },
         tts: { provider: 'qwen-local' },
         template: {
           active: 'daily-deck',
@@ -2135,6 +2193,74 @@ describe('editorial workflow, TTS timeline, interruption recovery, and retry eng
       expect(res2.selected[0]?.allArticleIds).toEqual(
         expect.arrayContaining([neonDeepmindId, neonGeminiBlogId]),
       );
+    } finally {
+      await core.close();
+    }
+  });
+
+  it('修改或移除 minScore 只影响分数门槛，不会改变允许少条数出片与紧凑文风设置', async () => {
+    const { rootDir, scriptFile } = await setupWorkflowWorkspace();
+    // 删除 minScore 但显式开启 allowPartial / compactStyle / requireImageOptIn：仍然允许少条出片并在 0 条时跳过
+    await updateSettingsFile(path.join(rootDir, 'config', 'settings.yaml'), {
+      issue: { allowPartial: true },
+      editorial: { compactStyle: true, requireImageOptIn: true },
+    });
+    const core = await createCore({
+      rootDir,
+      now: () => new Date('2026-11-16T10:00:00.000Z'),
+      fetchImpl: makeFeedMockFetch([
+        {
+          slug: 'only-one',
+          title: '单条行业进展',
+          pubDate: 'Mon, 16 Nov 2026 09:00:00 GMT',
+          body: '今天有关团队公布了一条独立的人工智能工程新进展，详细说明了功能细节与适用范围。',
+        },
+      ]),
+    });
+    try {
+      const runPartialId = createRun(core.context, { itemCount: 5, trigger: 'manual-cli' });
+      await executeRun(core.context, runPartialId, { stopAfterStage: 'package' });
+      expect(core.context.repos.runs.getById(runPartialId)).toMatchObject({
+        status: 'interrupted',
+        currentStage: 'package',
+      });
+      expect(
+        core.context.repos.runItems.listByRun(runPartialId).filter((i) => i.status === 'passed'),
+      ).toHaveLength(1);
+
+      // 反向验证：即使保留 minScore=7.5，若关闭 allowPartial，0 条入选时仍严格报错而非静默跳过
+      await editSettingsFile(path.join(rootDir, 'config', 'settings.yaml'), (doc) => {
+        doc.setIn(['issue', 'minScore'], 7.5);
+        doc.setIn(['issue', 'allowPartial'], false);
+      });
+      await fs.writeFile(
+        scriptFile,
+        JSON.stringify({
+          rules: [{ stage: 'select', actions: [{ output: { events: [] } }] }],
+        }),
+        'utf8',
+      );
+      const coreStrict = await createCore({
+        rootDir,
+        now: () => new Date('2026-11-16T10:00:00.000Z'),
+        fetchImpl: makeFeedMockFetch([
+          {
+            slug: 'low-score',
+            title: '次要动态',
+            pubDate: 'Mon, 16 Nov 2026 09:00:00 GMT',
+            body: '一条用于验证分数门槛与数量策略各自独立生效的次要人工智能动态正文描述内容。',
+          },
+        ]),
+      });
+      try {
+        const strictRunId = createRun(coreStrict.context, { itemCount: 3, trigger: 'manual-cli' });
+        await expect(
+          executeRun(coreStrict.context, strictRunId, { stopAfterStage: 'select' }),
+        ).rejects.toThrow(/不足/);
+        expect(coreStrict.context.repos.runs.getById(strictRunId)?.status).toBe('failed');
+      } finally {
+        await coreStrict.close();
+      }
     } finally {
       await core.close();
     }

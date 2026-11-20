@@ -1,5 +1,6 @@
 import type { SourceDef, SourceState } from '@aidaily/contracts';
 import { type ParsedFeedItem, parseFeedXml } from './feed-parser.js';
+import { BlockedSsrfError, fetchWithSsrfGuard, resolveConfiguredLocalOrigins } from './ssrf.js';
 
 const DEFAULT_FEED_TIMEOUT_MS = 15_000;
 const DEFAULT_FEED_RETRIES = 2;
@@ -116,12 +117,14 @@ export async function fetchFeedWithRetry(
     const combinedSignal = opts.signal
       ? AbortSignal.any([opts.signal, timeoutSignal])
       : timeoutSignal;
+    const allowedOrigins = resolveConfiguredLocalOrigins(source.url);
 
     try {
-      const res = await opts.fetchImpl(source.url, {
+      const res = await fetchWithSsrfGuard(source.url, {
+        fetchImpl: opts.fetchImpl,
         headers,
         signal: combinedSignal,
-        redirect: 'follow',
+        allowedOrigins,
       });
 
       if (res.status === 304) {
@@ -151,6 +154,9 @@ export async function fetchFeedWithRetry(
       };
     } catch (err) {
       if (opts.signal?.aborted) {
+        throw err;
+      }
+      if (err instanceof BlockedSsrfError) {
         throw err;
       }
       lastError = err;

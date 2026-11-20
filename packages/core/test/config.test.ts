@@ -4,6 +4,8 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
+  createCore,
+  editSourcesFile,
   loadSettings,
   loadSources,
   resolveRenderTheme,
@@ -111,5 +113,64 @@ describe('config loader and comment-preserving writer', () => {
         render: { theme: 'sepia' as unknown as 'dark' },
       }),
     ).rejects.toThrow(/更新配置校验失败/);
+  });
+
+  it('supports atomic toggleSource and recovers stale cross-process lock files', async () => {
+    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'aidaily-cfg-lock-'));
+    tempDirs.push(tmpDir);
+    await fs.mkdir(path.join(tmpDir, 'config'), { recursive: true });
+    await fs.copyFile(
+      path.join(REPO_ROOT, 'config', 'settings.yaml'),
+      path.join(tmpDir, 'config', 'settings.yaml'),
+    );
+    await fs.copyFile(
+      path.join(REPO_ROOT, 'config', 'sources.yaml'),
+      path.join(tmpDir, 'config', 'sources.yaml'),
+    );
+
+    const sourcesPath = path.join(tmpDir, 'config', 'sources.yaml');
+    // 先写入一个模拟已死进程残留的锁文件，后续修改应能安全识别并回收
+    await fs.writeFile(
+      `${sourcesPath}.lock`,
+      JSON.stringify({ pid: 999999, token: 'dead-token', createdAt: 1000 }),
+      'utf8',
+    );
+
+    const core = await createCore({ rootDir: tmpDir });
+    try {
+      const initialSources = core.config.getSources();
+      const firstId = initialSources[0]?.id;
+      const secondId = initialSources[1]?.id;
+      expect(firstId && secondId).toBeTruthy();
+      if (!firstId || !secondId) {
+        throw new Error('缺少示例信源');
+      }
+
+      // 并发切换两个不同信源，两者都必须保留各自的改动而不互相覆盖
+      await Promise.all([
+        core.config.toggleSource(firstId, false),
+        core.config.toggleSource(secondId, false),
+      ]);
+
+      const reloaded = await loadSources(sourcesPath);
+      expect(reloaded.find((s) => s.id === firstId)?.enabled).toBe(false);
+      expect(reloaded.find((s) => s.id === secondId)?.enabled).toBe(false);
+
+      // 直接并发调用 editSourcesFile 也必须全部保留
+      await Promise.all([
+        editSourcesFile(sourcesPath, (list) =>
+          list.map((s) => (s.id === firstId ? { ...s, enabled: true } : s)),
+        ),
+        editSourcesFile(sourcesPath, (list) =>
+          list.map((s) => (s.id === secondId ? { ...s, enabled: true } : s)),
+        ),
+      ]);
+      const restored = await loadSources(sourcesPath);
+      expect(restored.find((s) => s.id === firstId)?.enabled).toBe(true);
+      expect(restored.find((s) => s.id === secondId)?.enabled).toBe(true);
+      await expect(fs.stat(`${sourcesPath}.lock`)).rejects.toThrow();
+    } finally {
+      await core.close();
+    }
   });
 });

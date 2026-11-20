@@ -128,6 +128,9 @@ async function setupCliWorkspace(feedBaseUrl: string) {
     doc.setIn(['ai', 'providers'], {});
     doc.setIn(['tts', 'provider'], 'silent');
     doc.deleteIn(['issue', 'minScore']);
+    doc.setIn(['issue', 'allowPartial'], false);
+    doc.setIn(['editorial', 'compactStyle'], false);
+    doc.setIn(['editorial', 'requireImageOptIn'], false);
   });
   await updateSettingsFile(tempSettingsPath, {
     clis: {

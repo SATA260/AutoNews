@@ -93,7 +93,7 @@ export function normalizePolishedMediaSelection(
         chosen.kind === 'cover' &&
         chosen.score < 50 &&
         preferArticleImage !== true &&
-        settings.issue.minScore !== undefined
+        settings.editorial.requireImageOptIn
       ) {
         primaryId = undefined;
       }
@@ -150,7 +150,7 @@ export async function polishItemDraft(opts: {
   const prompt = await renderPromptTemplate('s4-polish.md', {
     personaJson: formatPersonaForPrompt(persona, '无特定角色', { includeReactions: false }),
     personaRelation: await describePersonaRelation(ctx, runId, itemId, summary.facts.join(' ')),
-    narrationRules: settings.issue.minScore !== undefined ? COMPACT_NARRATION_RULES : '',
+    narrationRules: settings.editorial.compactStyle ? COMPACT_NARRATION_RULES : '',
     availableMediaSection: buildAvailableMediaSection(mediaPool),
     eventTitle: event.title,
     category: event.category ?? 'AI 资讯',
@@ -226,7 +226,7 @@ export async function revisePolishedItem(opts: {
   const prompt = await renderPromptTemplate('s4-revise.md', {
     personaJson: formatPersonaForPrompt(persona, '无特定角色', { includeReactions: false }),
     personaRelation: await describePersonaRelation(ctx, runId, itemId, previous.summary),
-    narrationRules: settings.issue.minScore !== undefined ? COMPACT_NARRATION_RULES : '',
+    narrationRules: settings.editorial.compactStyle ? COMPACT_NARRATION_RULES : '',
     availableMediaSection: buildAvailableMediaSection(mediaPool),
     previousItemJson: JSON.stringify(previous, null, 2),
     revisionNotesJson: JSON.stringify(revisionNotes, null, 2),

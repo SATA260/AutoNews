@@ -19,6 +19,7 @@ import {
   type RunEvent,
   type RunStatus,
   type RunSummary,
+  RunSummarySchema,
   type SelectedMediaOverride,
   SettingsSchema,
   type Stage,
@@ -28,6 +29,7 @@ import { TZDate } from '@date-fns/tz';
 import type { CoreContext } from '../context.js';
 import type { EditSubStep } from '../editorial/item-pipeline.js';
 import { collectEventMediaPool, loadEventArticles } from '../editorial/s3-summarize.js';
+import { NotFoundError } from '../errors.js';
 import { listBgmFiles } from '../media/bgm.js';
 import {
   listNarrationSectionViews,
@@ -146,14 +148,18 @@ export interface TaskService {
   cancel(runId: string): Promise<void>;
   /** 分页或按状态筛选查询历史任务摘要列表 */
   list(q?: { status?: RunStatus[]; limit?: number; before?: string }): Promise<RunSummary[]>;
-  /** 读取单期任务的完整执行详情、阶段进度、新闻条目、投稿记录及产物清单 */
-  get(runId: string): Promise<RunDetail>;
+  /** 仅读取单期任务的核心状态摘要，不加载明细条目和扫描磁盘产物目录 */
+  getSummary(runId: string): Promise<RunSummary>;
+  /** 读取单期任务的完整执行详情、阶段进度、新闻条目、投稿记录及可选产物清单 */
+  get(runId: string, opts?: { includeArtifacts?: boolean }): Promise<RunDetail>;
   /** 查询单条新闻在写作、预检与核查过程中的全部历史版本快照 */
   getItemHistory(itemId: string): Promise<ItemVersion[]>;
   /** 查询指定任务期间产生的全部外部模型调用耗时、用量及日志索引 */
   getLlmCalls(runId: string): Promise<LlmCallRecord[]>;
   /** 按自增事件编号增量拉取任务日志事件 */
   events(runId: string, afterId?: number, limit?: number): Promise<RunEvent[]>;
+  /** 仅获取某期任务最近 N 条运行日志（按正序返回），避免全量拉取 */
+  recentEvents(runId: string, limit?: number): Promise<RunEvent[]>;
   /** 持续订阅任务实时事件流，直到外部取消信号触发或任务到达稳定终止状态 */
   watch(
     runId: string,
@@ -175,6 +181,7 @@ export interface TaskService {
 async function collectRelativeArtifactPaths(runDir: string): Promise<string[]> {
   const results: string[] = [];
 
+  /** 递归遍历当前目录及子目录并将文件相对路径写入结果列表 */
   async function walk(currentDir: string, prefixRel: string): Promise<void> {
     let entries: import('node:fs').Dirent[];
     try {
@@ -452,7 +459,10 @@ export function resolveNotBeforeInput(
 
 /** 校验上传图片字节流并原子写入任务自定义素材目录，返回相对任务目录的路径 */
 async function saveCustomUploadedImage(runDir: string, bytes: Uint8Array): Promise<string> {
-  if (bytes.length < 12 || bytes.length > 10 * 1024 * 1024) {
+  if (bytes.length < 12) {
+    throw new Error('图片内容过小或格式无效');
+  }
+  if (bytes.length > 10 * 1024 * 1024) {
     throw new Error('图片大小须在 10 MB 以内');
   }
   const data = Buffer.from(bytes);
@@ -878,7 +888,7 @@ export function createTaskService(ctx: CoreContext): TaskService {
     /** 读取每一段当前的语音文本、字幕文本和音频 */
     async getNarrationSections(runId) {
       if (!ctx.repos.runs.getById(runId)) {
-        throw new Error(`未找到任务记录: ${runId}`);
+        throw new NotFoundError(`未找到任务记录: ${runId}`);
       }
       return listNarrationSectionViews(ctx, runId);
     },
@@ -917,18 +927,30 @@ export function createTaskService(ctx: CoreContext): TaskService {
       return ctx.repos.runs.list(q);
     },
 
-    /** 组装并返回单期任务的完整详情及产物路径列表 */
-    async get(runId: string): Promise<RunDetail> {
+    /** 仅查询单期任务摘要，避免走全量详情与磁盘目录递归 */
+    async getSummary(runId: string): Promise<RunSummary> {
       const run = ctx.repos.runs.getById(runId);
       if (!run) {
-        throw new Error(`未找到任务记录: ${runId}`);
+        throw new NotFoundError(`未找到任务记录: ${runId}`);
+      }
+      return RunSummarySchema.parse(run);
+    },
+
+    /** 组装并返回单期任务的完整详情及可选磁盘产物路径列表 */
+    async get(runId: string, getOpts?: { includeArtifacts?: boolean }): Promise<RunDetail> {
+      const run = ctx.repos.runs.getById(runId);
+      if (!run) {
+        throw new NotFoundError(`未找到任务记录: ${runId}`);
       }
 
       const stages = ctx.repos.runStages.listByRun(runId);
       const events = ctx.repos.events.listByRun(runId);
       const items = ctx.repos.runItems.listByRun(runId);
       const publishRecord = ctx.repos.publish.getByRun(runId);
-      const artifacts = await collectRelativeArtifactPaths(ctx.paths.runDir(runId));
+      const artifacts =
+        getOpts?.includeArtifacts === false
+          ? []
+          : await collectRelativeArtifactPaths(ctx.paths.runDir(runId));
 
       return RunDetailSchema.parse({
         id: run.id,
@@ -974,6 +996,14 @@ export function createTaskService(ctx: CoreContext): TaskService {
       return ctx.repos.runEvents.listAfter(runId, afterId, limit);
     },
 
+    /** 仅查询某期任务末尾最近 N 条运行日志（按时间正序） */
+    async recentEvents(runId: string, limit = 500): Promise<RunEvent[]> {
+      if (!ctx.repos.runs.getById(runId)) {
+        throw new NotFoundError(`未找到任务记录: ${runId}`);
+      }
+      return ctx.repos.runEvents.listRecent(runId, limit);
+    },
+
     /** 持续轮询并推送某期任务的增量事件流，直至收到中止信号或任务到达停顿终态 */
     async watch(
       runId: string,
@@ -983,7 +1013,7 @@ export function createTaskService(ctx: CoreContext): TaskService {
     ): Promise<void> {
       const runExists = ctx.repos.runs.getById(runId);
       if (!runExists) {
-        throw new Error(`未找到任务记录: ${runId}`);
+        throw new NotFoundError(`未找到任务记录: ${runId}`);
       }
 
       let cursor = opts?.afterId ?? 0;

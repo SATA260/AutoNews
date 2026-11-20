@@ -185,6 +185,7 @@ export async function createCoreContext(opts?: {
       cacheDir: paths.ttsCacheDir,
       rootDir: paths.rootDir,
       bridge,
+      fetchImpl,
     });
 
   const ctx: CoreContext = {

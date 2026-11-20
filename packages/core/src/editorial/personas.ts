@@ -26,17 +26,15 @@ export interface FormatPersonaPromptOptions {
   includeReactions?: boolean;
 }
 
-/** 加载并校验主播配置；旧项目没有配置时保留原有行为。 */
+/** 加载并校验主播人设配置；当配置文件不存在时返回空列表 */
 export async function loadPersonas(ctx: CoreContext): Promise<PersonaProfile[]> {
   try {
     const text = await fs.readFile(path.join(ctx.paths.rootDir, 'config', 'personas.yaml'), 'utf8');
     return PersonasFileSchema.parse(parse(text)).personas;
   } catch (error) {
-    if (
-      (error as NodeJS.ErrnoException).code === 'ENOENT' &&
-      ctx.settings.issue.minScore === undefined
-    )
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
       return [];
+    }
     throw error;
   }
 }

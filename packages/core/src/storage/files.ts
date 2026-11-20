@@ -1,6 +1,7 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import type { ZodType } from 'zod';
 
 const SAFE_ARCHIVE_NAME_PATTERN = /^[a-zA-Z0-9._-]+$/;
 
@@ -57,6 +58,39 @@ export async function readJsonOrNull<T>(filePath: string): Promise<T | null> {
     }
     throw err;
   }
+}
+
+/** 读取并按 Zod 契约校验 JSON 文件；支持在可选缓存损坏时安全回退为 null */
+export async function readJsonOrNullWithSchema<T>(
+  filePath: string,
+  schema: ZodType<T>,
+  opts?: { label?: string; fallbackNullOnInvalid?: boolean },
+): Promise<T | null> {
+  let rawJson: unknown;
+  try {
+    rawJson = await readJsonOrNull<unknown>(filePath);
+  } catch (err) {
+    if (opts?.fallbackNullOnInvalid) {
+      return null;
+    }
+    throw err;
+  }
+  if (rawJson === null) {
+    return null;
+  }
+  const parsed = schema.safeParse(rawJson);
+  if (!parsed.success) {
+    if (opts?.fallbackNullOnInvalid) {
+      return null;
+    }
+    const label = opts?.label ?? path.basename(filePath);
+    const reason = parsed.error.issues
+      .slice(0, 3)
+      .map((issue) => issue.message)
+      .join('; ');
+    throw new Error(`JSON 文件格式校验失败（${label}）: ${reason || '结构不符合约定'}`);
+  }
+  return parsed.data;
 }
 
 /** 将重跑后作废的旧阶段产物移动归档到 `archive/` 子目录；若中途失败则自动回滚已移动条目 */

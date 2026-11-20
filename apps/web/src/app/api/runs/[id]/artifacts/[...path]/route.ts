@@ -3,6 +3,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { Readable } from 'node:stream';
 import { getCore } from '@/lib/core';
+import { verifyLocalWebRequest } from '@/lib/request-security';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -50,7 +51,7 @@ function parseByteRange(rangeHeader: string, fileSize: number): ParsedRangeResul
   const trimmed = rangeHeader.trim();
   const eqIdx = trimmed.indexOf('=');
   if (eqIdx <= 0) {
-    return { kind: 'invalid' };
+    return { kind: 'ignore' };
   }
   const unit = trimmed.slice(0, eqIdx).trim().toLowerCase();
   const rangeSpec = trimmed.slice(eqIdx + 1).trim();
@@ -142,6 +143,10 @@ export async function GET(
   if (request.signal.aborted) {
     return new Response(null, { status: 499 });
   }
+  const sec = verifyLocalWebRequest(request);
+  if (!sec.ok) {
+    return Response.json({ error: sec.error }, { status: sec.status });
+  }
 
   const { id, path: pathSegments } = await context.params;
   if (!pathSegments || pathSegments.length === 0) {
@@ -174,7 +179,13 @@ export async function GET(
     if (code === 'ELOOP') {
       return Response.json({ error: '禁止直接访问符号链接文件' }, { status: 403 });
     }
-    return Response.json({ error: '未找到指定产物文件' }, { status: 404 });
+    if (code === 'EACCES' || code === 'EPERM') {
+      return Response.json({ error: '无权限读取指定产物文件' }, { status: 403 });
+    }
+    if (code === 'ENOENT' || code === 'ENOTDIR') {
+      return Response.json({ error: '未找到指定产物文件' }, { status: 404 });
+    }
+    return Response.json({ error: '打开产物文件时发生系统错误' }, { status: 500 });
   }
 
   let fileSize = 0;

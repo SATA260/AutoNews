@@ -24,11 +24,12 @@ import { TZDate } from '@date-fns/tz';
 import { format } from 'date-fns';
 import { execa } from 'execa';
 import { chromium } from 'playwright';
+import { z } from 'zod';
 import type { CoreContext } from '../context.js';
 import { deriveMascotMood, loadPersonas } from '../editorial/personas.js';
 import { collectEventMediaPool, loadEventArticles } from '../editorial/s3-summarize.js';
 import { PipelineError } from '../errors.js';
-import { readJsonOrNull, writeFileAtomic, writeJsonAtomic } from '../storage/files.js';
+import { readJsonOrNullWithSchema, writeFileAtomic, writeJsonAtomic } from '../storage/files.js';
 import {
   createDefaultTemplateRegistry,
   resolveActiveTemplate,
@@ -60,13 +61,13 @@ export interface RenderCheckpoint {
   totalMs: number;
 }
 
-/** 静态整页截图模板的进度与摘要缓存记录 */
-interface FramesProgressRecord {
-  digest: string;
-  width: number;
-  height: number;
-  template: string;
-}
+/** 静态整页截图模板的进度与摘要缓存契约 */
+const FramesProgressRecordSchema = z.object({
+  digest: z.string(),
+  width: z.number(),
+  height: z.number(),
+  template: z.string(),
+});
 
 /** 动态视频单个章节分片的摘要与编码规格缓存记录 */
 interface SectionCacheRecord {
@@ -77,11 +78,39 @@ interface SectionCacheRecord {
   frameCount: number;
 }
 
-/** 动态视频整期各章节分片缓存索引文件结构 */
-interface SectionsProgressFile {
-  template: string;
-  sections: Record<string, SectionCacheRecord>;
-}
+/** 动态视频整期各章节分片缓存索引文件契约 */
+const SectionsProgressFileSchema = z.object({
+  template: z.string(),
+  sections: z.record(
+    z.string(),
+    z.object({
+      sectionDigest: z.string(),
+      width: z.number(),
+      height: z.number(),
+      fps: z.number(),
+      frameCount: z.number(),
+    }),
+  ),
+});
+type SectionsProgressFile = z.infer<typeof SectionsProgressFileSchema>;
+
+/** 检测章节视频分片时校验 ffprobe JSON 输出的契约结构 */
+const FfprobeSegmentSchema = z.object({
+  streams: z
+    .array(
+      z.object({
+        codec_name: z.string().optional(),
+        width: z.number().optional(),
+        height: z.number().optional(),
+      }),
+    )
+    .optional(),
+  format: z
+    .object({
+      duration: z.union([z.string(), z.number()]).optional(),
+    })
+    .optional(),
+});
 
 /** 解析视频合成使用的模板主题外观，未配置时默认使用深色模式 */
 export function resolveRenderTheme(renderSettings: Pick<Settings['render'], 'theme'>): RenderTheme {
@@ -133,22 +162,41 @@ function resolveFfprobeFromFfmpeg(ffmpegBin?: string): string {
   return fsSync.existsSync(candidate) ? candidate : 'ffprobe';
 }
 
+/** 校验章节视频 MP4 分片的返回状态（区分明确损坏与检测工具执行故障） */
+export type Mp4SegmentValidationResult =
+  | { status: 'ok' }
+  | { status: 'invalid'; detail: string }
+  | { status: 'probe_error'; detail: string };
+
 /**
  * 校验章节视频 MP4 分片是否完整可读，并通过 ffprobe 核对编码格式、分辨率及实际时长误差不超过一帧。
+ * 区分分片本身损坏与 ffprobe 缺失/超时等外部执行异常，防止误删有效成片分片。
  */
-async function isValidMp4Segment(opts: {
+export async function validateMp4Segment(opts: {
   filePath: string;
   expectedDurationMs: number;
   width: number;
   height: number;
   fps: number;
   ffprobeBin: string;
-}): Promise<boolean> {
+}): Promise<Mp4SegmentValidationResult> {
   try {
     const st = await fs.stat(opts.filePath);
     if (!st.isFile() || st.size < 1024) {
-      return false;
+      return { status: 'invalid', detail: '分片文件不存在或字节数过小' };
     }
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code === 'ENOENT' || code === 'ENOTDIR') {
+      return { status: 'invalid', detail: '分片文件不存在' };
+    }
+    return {
+      status: 'probe_error',
+      detail: err instanceof Error ? err.message : String(err),
+    };
+  }
+
+  try {
     const res = await execa(
       opts.ffprobeBin,
       [
@@ -164,29 +212,61 @@ async function isValidMp4Segment(opts: {
       ],
       { timeout: 15_000, reject: false },
     );
-    if (res.exitCode !== 0 || !res.stdout) {
-      return false;
+    const spawnCode = (res as { code?: string }).code;
+    if (res.timedOut) {
+      return { status: 'probe_error', detail: 'ffprobe 探测分片超时' };
     }
-    const parsed = JSON.parse(res.stdout) as {
-      streams?: Array<{ codec_name?: string; width?: number; height?: number }>;
-      format?: { duration?: string | number };
-    };
+    if (spawnCode || res.exitCode === undefined) {
+      return {
+        status: 'probe_error',
+        detail: `无法启动 ffprobe (${spawnCode ?? res.stderr ?? '未知错误'})`,
+      };
+    }
+    if (res.exitCode !== 0 || !res.stdout) {
+      return {
+        status: 'invalid',
+        detail: res.stderr?.trim() || `ffprobe 返回异常退出码 ${res.exitCode}`,
+      };
+    }
+    let rawJson: unknown;
+    try {
+      rawJson = JSON.parse(res.stdout);
+    } catch {
+      return { status: 'probe_error', detail: 'ffprobe 输出无法解析为合法 JSON' };
+    }
+    const parsedRes = FfprobeSegmentSchema.safeParse(rawJson);
+    if (!parsedRes.success) {
+      return { status: 'invalid', detail: '分片媒体流结构不符合预期' };
+    }
+    const parsed = parsedRes.data;
     const vStream = parsed.streams?.[0];
     if (
       vStream?.codec_name !== 'h264' ||
       Number(vStream.width) !== opts.width ||
       Number(vStream.height) !== opts.height
     ) {
-      return false;
+      return {
+        status: 'invalid',
+        detail: `视频流编码或分辨率不匹配 (${String(vStream?.codec_name)} ${String(vStream?.width)}x${String(vStream?.height)})`,
+      };
     }
     const actualDurationMs = Number(parsed.format?.duration) * 1000;
     if (!Number.isFinite(actualDurationMs) || actualDurationMs <= 0) {
-      return false;
+      return { status: 'invalid', detail: '分片有效时长缺失或非正数' };
     }
     const toleranceMs = Math.ceil(1000 / Math.max(1, opts.fps)) + 25;
-    return Math.abs(actualDurationMs - opts.expectedDurationMs) <= toleranceMs;
-  } catch {
-    return false;
+    if (Math.abs(actualDurationMs - opts.expectedDurationMs) > toleranceMs) {
+      return {
+        status: 'invalid',
+        detail: `分片时长超出误差 (${actualDurationMs.toFixed(0)}ms vs ${opts.expectedDurationMs}ms)`,
+      };
+    }
+    return { status: 'ok' };
+  } catch (err) {
+    return {
+      status: 'probe_error',
+      detail: err instanceof Error ? err.message : String(err),
+    };
   }
 }
 
@@ -347,10 +427,11 @@ export async function buildRenderableIssue(opts: {
   const hostRow = ctx.db.prepare('SELECT host_id FROM runs WHERE id = ?').get(runId) as
     | { host_id: string | null }
     | undefined;
-  const host = HostMascotIdSchema.safeParse(hostRow?.host_id);
-  const activeHostId: HostMascotId = host.success ? host.data : 'gemini';
-
   const personas = await loadPersonas(ctx).catch(() => []);
+  const host = HostMascotIdSchema.safeParse(hostRow?.host_id);
+  const activeHostId: HostMascotId = host.success
+    ? host.data
+    : (personas[0]?.id ?? HostMascotIdSchema.parse(HostMascotIdSchema.options[0]));
   const activePersona = personas.find((p) => p.id === activeHostId);
   const logosRoot = await resolveLogoAssetsRoot(ctx.paths.rootDir, templateDir);
   const logoCatalog = logosRoot ? await loadLogoCatalog(logosRoot) : null;
@@ -408,7 +489,7 @@ export async function buildRenderableIssue(opts: {
     } else {
       const blockedByPolicy =
         item.finalJson.preferArticleImage === false ||
-        (settings.issue.minScore !== undefined &&
+        (settings.editorial.requireImageOptIn &&
           item.finalJson.preferArticleImage !== true &&
           !item.finalJson.primaryMediaId);
       if (!blockedByPolicy) {
@@ -607,8 +688,10 @@ export async function runRenderStage(opts: {
   if (renderSectionsFn && quantized) {
     await fs.mkdir(framesDir, { recursive: true });
     const sectionsProgressFile = path.join(framesDir, 'sections-progress.json');
-    const prevSectionsProgress = (await readJsonOrNull<SectionsProgressFile>(
+    const prevSectionsProgress = (await readJsonOrNullWithSchema(
       sectionsProgressFile,
+      SectionsProgressFileSchema,
+      { fallbackNullOnInvalid: true },
     )) ?? {
       template: resolvedTemplate.name,
       sections: {},
@@ -628,8 +711,10 @@ export async function runRenderStage(opts: {
         .sort((a, b) => b.localeCompare(a, undefined, { numeric: true }));
       for (const dirName of renderArchives) {
         const archFrames = path.join(archiveRoot, dirName, 'frames');
-        const archProg = await readJsonOrNull<SectionsProgressFile>(
+        const archProg = await readJsonOrNullWithSchema(
           path.join(archFrames, 'sections-progress.json'),
+          SectionsProgressFileSchema,
+          { fallbackNullOnInvalid: true },
         );
         if (archProg && archProg.template === resolvedTemplate.name) {
           archivedFramesSources.push({ framesDir: archFrames, progress: archProg });
@@ -813,21 +898,25 @@ export async function runRenderStage(opts: {
         prevSectionsProgress.template === resolvedTemplate.name
           ? prevSectionsProgress.sections[cacheKey]
           : undefined;
-      let canReuse =
+      const prevSegCheck =
         prevEntry?.sectionDigest === sectionDigest &&
         prevEntry.width === settings.render.width &&
         prevEntry.height === settings.render.height &&
         prevEntry.fps === settings.render.fps &&
-        prevEntry.frameCount === qSec.frameCount &&
-        (await isValidMp4Segment({
-          filePath: outMp4Path,
-          expectedDurationMs: qSec.quantizedDurationMs,
-          width: settings.render.width,
-          height: settings.render.height,
-          fps: settings.render.fps,
-          ffprobeBin,
-        })) &&
-        (await isValidPngFile(outPngPath));
+        prevEntry.frameCount === qSec.frameCount
+          ? await validateMp4Segment({
+              filePath: outMp4Path,
+              expectedDurationMs: qSec.quantizedDurationMs,
+              width: settings.render.width,
+              height: settings.render.height,
+              fps: settings.render.fps,
+              ffprobeBin,
+            })
+          : null;
+      if (prevSegCheck?.status === 'probe_error') {
+        throw new PipelineError('render_failed', `校验缓存分片失败: ${prevSegCheck.detail}`);
+      }
+      let canReuse = prevSegCheck?.status === 'ok' && (await isValidPngFile(outPngPath));
 
       if (!canReuse) {
         for (const arch of archivedFramesSources) {
@@ -841,17 +930,18 @@ export async function runRenderStage(opts: {
           ) {
             const archMp4 = path.join(arch.framesDir, mp4FileName);
             const archPng = path.join(arch.framesDir, pngFileName);
-            if (
-              (await isValidMp4Segment({
-                filePath: archMp4,
-                expectedDurationMs: qSec.quantizedDurationMs,
-                width: settings.render.width,
-                height: settings.render.height,
-                fps: settings.render.fps,
-                ffprobeBin,
-              })) &&
-              (await isValidPngFile(archPng))
-            ) {
+            const archSegCheck = await validateMp4Segment({
+              filePath: archMp4,
+              expectedDurationMs: qSec.quantizedDurationMs,
+              width: settings.render.width,
+              height: settings.render.height,
+              fps: settings.render.fps,
+              ffprobeBin,
+            });
+            if (archSegCheck.status === 'probe_error') {
+              throw new PipelineError('render_failed', `校验归档分片失败: ${archSegCheck.detail}`);
+            }
+            if (archSegCheck.status === 'ok' && (await isValidPngFile(archPng))) {
               const [mp4Buf, pngBuf] = await Promise.all([
                 fs.readFile(archMp4),
                 fs.readFile(archPng),
@@ -962,18 +1052,26 @@ export async function runRenderStage(opts: {
     }
 
     for (const secPlan of allSectionPlans) {
-      if (
-        !(await isValidMp4Segment({
-          filePath: secPlan.outMp4Path,
-          expectedDurationMs: secPlan.durationMs,
-          width: settings.render.width,
-          height: settings.render.height,
-          fps: settings.render.fps,
-          ffprobeBin,
-        }))
-      ) {
+      const segCheck = await validateMp4Segment({
+        filePath: secPlan.outMp4Path,
+        expectedDurationMs: secPlan.durationMs,
+        width: settings.render.width,
+        height: settings.render.height,
+        fps: settings.render.fps,
+        ffprobeBin,
+      });
+      if (segCheck.status === 'probe_error') {
+        throw new PipelineError(
+          'render_failed',
+          `探测章节视频分片失败（已保留原分片文件）: ${secPlan.outMp4Path} (${segCheck.detail})`,
+        );
+      }
+      if (segCheck.status === 'invalid') {
         await fs.rm(secPlan.outMp4Path, { force: true }).catch(() => undefined);
-        throw new PipelineError('render_failed', `缺少或损坏的章节视频分片: ${secPlan.outMp4Path}`);
+        throw new PipelineError(
+          'render_failed',
+          `缺少或损坏的章节视频分片: ${secPlan.outMp4Path} (${segCheck.detail})`,
+        );
       }
       if (!(await isValidPngFile(secPlan.outPngPath))) {
         await fs.rm(secPlan.outPngPath, { force: true }).catch(() => undefined);
@@ -1008,7 +1106,9 @@ export async function runRenderStage(opts: {
       )
       .digest('hex');
 
-    const prevProgress = await readJsonOrNull<FramesProgressRecord>(progressFile);
+    const prevProgress = await readJsonOrNullWithSchema(progressFile, FramesProgressRecordSchema, {
+      fallbackNullOnInvalid: true,
+    });
     const digestMatched =
       prevProgress?.digest === digest &&
       prevProgress.width === settings.render.width &&

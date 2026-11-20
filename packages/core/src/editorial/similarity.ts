@@ -147,6 +147,7 @@ export function selectRelevantOriginReferences<
     .map((candidate) => extractRecallTokens(candidate.titleNorm || candidate.title))
     .filter((set) => set.size > 0);
 
+  /** 标题召回关联的历史或前序事件匹配项 */
   interface RelatedOriginEntry {
     item: T;
     index: number;

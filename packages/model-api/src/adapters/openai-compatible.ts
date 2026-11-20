@@ -1,4 +1,12 @@
-import { type ModelApiProvider, zodToJsonSchema } from '@aidaily/contracts';
+import { lookup } from 'node:dns/promises';
+import {
+  classifyIpAddress,
+  isAllowedResolvedIpClass,
+  isAllowedUrlTarget,
+  isLocalModelApiAllowed,
+  type ModelApiProvider,
+  zodToJsonSchema,
+} from '@aidaily/contracts';
 import {
   createStrictOutputSchema,
   extractJsonFromText,
@@ -98,6 +106,34 @@ function httpError(status: number, response: unknown, apiKey?: string): ModelCal
   return new ModelCallError(detail, retryable);
 }
 
+/** 在发起模型接口请求前核验目标网址与解析 IP，防止指向未授权内网或云元数据服务 */
+async function assertSafeModelEndpoint(
+  url: URL,
+  dependencies: ModelApiDependencies,
+): Promise<void> {
+  const allowLoopback = isLocalModelApiAllowed();
+  if (!isAllowedUrlTarget(url, { allowLoopback })) {
+    throw new ModelCallError('模型 API 地址指向受限内网、回环或元数据地址，已拒绝请求', false);
+  }
+  const shouldLookup =
+    dependencies.lookupFn !== undefined || dependencies.fetchImpl === globalThis.fetch;
+  if (!shouldLookup || classifyIpAddress(url.hostname) !== null) {
+    return;
+  }
+  const resolved = dependencies.lookupFn
+    ? await dependencies.lookupFn(url.hostname)
+    : await lookup(url.hostname, { all: true, verbatim: true });
+  if (resolved.length === 0) {
+    throw new ModelCallError('模型 API 域名未能解析到有效网络地址', false);
+  }
+  for (const entry of resolved) {
+    const cls = classifyIpAddress(entry.address);
+    if (!cls || !isAllowedResolvedIpClass(cls, url, { allowLoopback })) {
+      throw new ModelCallError('模型 API 域名解析指向受限内网或元数据地址，已拒绝请求', false);
+    }
+  }
+}
+
 /** 在指定超时时间内读取 HTTP 响应，区分主动取消、超时和请求失败 */
 async function requestJson(opts: {
   config: ModelApiProvider;
@@ -114,6 +150,7 @@ async function requestJson(opts: {
     signal.throwIfAborted();
     const url = new URL(opts.config.baseUrl);
     url.pathname = `${url.pathname.replace(/\/+$/, '')}/${opts.endpoint}`;
+    await assertSafeModelEndpoint(url, opts.dependencies);
     const response = await opts.dependencies.fetchImpl(url.href, {
       method: opts.body ? 'POST' : 'GET',
       headers: {

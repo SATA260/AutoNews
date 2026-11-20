@@ -1,4 +1,3 @@
-import type { Settings } from '@aidaily/contracts';
 import type { CoreContext } from '../context.js';
 import { inTransaction } from '../storage/db.js';
 import { emitRunEvent } from './events.js';
@@ -7,6 +6,7 @@ import {
   isProcessAlive,
   markTakenOverRunInterrupted,
   PIPELINE_LOCK_NAME,
+  parseSettingsSnapshot,
 } from './lock.js';
 
 /** 自动巡检并修复遗留故障后的结果汇总 */
@@ -80,16 +80,13 @@ export function recoverStaleRuns(
       continue;
     }
 
-    let snapSettings: Settings = ctx.settings;
-    try {
-      snapSettings = JSON.parse(detail.configSnapshotJson) as Settings;
-    } catch {
-      // 若配置快照意外损坏则回退全局配置获取保留时长
-    }
+    const snapSettings = parseSettingsSnapshot(detail.configSnapshotJson, ctx.settings);
 
     const wasPublishing = detail.status === 'publishing';
     markTakenOverRunInterrupted(ctx, snapSettings, detail.id, nowIso, detail.heartbeatAt);
-    ctx.repos.locks.releaseLock(PIPELINE_LOCK_NAME, detail.id, detail.pid ?? undefined);
+    if (detail.pid !== null) {
+      ctx.repos.locks.releaseLock(PIPELINE_LOCK_NAME, detail.id, detail.pid);
+    }
 
     if (wasPublishing) {
       uncertainPublishRunIds.push(detail.id);
@@ -98,18 +95,17 @@ export function recoverStaleRuns(
     }
   }
 
-  // 2. 清理无对应活跃任务但仍残留无效锁的情况
+  // 2. 清理无对应活跃任务但仍残留无效锁的情况（在单事务内核验归属与进程号后再删除）
   const lock = ctx.repos.locks.get(PIPELINE_LOCK_NAME);
   if (lock?.ownerRun) {
-    const lockHeartbeatMs = lock.heartbeatAt ? Date.parse(lock.heartbeatAt) : Number.NaN;
-    const lockStale =
-      lock.pid === null ||
-      !isProcessAliveFn(lock.pid) ||
-      Number.isNaN(lockHeartbeatMs) ||
-      nowMs - lockHeartbeatMs > staleMs;
-    if (lockStale) {
-      ctx.repos.locks.releaseLock(PIPELINE_LOCK_NAME, lock.ownerRun);
-    }
+    ctx.repos.locks.releaseIfStale({
+      name: PIPELINE_LOCK_NAME,
+      expectedOwnerRun: lock.ownerRun,
+      expectedPid: lock.pid,
+      now: nowIso,
+      staleMs,
+      isProcessAlive: isProcessAliveFn,
+    });
   }
 
   // 3. 对超过重试保留截止时间的失联/失败/取消/拒绝任务自动放弃并释放新闻文章

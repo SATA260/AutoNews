@@ -503,6 +503,20 @@ export function createRunEventsRepo(db: DatabaseSync) {
         .all(runId, afterId, safeLimit) as unknown as RunEventRow[];
       return rows.map(mapRunEvent);
     },
+
+    /** 直接按时间正序返回某期任务末尾最近 N 条运行事件，避免全表分页扫描 */
+    listRecent(runId: string, limit = 500): RunEvent[] {
+      const safeLimit = clampLimit(limit, 500);
+      const rows = db
+        .prepare(`
+          SELECT * FROM run_events
+          WHERE run_id = ?
+          ORDER BY id DESC
+          LIMIT ?
+        `)
+        .all(runId, safeLimit) as unknown as RunEventRow[];
+      return rows.reverse().map(mapRunEvent);
+    },
   };
 }
 
@@ -532,7 +546,7 @@ export function createLocksRepo(db: DatabaseSync) {
       };
     },
 
-    /** 在独占事务内原子抢占或接管过期无效锁，同时核验任务与进程双标识防止同任务双进程并发 */
+    /** 在独占事务内原子抢占或接管过期无效锁，并仅允许子进程认领一次父进程预先登记的占位锁 */
     tryAcquire(input: {
       name: string;
       ownerRun: string;
@@ -540,16 +554,23 @@ export function createLocksRepo(db: DatabaseSync) {
       now: string;
       staleMs: number;
       isProcessAlive: (pid: number) => boolean;
+      reserved?: boolean;
     }): LockAcquireResult {
       return inTransaction(db, () => {
+        const nextAcquiredAt = input.reserved ? null : input.now;
         const existing = this.get(input.name);
         if (existing && existing.ownerRun !== null) {
-          if (existing.ownerRun === input.ownerRun && existing.pid === input.pid) {
+          if (
+            !input.reserved &&
+            existing.acquiredAt === null &&
+            existing.ownerRun === input.ownerRun &&
+            existing.pid === input.pid
+          ) {
             this.upsertLock({
               name: input.name,
               ownerRun: input.ownerRun,
               pid: input.pid,
-              acquiredAt: existing.acquiredAt ?? input.now,
+              acquiredAt: input.now,
               heartbeatAt: input.now,
             });
             return { acquired: true };
@@ -566,7 +587,7 @@ export function createLocksRepo(db: DatabaseSync) {
             name: input.name,
             ownerRun: input.ownerRun,
             pid: input.pid,
-            acquiredAt: input.now,
+            acquiredAt: nextAcquiredAt,
             heartbeatAt: input.now,
           });
           return { acquired: true, takenOverFrom: existing };
@@ -576,7 +597,7 @@ export function createLocksRepo(db: DatabaseSync) {
           name: input.name,
           ownerRun: input.ownerRun,
           pid: input.pid,
-          acquiredAt: input.now,
+          acquiredAt: nextAcquiredAt,
           heartbeatAt: input.now,
         });
         return { acquired: true };
@@ -588,7 +609,7 @@ export function createLocksRepo(db: DatabaseSync) {
       name: string;
       ownerRun: string;
       pid: number;
-      acquiredAt: string;
+      acquiredAt: string | null;
       heartbeatAt: string;
     }): void {
       db.prepare(`
@@ -600,6 +621,47 @@ export function createLocksRepo(db: DatabaseSync) {
           acquired_at = excluded.acquired_at,
           heartbeat_at = excluded.heartbeat_at
       `).run(input.name, input.ownerRun, input.pid, input.acquiredAt, input.heartbeatAt);
+    },
+
+    /** 在独占事务内复核锁归属与失效状态后再释放，避免检查与删除之间误删新接管者的锁 */
+    releaseIfStale(input: {
+      name: string;
+      expectedOwnerRun: string;
+      expectedPid: number | null;
+      now: string;
+      staleMs: number;
+      isProcessAlive: (pid: number) => boolean;
+    }): boolean {
+      return inTransaction(db, () => {
+        const existing = this.get(input.name);
+        if (!existing || existing.ownerRun === null) {
+          return false;
+        }
+        if (existing.ownerRun !== input.expectedOwnerRun || existing.pid !== input.expectedPid) {
+          return false;
+        }
+        const heartbeatMs = existing.heartbeatAt ? Date.parse(existing.heartbeatAt) : Number.NaN;
+        const nowMs = Date.parse(input.now);
+        const heartbeatStale =
+          Number.isNaN(heartbeatMs) || Number.isNaN(nowMs) || nowMs - heartbeatMs > input.staleMs;
+        const pidDead = existing.pid === null || !input.isProcessAlive(existing.pid);
+        if (!pidDead && !heartbeatStale) {
+          return false;
+        }
+        if (input.expectedPid === null) {
+          db.prepare('DELETE FROM locks WHERE name = ? AND owner_run = ? AND pid IS NULL').run(
+            input.name,
+            input.expectedOwnerRun,
+          );
+        } else {
+          db.prepare('DELETE FROM locks WHERE name = ? AND owner_run = ? AND pid = ?').run(
+            input.name,
+            input.expectedOwnerRun,
+            input.expectedPid,
+          );
+        }
+        return true;
+      });
     },
 
     /** 刷新当前持锁任务与进程的最新心跳时间，若锁已被其他进程接管则返回 false */

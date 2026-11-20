@@ -1,10 +1,10 @@
-import fs from 'node:fs/promises';
 import path from 'node:path';
 import { type CliConfig, zodToJsonSchema } from '@aidaily/contracts';
 import { CliAuthError, CliExitError, hasAuthFailureMessage } from '../errors.js';
 import { runSubprocess } from '../exec.js';
 import { extractJsonFromText } from '../json.js';
 import type { AdapterCommand, AdapterParsedOutput, CliAdapter, InvokeRequest } from '../types.js';
+import { writeBridgeFileAtomic } from './atomic.js';
 
 /** 按点分隔字段名从嵌套对象中读取指定路径的值 */
 function getByDotPath(obj: unknown, dotPath: string): unknown {
@@ -34,7 +34,7 @@ export const genericAdapter: CliAdapter = {
     const outFile = path.join(workDir, 'output.txt');
 
     if (req.schema) {
-      await fs.writeFile(schemaFile, JSON.stringify(zodToJsonSchema(req.schema), null, 2));
+      await writeBridgeFileAtomic(schemaFile, JSON.stringify(zodToJsonSchema(req.schema), null, 2));
     }
 
     const template = cfg.argsTemplate ?? ['{prompt}'];

@@ -1,10 +1,10 @@
-import fs from 'node:fs/promises';
 import path from 'node:path';
 import { createStrictOutputSchema } from '@aidaily/model-runtime';
 import { z } from 'zod';
 import { CliAuthError, CliExitError, CliOutputError, hasAuthFailureMessage } from '../errors.js';
 import { runSubprocess } from '../exec.js';
 import type { AdapterParsedOutput, CliAdapter } from '../types.js';
+import { writeBridgeFileAtomic } from './atomic.js';
 
 const CodexEventSchema = z.discriminatedUnion('type', [
   z.object({ type: z.literal('thread.started'), thread_id: z.string() }),
@@ -115,7 +115,7 @@ export const codexAdapter: CliAdapter = {
     const output = req.schema ? createStrictOutputSchema(req.schema) : undefined;
     if (output) {
       const schemaFile = path.join(workDir, 'output-schema.json');
-      await fs.writeFile(schemaFile, JSON.stringify(output.schema), { mode: 0o600 });
+      await writeBridgeFileAtomic(schemaFile, JSON.stringify(output.schema), { mode: 0o600 });
       args.push('--output-schema', schemaFile);
     }
     args.push('-');

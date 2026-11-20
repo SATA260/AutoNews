@@ -1052,6 +1052,13 @@ describe('collector module and SourceService', () => {
 
   it('parses timezone-less English month dates in source timezone, extracts inline dates, and uses UTC for English html-list sources', async () => {
     expect(parsePublishedAt('2026-11-18', 'UTC')).toBe('2026-11-18T00:00:00.000Z');
+    expect(parsePublishedAt('2026-3-5', 'Asia/Shanghai')).toBe('2026-03-04T16:00:00.000Z');
+    expect(parsePublishedAt('2026-3-5 9:05', 'Asia/Shanghai')).toBe('2026-03-05T01:05:00.000Z');
+    expect(parsePublishedAt('3/5/2026 9:05 AM', 'America/New_York')).toBe(
+      '2026-03-05T14:05:00.000Z',
+    );
+    expect(parsePublishedAt('11/16/2026 14:30', 'UTC')).toBe('2026-11-16T14:30:00.000Z');
+    expect(parsePublishedAt('2026年3月5日 9:05', 'Asia/Shanghai')).toBe('2026-03-05T01:05:00.000Z');
     expect(parsePublishedAt('Nov 18, 2026', 'UTC')).toBe('2026-11-18T00:00:00.000Z');
     expect(parsePublishedAt('18 November 2026', 'UTC')).toBe('2026-11-18T00:00:00.000Z');
     expect(parsePublishedAt('Nov. 18, 2026 at 2:30 PM', 'UTC')).toBe('2026-11-18T14:30:00.000Z');
@@ -1281,6 +1288,235 @@ describe('collector module and SourceService', () => {
       const thirdCkpt = await collectSources(core.context, { retryDelayMs: 1 });
       expect(conditionalHeaderSeen).toBe('"etag-v1"');
       expect(thirdCkpt.newArticleIds).toEqual([]);
+    } finally {
+      await core.close();
+    }
+  });
+
+  it('单篇条目意外异常时等待同源其余并发任务收敛后才关闭浏览器驱动', async () => {
+    const listUrl = 'https://example.com/js-list';
+    const item1Url = 'https://example.com/posts/fail-item';
+    const item2Url = 'https://example.com/posts/slow-item';
+
+    const rootDir = await setupWorkspaceWithSources([
+      {
+        id: 'js-src',
+        name: 'JS 渲染测试源',
+        enabled: true,
+        kind: 'html-list',
+        pool: 'primary',
+        tier: 2,
+        url: listUrl,
+        lang: 'en',
+        listConfig: {
+          itemSelector: 'a.post',
+          renderJs: true,
+        },
+      },
+    ]);
+
+    let siblingAborted = false;
+    let siblingSettledBeforeClose = false;
+    let driverClosed = false;
+
+    const longBody =
+      'Artificial intelligence systems continue advancing across multimodal reasoning benchmarks. '.repeat(
+        8,
+      );
+    const fakeDriver: CollectorBrowserDriver = {
+      async fetchRenderedHtml(targetUrl, opts) {
+        if (targetUrl === listUrl) {
+          return `<html><body><a class="post" href="${item1Url}">Item 1</a><a class="post" href="${item2Url}">Item 2</a></body></html>`;
+        }
+        if (targetUrl === item1Url) {
+          return `<html><head><title>Item 1</title></head><body><article><p>${longBody}</p></article></body></html>`;
+        }
+        if (targetUrl === item2Url) {
+          await new Promise<void>((resolve) => {
+            if (opts?.signal?.aborted) {
+              siblingAborted = true;
+              siblingSettledBeforeClose = !driverClosed;
+              resolve();
+              return;
+            }
+            opts?.signal?.addEventListener(
+              'abort',
+              () => {
+                siblingAborted = true;
+                setTimeout(() => {
+                  siblingSettledBeforeClose = !driverClosed;
+                  resolve();
+                }, 20);
+              },
+              { once: true },
+            );
+          });
+        }
+        return '';
+      },
+      async fetchXTimeline() {
+        return [];
+      },
+      async renderTweetCardPng() {
+        return null;
+      },
+      async renderDomFragmentPng() {
+        return null;
+      },
+      async close() {
+        driverClosed = true;
+      },
+    };
+
+    const core = await createCore({
+      rootDir,
+      now: () => new Date('2026-11-16T12:00:00.000Z'),
+      createCollectorDriver: () => fakeDriver,
+      fetchImpl: async () => new Response('Forbidden', { status: 403 }),
+    });
+    const originalInsert = core.context.repos.articles.insertIfAbsent.bind(
+      core.context.repos.articles,
+    );
+    core.context.repos.articles.insertIfAbsent = (article) => {
+      if (article.canonicalUrl === item1Url) {
+        throw new Error('simulated item storage crash');
+      }
+      return originalInsert(article);
+    };
+
+    try {
+      await expect(collectSources(core.context, { retryDelayMs: 1 })).rejects.toThrow(
+        /simulated item storage crash/,
+      );
+      expect(driverClosed).toBe(true);
+      expect(siblingAborted).toBe(true);
+      expect(siblingSettledBeforeClose).toBe(true);
+    } finally {
+      await core.close();
+    }
+  });
+
+  it('拦截内网、回环及云元数据图片与跨源文章地址和 302 内网重定向', async () => {
+    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'aidaily-ssrf-'));
+    tempDirs.push(tmpDir);
+    const imagesDir = path.join(tmpDir, 'storage', 'images');
+
+    const imgRequests: string[] = [];
+    const mockFetch: typeof fetch = async (input) => {
+      const url = String(input);
+      imgRequests.push(url);
+      if (url === 'https://cdn.example.com/redir-to-local.png') {
+        return new Response(null, {
+          status: 302,
+          headers: { location: 'http://127.0.0.1:3000/secret.png' },
+        });
+      }
+      if (url === 'https://example.com/redir-to-imds') {
+        return new Response(null, {
+          status: 302,
+          headers: { location: 'http://169.254.169.254/latest/meta-data' },
+        });
+      }
+      return new Response('should not happen', { status: 200 });
+    };
+
+    for (const blockedImg of [
+      'http://127.0.0.1:8080/internal.png',
+      'http://localhost/internal.png',
+      'http://169.254.169.254/latest/meta-data',
+      'http://10.0.0.1/internal.png',
+      'http://192.168.1.10/a.png',
+      'http://[::ffff:127.0.0.1]/a.png',
+      'https://cdn.example.com/redir-to-local.png',
+    ]) {
+      const res = await downloadArticleImage({
+        articleId: 'art-ssrf',
+        imageUrl: blockedImg,
+        imagesDir,
+        rootDir: tmpDir,
+        fetchImpl: mockFetch,
+      });
+      expect(res).toBeNull();
+    }
+    expect(imgRequests).toEqual(['https://cdn.example.com/redir-to-local.png']);
+
+    const extracted = extractArticleContent({
+      url: 'https://news.example.com/post-1',
+      html: '<html><head><meta property="og:image" content="http://127.0.0.1:3000/og.png"></head><body><article><img src="http://169.254.169.254/hero.png"><img src="https://cdn.example.com/real.png"><p>Body text enough to inspect images.</p></article></body></html>',
+      feedContent: null,
+      feedSummary: null,
+    });
+    expect(extracted.ogImageUrl).toBeNull();
+    expect(extracted.candidateImages.map((img) => img.url)).toEqual([
+      'https://cdn.example.com/real.png',
+    ]);
+
+    expect(
+      await fetchArticleHtml('http://127.0.0.1:3000/admin', mockFetch, { retries: 1 }),
+    ).toBeNull();
+    expect(
+      await fetchArticleHtml('https://example.com/redir-to-imds', mockFetch, { retries: 1 }),
+    ).toBeNull();
+  });
+
+  it('永久 404 或非网页文章不阻塞后续订阅源的条件缓存 304 跳过', async () => {
+    const missingUrl = 'https://perm.example.com/gone';
+    const goodUrl = 'https://perm.example.com/good';
+    const feedXml = `<?xml version="1.0"?><rss version="2.0"><channel><title>Perm</title><item><title>Good</title><link>${goodUrl}</link><pubDate>Mon, 16 Nov 2026 11:00:00 GMT</pubDate></item><item><title>Gone</title><link>${missingUrl}</link><pubDate>Mon, 16 Nov 2026 10:00:00 GMT</pubDate></item></channel></rss>`;
+    const longBody = 'Open weights research release detailed architecture report. '.repeat(10);
+
+    const rootDir = await setupWorkspaceWithSources([
+      {
+        id: 'perm-rss',
+        name: 'Perm RSS',
+        enabled: true,
+        kind: 'rss',
+        pool: 'primary',
+        tier: 2,
+        url: 'https://perm.example.com/feed.xml',
+        lang: 'en',
+      },
+    ]);
+
+    let sawIfNoneMatch: string | null = null;
+    const core = await createCore({
+      rootDir,
+      now: () => new Date('2026-11-16T12:00:00.000Z'),
+      fetchImpl: async (input, init) => {
+        const url = String(input);
+        if (url === 'https://perm.example.com/feed.xml') {
+          const hdrs = new Headers(init?.headers);
+          sawIfNoneMatch = hdrs.get('if-none-match');
+          if (sawIfNoneMatch === '"etag-perm"') {
+            return new Response(null, { status: 304, headers: { etag: '"etag-perm"' } });
+          }
+          return new Response(feedXml, {
+            status: 200,
+            headers: { 'content-type': 'application/rss+xml', etag: '"etag-perm"' },
+          });
+        }
+        if (url === goodUrl) {
+          return new Response(
+            `<html><head><title>Good</title></head><body><article><p>${longBody}</p></article></body></html>`,
+            { status: 200, headers: { 'content-type': 'text/html' } },
+          );
+        }
+        return new Response('Not Found', { status: 404 });
+      },
+    });
+
+    try {
+      const r1 = await collectSources(core.context, { retryDelayMs: 1 });
+      expect(r1.newArticleIds).toEqual([computeArticleId(goodUrl)]);
+      expect(core.context.repos.articles.getById(computeArticleId(missingUrl))?.extractStatus).toBe(
+        'failed',
+      );
+      expect(core.context.repos.sourceState.get('perm-rss')?.etag).toBe('"etag-perm"');
+
+      // 第二轮仍应发送 If-None-Match 并命中 304，不会被 404 永久失败条目标记阻断
+      const r2 = await collectSources(core.context, { retryDelayMs: 1 });
+      expect(sawIfNoneMatch).toBe('"etag-perm"');
+      expect(r2.newArticleIds).toEqual([]);
     } finally {
       await core.close();
     }

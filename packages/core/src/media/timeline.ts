@@ -14,7 +14,7 @@ export const DEFAULT_PAGE_TURN_POST_DELAY_MS = 1000;
 export function resolvePageTurnPostDelayMs(
   pageTurnSfx?: { file: string; postDelayMs?: number } | null,
 ): number {
-  if (!pageTurnSfx || !pageTurnSfx.file.trim()) {
+  if (!pageTurnSfx?.file.trim()) {
     return 0;
   }
   const raw = pageTurnSfx.postDelayMs ?? DEFAULT_PAGE_TURN_POST_DELAY_MS;

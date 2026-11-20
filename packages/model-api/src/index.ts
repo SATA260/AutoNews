@@ -9,10 +9,16 @@ import {
 } from '@aidaily/model-runtime';
 import { openAiCompatibleAdapter } from './adapters/openai-compatible.js';
 
-/** 由核心传入的网络接口和密钥读取方法 */
+/** DNS 解析返回的单个地址条目 */
+export interface ResolvedHostAddress {
+  address: string;
+}
+
+/** 由核心传入的网络接口、可选域名解析函数和密钥读取方法 */
 export interface ModelApiDependencies {
   fetchImpl: typeof fetch;
   resolveApiKey: (config: ModelApiProvider) => Promise<string | undefined>;
+  lookupFn?: (hostname: string) => Promise<ResolvedHostAddress[]>;
 }
 
 /** HTTP 模型服务的单次调用与模型发现接口 */

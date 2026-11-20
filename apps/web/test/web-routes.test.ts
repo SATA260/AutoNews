@@ -20,6 +20,7 @@ import {
 import { GET as getArtifactRoute } from '@/app/api/runs/[id]/artifacts/[...path]/route';
 import { GET as getEventsRoute } from '@/app/api/runs/[id]/events/route';
 import { closeCoreSingleton, getCore } from '@/lib/core';
+import { proxy } from '@/proxy';
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..', '..');
 const FAKE_AGY_BIN = path.join(REPO_ROOT, 'packages', 'core', 'test', 'fixtures', 'fake-agy.mjs');
@@ -386,6 +387,7 @@ describe('apps/web routes and Server Actions', () => {
     expect(fullBody).toContain(`id: ${ev1Id}`);
     expect(fullBody).toContain(`id: ${ev2Id}`);
     expect(fullBody).toContain(`id: ${ev3Id}`);
+    expect(fullBody).toContain('event: done\ndata: {"done":true}\n\n');
     expect(fullBody).toContain(': done');
 
     const resumedSseRes = await getEventsRoute(
@@ -438,6 +440,7 @@ describe('apps/web routes and Server Actions', () => {
       ok: false,
       error: expect.stringContaining('已存在'),
     });
+    process.env.AIDAILY_ALLOW_LOCAL_MODEL_API = '1';
     expect(
       await saveModelApiConnectionAction(
         apiConnectionForm('备用网关', {
@@ -642,6 +645,7 @@ describe('apps/web routes and Server Actions', () => {
       if (!addr || typeof addr === 'string') {
         throw new Error('无法启动本地测试模型网关');
       }
+      process.env.AIDAILY_ALLOW_LOCAL_MODEL_API = '1';
       const gatewayUrl = `http://127.0.0.1:${addr.port}/v1`;
       expect(
         await saveModelApiConnectionAction(
@@ -808,5 +812,86 @@ describe('apps/web routes and Server Actions', () => {
     expect(core.context.repos.runItems.getById('item-web-1')?.selectedMediaIds).toEqual({
       primary: 'c2',
     });
+  });
+
+  it('enforces local Host/cross-site checks, Range ignore semantics, and recentEvents/includeArtifacts queries', async () => {
+    const rootDir = await setupWebTestWorkspace();
+    const core = await getCore();
+    const runId = createRun(core.context, { itemCount: 1, trigger: 'manual-web' });
+    const runDir = path.join(rootDir, 'storage', 'runs', runId);
+    await fs.mkdir(path.join(runDir, 'output'), { recursive: true });
+    const sampleFile = path.join(runDir, 'output', 'sample.txt');
+    await fs.writeFile(sampleFile, 'hello-range-ignore');
+
+    const ids: number[] = [];
+    for (let i = 1; i <= 6; i++) {
+      ids.push(
+        emitRunEvent(core.context, {
+          runId,
+          level: 'info',
+          type: 'stage_done',
+          message: `step-${i}`,
+        }),
+      );
+    }
+
+    // 无须扫描磁盘产物目录，且可直接按时间正序切片返回最近 N 条运行事件
+    const lightDetail = await core.tasks.get(runId, { includeArtifacts: false });
+    expect(lightDetail.artifacts).toEqual([]);
+    const recent3 = await core.tasks.recentEvents(runId, 3);
+    expect(recent3.map((e) => e.message)).toEqual(['step-4', 'step-5', 'step-6']);
+    expect(recent3.map((e) => e.id)).toEqual(ids.slice(-3));
+
+    // 无等号的非标准 Range 头按 HTTP 规范忽略并返回 200 全量内容
+    const noEqualsRangeRes = await getArtifactRoute(
+      new Request(`http://127.0.0.1:3000/api/runs/${runId}/artifacts/output/sample.txt`, {
+        headers: { Range: '0-4' },
+      }),
+      { params: Promise.resolve({ id: runId, path: ['output', 'sample.txt'] }) },
+    );
+    expect(noEqualsRangeRes.status).toBe(200);
+    expect(await noEqualsRangeRes.text()).toBe('hello-range-ignore');
+
+    // 拦截 DNS rebinding 主机头、代理转发头及跨站 Origin / Referer / Sec-Fetch-Site
+    const attackerUrl = `http://127.0.0.1:3000/api/runs/${runId}/events`;
+    const blockedHostRes = await getEventsRoute(
+      new Request(attackerUrl, { headers: { Host: 'rebind.evil.test:3000' } }),
+      { params: Promise.resolve({ id: runId }) },
+    );
+    expect(blockedHostRes.status).toBe(403);
+
+    const blockedCrossSite = await getArtifactRoute(
+      new Request(`http://127.0.0.1:3000/api/runs/${runId}/artifacts/output/sample.txt`, {
+        headers: { 'Sec-Fetch-Site': 'cross-site' },
+      }),
+      { params: Promise.resolve({ id: runId, path: ['output', 'sample.txt'] }) },
+    );
+    expect(blockedCrossSite.status).toBe(403);
+
+    const blockedOrigin = await getEventsRoute(
+      new Request(attackerUrl, { headers: { Origin: 'https://evil.example' } }),
+      { params: Promise.resolve({ id: runId }) },
+    );
+    expect(blockedOrigin.status).toBe(403);
+
+    const blockedProxy = proxy(
+      new Request('http://rebind.evil.test:3000/runs', {
+        headers: { Host: 'rebind.evil.test:3000' },
+      }) as unknown as Parameters<typeof proxy>[0],
+    );
+    expect(blockedProxy.status).toBe(403);
+
+    // 可选访问令牌在设置后强制校验
+    process.env.AIDAILY_WEB_TOKEN = 'top-secret-token';
+    const noTokenRes = await getEventsRoute(new Request(attackerUrl), {
+      params: Promise.resolve({ id: runId }),
+    });
+    expect(noTokenRes.status).toBe(401);
+    const validTokenProxy = proxy(
+      new Request('http://127.0.0.1:3000/runs', {
+        headers: { 'x-aidaily-token': 'top-secret-token' },
+      }) as unknown as Parameters<typeof proxy>[0],
+    );
+    expect(validTokenProxy.status).toBe(200);
   });
 });

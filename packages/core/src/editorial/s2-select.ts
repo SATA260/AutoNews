@@ -66,7 +66,7 @@ export async function runSelectStage(
 
   let modernBackupUsed = false;
   if (
-    settings.issue.minScore !== undefined &&
+    settings.issue.allowPartial &&
     initialSelection.selected.length === 0 &&
     settings.issue.refill.useBackupSources
   ) {
@@ -169,7 +169,7 @@ export async function runSelectStage(
   let refillRoundsUsed = 0;
   for (
     let round = 1;
-    settings.issue.minScore === undefined &&
+    !settings.issue.allowPartial &&
     round <= settings.issue.refill.maxRounds &&
     allEvents.length < itemCount;
     round++
@@ -219,7 +219,7 @@ export async function runSelectStage(
         data: { notBeforeAt, selectedCount: allEvents.length, itemCount },
       });
     }
-  } else if (settings.issue.minScore === undefined && allEvents.length < itemCount) {
+  } else if (!settings.issue.allowPartial && allEvents.length < itemCount) {
     throw new PipelineError(
       'insufficient_items',
       `候选新闻事件不足：目标 ${itemCount} 条，经 ${refillRoundsUsed} 轮补充后仍仅有 ${allEvents.length} 条`,

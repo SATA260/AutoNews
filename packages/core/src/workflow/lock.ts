@@ -1,4 +1,4 @@
-import { PIPELINE_STAGES, type Settings } from '@aidaily/contracts';
+import { PIPELINE_STAGES, type Settings, SettingsSchema } from '@aidaily/contracts';
 import type { CoreContext } from '../context.js';
 import { inTransaction } from '../storage/db.js';
 import type { LockRow } from '../storage/repos/runs-repo.js';
@@ -37,10 +37,11 @@ export function isProcessAlive(pid: number): boolean {
   }
 }
 
-/** 从旧任务快照解析配置，失败时回退到全局默认配置（避免新任务的保持窗口覆盖旧任务） */
-function resolvePreviousRunSettings(rawSnapshot: string, fallback: Settings): Settings {
+/** 从旧任务快照解析并校验配置，失败时回退到传入的默认配置 */
+export function parseSettingsSnapshot(rawSnapshot: string, fallback: Settings): Settings {
   try {
-    return JSON.parse(rawSnapshot) as Settings;
+    const parsed = SettingsSchema.safeParse(JSON.parse(rawSnapshot));
+    return parsed.success ? parsed.data : fallback;
   } catch {
     return fallback;
   }
@@ -58,7 +59,7 @@ export function markTakenOverRunInterrupted(
   if (!prevRun) {
     return;
   }
-  const prevSettings = resolvePreviousRunSettings(prevRun.configSnapshotJson, fallbackSettings);
+  const prevSettings = parseSettingsSnapshot(prevRun.configSnapshotJson, fallbackSettings);
 
   inTransaction(ctx.db, () => {
     if (prevRun.status === 'publishing') {
@@ -234,6 +235,7 @@ export function reservePipelineLockForChild(
       now: nowIso,
       staleMs: DEFAULT_LOCK_STALE_MS,
       isProcessAlive,
+      reserved: true,
     });
     if (opts?.required && !result.acquired) {
       throw new LockBusyError(result.holder);

@@ -35,4 +35,5 @@ export interface TtsServiceOptions {
   bridge?: CliBridge;
   ffmpegBin?: string;
   ffprobeBin?: string;
+  fetchImpl?: typeof fetch;
 }

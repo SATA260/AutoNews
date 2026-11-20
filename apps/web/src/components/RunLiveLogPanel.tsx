@@ -4,6 +4,25 @@ import type { RunEvent } from '@aidaily/contracts';
 import { useRouter } from 'next/navigation';
 import { useEffect, useRef, useState } from 'react';
 
+/** 触发页面刷新的关键阶段与终态事件类型集合 */
+const REFRESH_TRIGGER_EVENTS = new Set<string>([
+  'stage_done',
+  'awaiting_audio_review',
+  'awaiting_review',
+  'run_revived',
+  'section_narration_updated',
+  'run_failed',
+  'run_cancelled',
+  'run_skipped',
+  'run_abandoned',
+  'run_interrupted',
+  'run_rejected',
+  'run_consumed_only',
+  'run_published',
+  'publish_failed',
+  'publish_uncertain',
+]);
+
 /** 实时展示并自动跟踪单期任务事件流的客户端面板组件 */
 export function RunLiveLogPanel({
   runId,
@@ -52,23 +71,17 @@ export function RunLiveLogPanel({
           }
           return [...prev, parsed];
         });
-        if (
-          parsed.type === 'stage_done' ||
-          parsed.type === 'awaiting_audio_review' ||
-          parsed.type === 'awaiting_review' ||
-          parsed.type === 'run_revived' ||
-          parsed.type === 'section_narration_updated' ||
-          parsed.type === 'run_failed' ||
-          parsed.type === 'run_cancelled' ||
-          parsed.type === 'run_published' ||
-          parsed.type === 'publish_failed' ||
-          parsed.type === 'publish_uncertain'
-        ) {
+        if (REFRESH_TRIGGER_EVENTS.has(parsed.type)) {
           router.refresh();
         }
       } catch {
         // 忽略格式异常的单条推送数据
       }
+    };
+    const onDone = () => {
+      setConnected(false);
+      source.close();
+      router.refresh();
     };
     const onError = () => {
       setConnected(false);
@@ -76,12 +89,14 @@ export function RunLiveLogPanel({
 
     source.addEventListener('open', onOpen);
     source.addEventListener('run_event', onRunEvent as EventListener);
+    source.addEventListener('done', onDone);
     source.addEventListener('error', onError);
 
     return () => {
       setConnected(false);
       source.removeEventListener('open', onOpen);
       source.removeEventListener('run_event', onRunEvent as EventListener);
+      source.removeEventListener('done', onDone);
       source.removeEventListener('error', onError);
       source.close();
     };

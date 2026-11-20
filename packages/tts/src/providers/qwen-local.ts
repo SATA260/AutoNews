@@ -5,6 +5,7 @@ import fs from 'node:fs/promises';
 import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
+import { writeTtsFileAtomic } from '../atomic.mjs';
 import type { SynthesizeRequest, TtsProvider } from '../types.js';
 
 const HOST_IDS = ['deepseek', 'gpt', 'gemini', 'claude'] as const;
@@ -118,6 +119,7 @@ async function waitForServerReady(opts: {
   serverUrl: string;
   serverModelId: string;
   timeoutMs: number;
+  fetchImpl: typeof fetch;
   signal?: AbortSignal;
   getSpawnError: () => Error | undefined;
 }): Promise<boolean> {
@@ -133,9 +135,9 @@ async function waitForServerReady(opts: {
       const probeSignal = opts.signal
         ? AbortSignal.any([opts.signal, AbortSignal.timeout(500)])
         : AbortSignal.timeout(500);
-      const response = await fetch(`${opts.serverUrl}/health`, { signal: probeSignal });
+      const response = await opts.fetchImpl(`${opts.serverUrl}/health`, { signal: probeSignal });
       if (response.ok) {
-        const models = await fetch(`${opts.serverUrl}/v1/models`, { signal: probeSignal });
+        const models = await opts.fetchImpl(`${opts.serverUrl}/v1/models`, { signal: probeSignal });
         const body = (await models.json()) as { data?: Array<{ id?: string }> };
         if (
           models.ok &&
@@ -159,7 +161,9 @@ export function createAudiocppLocalTtsProvider(
   spec: AudiocppProviderSpec,
   rootDir: string,
   config: Record<string, unknown>,
+  opts?: { fetchImpl?: typeof fetch },
 ): TtsProvider {
+  const fetchImpl = opts?.fetchImpl ?? globalThis.fetch;
   const defaultBin = resolveAudiocppPath(rootDir, config, 'bin', spec.defaultBin);
   const defaultModel = resolveAudiocppPath(rootDir, config, 'model', spec.defaultModel);
 
@@ -258,7 +262,7 @@ export function createAudiocppLocalTtsProvider(
       serverDir = await fs.mkdtemp(path.join(os.tmpdir(), `aidaily-${spec.id}-`));
       const configFile = path.join(serverDir, 'server.json');
       serverModelId = `aidaily-${crypto.randomBytes(12).toString('hex')}`;
-      await fs.writeFile(
+      await writeTtsFileAtomic(
         configFile,
         JSON.stringify({
           host: '127.0.0.1',
@@ -323,6 +327,7 @@ export function createAudiocppLocalTtsProvider(
           serverUrl,
           serverModelId,
           timeoutMs: spec.startupTimeoutMs ?? 15_000,
+          fetchImpl,
           signal,
           getSpawnError: () => spawnError,
         });
@@ -354,7 +359,7 @@ export function createAudiocppLocalTtsProvider(
       const signal = req.signal
         ? AbortSignal.any([req.signal, AbortSignal.timeout(300_000)])
         : AbortSignal.timeout(300_000);
-      const response = await fetch(`${serverUrl}/v1/audio/speech`, {
+      const response = await fetchImpl(`${serverUrl}/v1/audio/speech`, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         signal,
@@ -375,15 +380,7 @@ export function createAudiocppLocalTtsProvider(
       const content = new Uint8Array(await response.arrayBuffer());
       if (content.length < 44) throw new Error('本地语音服务返回空音频');
 
-      await fs.mkdir(path.dirname(req.outFile), { recursive: true });
-      const tempFile = `${req.outFile}.${crypto.randomBytes(4).toString('hex')}.tmp`;
-      try {
-        await fs.writeFile(tempFile, content);
-        await fs.rename(tempFile, req.outFile);
-      } catch (error) {
-        await fs.rm(tempFile, { force: true });
-        throw error;
-      }
+      await writeTtsFileAtomic(req.outFile, content);
     },
   };
 }
@@ -392,6 +389,7 @@ export function createAudiocppLocalTtsProvider(
 export function createIndexTtsProvider(
   rootDir: string,
   config: Record<string, unknown>,
+  opts?: { fetchImpl?: typeof fetch },
 ): TtsProvider {
   return createAudiocppLocalTtsProvider(
     {
@@ -418,6 +416,7 @@ export function createIndexTtsProvider(
     },
     rootDir,
     config,
+    opts,
   );
 }
 
@@ -425,6 +424,7 @@ export function createIndexTtsProvider(
 export function createQwenLocalTtsProvider(
   rootDir: string,
   config: Record<string, unknown>,
+  opts?: { fetchImpl?: typeof fetch },
 ): TtsProvider {
   return createAudiocppLocalTtsProvider(
     {
@@ -446,5 +446,6 @@ export function createQwenLocalTtsProvider(
     },
     rootDir,
     config,
+    opts,
   );
 }

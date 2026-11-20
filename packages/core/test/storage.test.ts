@@ -38,7 +38,7 @@ async function setupTempWorkspace(): Promise<string> {
   return dir;
 }
 
-describe('M1 sqlite storage, paths, and transactions', () => {
+describe('sqlite storage, paths, and transactions', () => {
   it('initializes state.sqlite in WAL mode with all 14 tables', async () => {
     const rootDir = await setupTempWorkspace();
     const core = await createCore({ rootDir });
@@ -96,7 +96,13 @@ describe('M1 sqlite storage, paths, and transactions', () => {
       ).toMatchObject({ host_id: 'gpt', host_manual: 0, media_dirty: 0, not_before_at: null });
       expect(
         db.prepare('SELECT version FROM schema_migrations ORDER BY version').all(),
-      ).toHaveLength(4);
+      ).toHaveLength(5);
+      const articleCols = db.prepare('PRAGMA table_info(articles)').all() as Array<{
+        name: string;
+      }>;
+      expect(articleCols.map((c) => c.name)).toEqual(
+        expect.arrayContaining(['extract_retryable', 'extract_attempts']),
+      );
     } finally {
       db.close();
     }

@@ -10,9 +10,11 @@ import {
   type NarrationSectionView,
   type RunItemRecord,
   type SectionAudio,
+  SectionAudioSchema,
   type Settings,
   SettingsSchema,
   type Timeline,
+  TimelineSchema,
   UpdateSectionNarrationInputSchema,
 } from '@aidaily/contracts';
 import {
@@ -23,10 +25,12 @@ import {
   probeAudioDurationMs,
   QWEN_AUDIO_PROCESSING_VERSION,
 } from '@aidaily/tts';
+import { z } from 'zod';
 import type { CoreContext } from '../context.js';
+import { PackageCheckpointSchema } from '../editorial/s6-package.js';
 import { PipelineError } from '../errors.js';
 import { inTransaction } from '../storage/db.js';
-import { readJsonOrNull, writeJsonAtomic } from '../storage/files.js';
+import { readJsonOrNull, readJsonOrNullWithSchema, writeJsonAtomic } from '../storage/files.js';
 import { emitRunEvent } from '../workflow/events.js';
 import { buildTimeline, resolvePageTurnPostDelayMs } from './timeline.js';
 
@@ -39,11 +43,14 @@ export interface NarrateCheckpoint {
   reusedSectionCount: number;
 }
 
-/** 保存在音频目录中用于记录单段配音完成状态的进度记录 */
-interface SectionProgressRecord {
-  hash: string;
-  audio: SectionAudio;
-}
+/** 保存在音频目录中用于记录单段配音完成状态的进度记录结构 */
+const SectionProgressMapSchema = z.record(
+  z.string(),
+  z.object({
+    hash: z.string(),
+    audio: SectionAudioSchema,
+  }),
+);
 
 /** 计算单个口播段落与当前合成配置的校验摘要，配置或语音文案变化时使旧音频失效。画面字幕不参与这个摘要 */
 function computeSectionDigest(section: NarrationSection, settings: Settings): string {
@@ -266,7 +273,9 @@ export async function runNarrateStage(opts: {
   ]);
 
   const savedProgress =
-    (await readJsonOrNull<Record<string, SectionProgressRecord>>(progressFile)) ?? {};
+    (await readJsonOrNullWithSchema(progressFile, SectionProgressMapSchema, {
+      fallbackNullOnInvalid: true,
+    })) ?? {};
   let progressDirty = false;
   const audioByKey = new Map<string, SectionAudio>();
   const pendingSections: NarrationSection[] = [];
@@ -416,13 +425,15 @@ export async function runNarrateStage(opts: {
 
 /** 读取整期编排。还没编排完时不能单独改某一段配音 */
 async function loadIssuePackage(ctx: CoreContext, runId: string): Promise<IssuePackage> {
-  const raw = await readJsonOrNull<{ packageData?: IssuePackage }>(
+  const ckpt = await readJsonOrNullWithSchema(
     path.join(ctx.paths.runDir(runId), 'stages', 'package.json'),
+    PackageCheckpointSchema,
+    { label: '整期编排检查点' },
   );
-  if (!raw?.packageData) {
+  if (!ckpt?.packageData) {
     throw new Error('还没有整期编排，不能修改配音');
   }
-  return raw.packageData;
+  return ckpt.packageData;
 }
 
 /** 给页面用的段落名称：开场、第几条新闻、片尾 */
@@ -450,7 +461,10 @@ async function rebuildTimeline(
 ): Promise<Timeline> {
   const runDir = ctx.paths.runDir(runId);
   const progressFile = path.join(runDir, 'audio', 'sections-progress.json');
-  const saved = (await readJsonOrNull<Record<string, SectionProgressRecord>>(progressFile)) ?? {};
+  const saved =
+    (await readJsonOrNullWithSchema(progressFile, SectionProgressMapSchema, {
+      fallbackNullOnInvalid: true,
+    })) ?? {};
   const audioSections: SectionAudio[] = [];
   for (const section of sections) {
     const audio = saved[section.key]?.audio;
@@ -480,7 +494,10 @@ async function saveSectionProgress(
   preserveHash?: string,
 ): Promise<void> {
   const progressFile = path.join(runDir, 'audio', 'sections-progress.json');
-  const saved = (await readJsonOrNull<Record<string, SectionProgressRecord>>(progressFile)) ?? {};
+  const saved =
+    (await readJsonOrNullWithSchema(progressFile, SectionProgressMapSchema, {
+      fallbackNullOnInvalid: true,
+    })) ?? {};
   saved[section.key] = {
     hash: preserveHash ?? computeSectionDigest(section, settings),
     audio,
@@ -520,7 +537,9 @@ export async function listNarrationSectionViews(
 ): Promise<NarrationSectionView[]> {
   const runDir = ctx.paths.runDir(runId);
   const packageFile = path.join(runDir, 'stages', 'package.json');
-  const rawPackage = await readJsonOrNull<{ packageData?: IssuePackage }>(packageFile);
+  const rawPackage = await readJsonOrNullWithSchema(packageFile, PackageCheckpointSchema, {
+    fallbackNullOnInvalid: true,
+  });
   if (!rawPackage?.packageData) {
     return [];
   }
@@ -529,7 +548,11 @@ export async function listNarrationSectionViews(
   const itemsById = new Map(items.map((item) => [item.id, item]));
   const overrides = await readNarrationOverrides(runDir);
   const sections = buildNarrationSections(rawPackage.packageData, itemsById, overrides);
-  const timeline = await readJsonOrNull<Timeline>(path.join(runDir, 'timeline.json'));
+  const timeline = await readJsonOrNullWithSchema(
+    path.join(runDir, 'timeline.json'),
+    TimelineSchema,
+    { fallbackNullOnInvalid: true },
+  );
   let itemOrdinal = 0;
   return sections.map((section) => {
     if (section.kind === 'item') {
@@ -621,7 +644,10 @@ export async function updateSingleSectionNarration(
     provider ?? settings.tts.provider,
   ]);
   const progressFile = path.join(audioDir, 'sections-progress.json');
-  const saved = (await readJsonOrNull<Record<string, SectionProgressRecord>>(progressFile)) ?? {};
+  const saved =
+    (await readJsonOrNullWithSchema(progressFile, SectionProgressMapSchema, {
+      fallbackNullOnInvalid: true,
+    })) ?? {};
 
   if (input.regenerateAudio) {
     const [audio] = await ctx.tts.synthesizeSections([nextSection], audioDir, {

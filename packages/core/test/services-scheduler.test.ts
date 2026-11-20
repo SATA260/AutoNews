@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url';
 import type { RunEvent } from '@aidaily/contracts';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
+  buildLaunchAgentPlist,
   computeNextScheduleRunAt,
   createCore,
   createRun,
@@ -101,6 +102,9 @@ async function setupServiceWorkspace(feedBaseUrl: string) {
     doc.setIn(['ai', 'providers'], {});
     doc.setIn(['tts', 'provider'], 'silent');
     doc.deleteIn(['issue', 'minScore']);
+    doc.setIn(['issue', 'allowPartial'], false);
+    doc.setIn(['editorial', 'compactStyle'], false);
+    doc.setIn(['editorial', 'requireImageOptIn'], false);
   });
   await updateSettingsFile(path.join(rootDir, 'config', 'settings.yaml'), {
     clis: {
@@ -140,7 +144,7 @@ async function setupServiceWorkspace(feedBaseUrl: string) {
   return { rootDir, launchAgentsDir };
 }
 
-describe('M8 services, detached worker, launchd scheduler, and doctor', () => {
+describe('services, detached worker, launchd scheduler, retention cleanup, and doctor', () => {
   it('runs detached worker end-to-end, streams watch events, exposes artifacts safely, and enforces schedule skip on busy lock', async () => {
     const baseUrl = await startFixtureHttpServer();
     const { rootDir, launchAgentsDir } = await setupServiceWorkspace(baseUrl);
@@ -589,6 +593,7 @@ describe('M8 services, detached worker, launchd scheduler, and doctor', () => {
       throw new Error('Failed to start mock model gateway');
     }
 
+    process.env.AIDAILY_ALLOW_LOCAL_MODEL_API = '1';
     await core.config.saveModelApiConnection({
       name: 'interleave-gw',
       baseUrl: `http://127.0.0.1:${gwAddr.port}/v1`,
@@ -685,6 +690,121 @@ describe('M8 services, detached worker, launchd scheduler, and doctor', () => {
       expect(Array.from(loadedLabel).length).toBeGreaterThanOrEqual(4);
       expect(Array.from(loadedLabel).length).toBeLessThanOrEqual(10);
       expect(loadedLabel).toBe('测试数字');
+    } finally {
+      await core.close();
+    }
+  });
+
+  it('converts configured schedule timezone into host StartCalendarInterval hour/minute and injects TZ', () => {
+    // 配置 Asia/Shanghai (UTC+8) 的 08:30 映射到 UTC 宿主时钟应为 00:30，且带半小时偏移也能准确折算
+    const shanghaiToUtc = buildLaunchAgentPlist({
+      id: 'sched-tz-1',
+      time: '08:30',
+      itemCount: 3,
+      rootDir: '/tmp/aidaily',
+      logsDir: '/tmp/aidaily/logs',
+      cliScriptPath: '/tmp/aidaily/cli.js',
+      timezone: 'Asia/Shanghai',
+      hostTimezone: 'UTC',
+      now: new Date('2026-11-16T00:00:00.000Z'),
+    });
+    expect(shanghaiToUtc).toContain('<key>Hour</key>\n      <integer>0</integer>');
+    expect(shanghaiToUtc).toContain('<key>Minute</key>\n      <integer>30</integer>');
+    expect(shanghaiToUtc).toContain('<key>TZ</key>\n      <string>Asia/Shanghai</string>');
+
+    // 跨日回绕场景：Asia/Shanghai 02:15 (UTC+8) 映射到 Asia/Kolkata (UTC+5:30) 应为 23:45
+    const shanghaiToKolkata = buildLaunchAgentPlist({
+      id: 'sched-tz-2',
+      time: '02:15',
+      itemCount: 3,
+      rootDir: '/tmp/aidaily',
+      logsDir: '/tmp/aidaily/logs',
+      cliScriptPath: '/tmp/aidaily/cli.js',
+      timezone: 'Asia/Shanghai',
+      hostTimezone: 'Asia/Kolkata',
+      now: new Date('2026-11-16T00:00:00.000Z'),
+    });
+    expect(shanghaiToKolkata).toContain('<key>Hour</key>\n      <integer>23</integer>');
+    expect(shanghaiToKolkata).toContain('<key>Minute</key>\n      <integer>45</integer>');
+  });
+
+  it('safely cleans up expired terminal runs and orphan storage while preserving recent, active, and uncertain runs', async () => {
+    const baseUrl = await startFixtureHttpServer();
+    const { rootDir, launchAgentsDir } = await setupServiceWorkspace(baseUrl);
+    let currentTime = new Date('2026-10-01T00:00:00.000Z');
+    const core = await createCore({
+      rootDir,
+      launchAgentsDir,
+      now: () => currentTime,
+    });
+
+    try {
+      // 插入多个不同时间与状态的任务：老的 published/skipped 应清理，老的 publish_uncertain/awaiting_review 与最近 keepRuns 期应保留
+      currentTime = new Date('2026-10-01T01:00:00.000Z');
+      const oldPublishedId = createRun(core.context, { itemCount: 1, trigger: 'manual-cli' });
+      core.context.repos.runs.updateStatus(oldPublishedId, 'published', {
+        currentStage: 'publish',
+      });
+
+      currentTime = new Date('2026-10-02T01:00:00.000Z');
+      const oldUncertainId = createRun(core.context, { itemCount: 1, trigger: 'manual-cli' });
+      core.context.repos.runs.updateStatus(oldUncertainId, 'publish_uncertain', {
+        currentStage: 'publish',
+      });
+
+      currentTime = new Date('2026-10-03T01:00:00.000Z');
+      const oldSkippedId = createRun(core.context, { itemCount: 1, trigger: 'manual-cli' });
+      core.context.repos.runs.updateStatus(oldSkippedId, 'skipped', { currentStage: 'select' });
+
+      currentTime = new Date('2026-11-18T01:00:00.000Z');
+      const recentPublishedId = createRun(core.context, { itemCount: 1, trigger: 'manual-cli' });
+      core.context.repos.runs.updateStatus(recentPublishedId, 'published', {
+        currentStage: 'publish',
+      });
+
+      // 为待清理与受保护期次创建磁盘产物目录与事件日志
+      for (const id of [oldPublishedId, oldUncertainId, oldSkippedId, recentPublishedId]) {
+        const dir = core.context.paths.runDir(id);
+        await fs.mkdir(path.join(dir, 'output'), { recursive: true });
+        await fs.writeFile(path.join(dir, 'output', 'video.mp4'), `data-${id}`);
+        core.context.repos.runEvents.append({
+          runId: id,
+          ts: currentTime.toISOString(),
+          level: 'info',
+          type: 'stage_done',
+          message: `log-${id}`,
+        });
+      }
+
+      // 创建孤立残留临时文件（48 小时前）
+      const staleTmp = path.join(core.context.paths.tmpDir, 'stale-temp-dir');
+      await fs.mkdir(staleTmp, { recursive: true });
+      await fs.writeFile(path.join(staleTmp, 'x.tmp'), 'stale');
+      const twoDaysAgoSec = (new Date('2026-11-20T00:00:00.000Z').getTime() - 48 * 3600_000) / 1000;
+      await fs.utimes(staleTmp, twoDaysAgoSec, twoDaysAgoSec);
+
+      currentTime = new Date('2026-11-20T00:00:00.000Z');
+      const dryRes = await core.system.cleanup({ keepRuns: 1, maxAgeDays: 10, dryRun: true });
+      expect(dryRes.dryRun).toBe(true);
+      expect(dryRes.removedRunIds).toEqual(expect.arrayContaining([oldPublishedId, oldSkippedId]));
+      expect(dryRes.removedRunIds).not.toContain(oldUncertainId);
+      expect(dryRes.removedRunIds).not.toContain(recentPublishedId);
+      expect(core.context.repos.runs.getById(oldPublishedId)).not.toBeNull();
+
+      const actualRes = await core.system.cleanup({ keepRuns: 1, maxAgeDays: 10 });
+      expect(actualRes.removedRunIds).toEqual(
+        expect.arrayContaining([oldPublishedId, oldSkippedId]),
+      );
+      expect(actualRes.removedTmpEntries).toBe(1);
+      expect(actualRes.reclaimedBytes).toBeGreaterThan(0);
+
+      expect(core.context.repos.runs.getById(oldPublishedId)).toBeNull();
+      expect(core.context.repos.runs.getById(oldSkippedId)).toBeNull();
+      expect(core.context.repos.runs.getById(oldUncertainId)).not.toBeNull();
+      expect(core.context.repos.runs.getById(recentPublishedId)).not.toBeNull();
+      await expect(fs.stat(core.context.paths.runDir(oldPublishedId))).rejects.toThrow();
+      await expect(fs.stat(core.context.paths.runDir(oldUncertainId))).resolves.toBeDefined();
+      await expect(fs.stat(staleTmp)).rejects.toThrow();
     } finally {
       await core.close();
     }

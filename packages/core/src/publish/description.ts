@@ -9,8 +9,8 @@ import {
   TimelineSchema,
 } from '@aidaily/contracts';
 import type { CoreContext } from '../context.js';
-import type { PackageCheckpoint } from '../editorial/s6-package.js';
-import { readJsonOrNull } from '../storage/files.js';
+import { PackageCheckpointSchema } from '../editorial/s6-package.js';
+import { readJsonOrNullWithSchema } from '../storage/files.js';
 import { STAGE_CHECKPOINT_REL_PATH } from '../workflow/stages.js';
 
 /** 按完整 Unicode 码点安全截断文本，防止把表情符号从中间截断 */
@@ -148,12 +148,17 @@ export async function ensurePublishDraftForRun(
     });
   }
 
-  const pkgCheckpoint = await readJsonOrNull<PackageCheckpoint>(
+  const pkgCheckpoint = await readJsonOrNullWithSchema(
     path.join(runDir, STAGE_CHECKPOINT_REL_PATH.package),
+    PackageCheckpointSchema,
+    { fallbackNullOnInvalid: true },
   );
-  const rawTimeline = await readJsonOrNull<unknown>(path.join(runDir, 'timeline.json'));
-  const parsedTimeline = TimelineSchema.safeParse(rawTimeline);
-  if (!pkgCheckpoint?.packageData || !parsedTimeline.success) {
+  const parsedTimeline = await readJsonOrNullWithSchema(
+    path.join(runDir, 'timeline.json'),
+    TimelineSchema,
+    { fallbackNullOnInvalid: true },
+  );
+  if (!pkgCheckpoint?.packageData || !parsedTimeline) {
     return null;
   }
 
@@ -163,7 +168,7 @@ export async function ensurePublishDraftForRun(
   const title = truncateByCodepoints(pkg.publish.title.trim(), settings.publish.bilibili.titleMax);
   const description = buildBilibiliDescription({
     packageData: pkg,
-    timeline: parsedTimeline.data,
+    timeline: parsedTimeline,
     items,
     publishConfig: settings.publish.bilibili,
   });

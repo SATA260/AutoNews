@@ -1,9 +1,10 @@
 import path from 'node:path';
-import type {
-  ArticleMediaAsset,
-  ArticleMediaKind,
-  ExtractStatus,
-  SourceLang,
+import {
+  type ArticleMediaAsset,
+  type ArticleMediaKind,
+  type ExtractStatus,
+  isAllowedUrlTarget,
+  type SourceLang,
 } from '@aidaily/contracts';
 import { Readability } from '@mozilla/readability';
 import { JSDOM, VirtualConsole } from 'jsdom';
@@ -11,6 +12,7 @@ import { readJsonOrNull } from '../storage/files.js';
 import type { DomChartFragment } from './browser-driver.js';
 import { parsePublishedAt } from './feed-parser.js';
 import { sleepWithAbort } from './fetcher.js';
+import { BlockedSsrfError, fetchWithSsrfGuard } from './ssrf.js';
 import { extractTweetIdFromUrl, type TweetLinkRef } from './x-collector.js';
 
 const DEFAULT_HTML_TIMEOUT_MS = 15_000;
@@ -127,6 +129,9 @@ function resolveHttpImageUrl(rawUrl: string | null, articleUrl: string): string 
   try {
     const resolved = new URL(trimmed, articleUrl);
     if (resolved.protocol !== 'http:' && resolved.protocol !== 'https:') {
+      return null;
+    }
+    if (!isAllowedUrlTarget(resolved)) {
       return null;
     }
     return normalizeImageCandidateUrl(resolved);
@@ -735,15 +740,28 @@ export async function readTextWithLimit(res: Response, maxBytes: number): Promis
   return Buffer.concat(chunks).toString('utf8');
 }
 
+/** 原网页 HTML 下载结果，区分响应正文与本次失败是否值得下轮重试 */
+export interface HtmlFetchOutcome {
+  html: string | null;
+  retryable: boolean;
+}
+
 /**
- * 下载文章原网页 HTML，遇到临时网络错误、超时或服务端拥堵状态码时按次数退避重试；
- * 对永久不存在或非网页响应直接返回 null（若外层主动取消则抛出取消异常）。
+ * 下载文章原网页 HTML 并返回明确的可重试标记：
+ * 临时网络错误、超时或服务端拥堵状态码（408/425/429/5xx）标为可重试；
+ * 404/410/非网页格式或被安全策略拦截的请求标为永久失败，防止污染条件缓存头。
  */
-export async function fetchArticleHtml(
+export async function fetchArticleHtmlDetailed(
   url: string,
   fetchImpl: typeof fetch,
-  opts?: { timeoutMs?: number; retries?: number; retryDelayMs?: number; signal?: AbortSignal },
-): Promise<string | null> {
+  opts?: {
+    timeoutMs?: number;
+    retries?: number;
+    retryDelayMs?: number;
+    allowedOrigins?: readonly string[];
+    signal?: AbortSignal;
+  },
+): Promise<HtmlFetchOutcome> {
   const timeoutMs = opts?.timeoutMs ?? DEFAULT_HTML_TIMEOUT_MS;
   const maxAttempts = 1 + Math.max(0, opts?.retries ?? DEFAULT_HTML_RETRIES);
   const retryDelayMs = opts?.retryDelayMs ?? DEFAULT_HTML_RETRY_DELAY_MS;
@@ -759,9 +777,10 @@ export async function fetchArticleHtml(
       : timeoutSignal;
 
     try {
-      const res = await fetchImpl(url, {
+      const res = await fetchWithSsrfGuard(url, {
+        fetchImpl,
         signal: combinedSignal,
-        redirect: 'follow',
+        allowedOrigins: opts?.allowedOrigins,
         headers: {
           'User-Agent': BROWSER_USER_AGENT,
           Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
@@ -769,11 +788,12 @@ export async function fetchArticleHtml(
       });
       if (!res.ok) {
         await res.body?.cancel().catch(() => undefined);
-        if (RETRYABLE_HTML_STATUS_CODES.has(res.status) && attempt < maxAttempts) {
+        const retryableStatus = RETRYABLE_HTML_STATUS_CODES.has(res.status);
+        if (retryableStatus && attempt < maxAttempts) {
           await sleepWithAbort(retryDelayMs * attempt, opts?.signal);
           continue;
         }
-        return null;
+        return { html: null, retryable: retryableStatus };
       }
       const contentType = res.headers.get('content-type')?.toLowerCase() ?? '';
       if (
@@ -783,22 +803,44 @@ export async function fetchArticleHtml(
         !contentType.includes('text/plain')
       ) {
         await res.body?.cancel().catch(() => undefined);
-        return null;
+        return { html: null, retryable: false };
       }
-      return await readTextWithLimit(res, MAX_HTML_BYTES);
+      return { html: await readTextWithLimit(res, MAX_HTML_BYTES), retryable: true };
     } catch (err) {
       if (opts?.signal?.aborted) {
         throw err;
+      }
+      if (err instanceof BlockedSsrfError) {
+        return { html: null, retryable: false };
       }
       if (attempt < maxAttempts) {
         await sleepWithAbort(retryDelayMs * attempt, opts?.signal);
         continue;
       }
-      return null;
+      return { html: null, retryable: true };
     }
   }
 
-  return null;
+  return { html: null, retryable: true };
+}
+
+/**
+ * 下载文章原网页 HTML，遇到临时网络错误、超时或服务端拥堵状态码时按次数退避重试；
+ * 对永久不存在或非网页响应直接返回 null（若外层主动取消则抛出取消异常）。
+ */
+export async function fetchArticleHtml(
+  url: string,
+  fetchImpl: typeof fetch,
+  opts?: {
+    timeoutMs?: number;
+    retries?: number;
+    retryDelayMs?: number;
+    allowedOrigins?: readonly string[];
+    signal?: AbortSignal;
+  },
+): Promise<string | null> {
+  const outcome = await fetchArticleHtmlDetailed(url, fetchImpl, opts);
+  return outcome.html;
 }
 
 /**

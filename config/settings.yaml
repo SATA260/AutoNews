@@ -11,6 +11,7 @@ issue:
   # 每期条数 N 不在全局设默认值，在新建定时任务或手动触发时显式填写
   reserveFactor: 2 # 兼容旧任务配置
   minScore: 7.5 # 只播报达到重要性门槛的新闻
+  allowPartial: true # 允许少于目标条数继续制作，并在 0 条入选时自动跳过
   freshnessHours: 48 # 候选新闻的默认时效
   itemConcurrency: 6 # 同时处理的条目数
   refill:
@@ -22,10 +23,18 @@ issue:
 retry:
   reservationHoldHours: 48 # 失败/中断/取消的 run 在此时长内可随时重试；到期未重试则自动 abandoned 并释放预留文章
 
+retention:
+  keepRuns: 30 # 至少保留最近 30 期历史任务及其产物
+  maxAgeDays: 30 # 超过 30 天的已完结历史任务允许清理
+  maxLogAgeDays: 30 # 超过 30 天的孤立运行日志与调用记录允许清理
+  autoCleanup: true # 在单期任务结束后按以上策略自动清理过期产物
+
 editorial:
   maxRevisions: 2 # 核查打回润色的最大轮数
   sourceMaxChars: 20000 # 单个事件送入模型的原文总字数上限
   historyDedupDays: 14
+  compactStyle: true # 启用紧凑型口播与要点约束
+  requireImageOptIn: true # 仅在高价值素材或人工指定时配备新闻插图
   metaTextBlacklist: [ "已依据", "以下是", "根据您提供", "作为AI", "总结如下", "```" ]
 
 contentLimits:
@@ -166,7 +175,7 @@ publish:
   bilibili:
     cli: biliup
     cookieFile: ~/cookies.json # 直接复用在家目录执行 biliup login 生成的登录凭据
-    tid: 231 # 科技·计算机技术（M7 已实测 biliup 0.2.4 支持自由设置分区 ID）
+    tid: 231 # 科技·计算机技术（已实测 biliup 0.2.4 支持自由设置分区 ID）
     copyright: 1
     titleMax: 80
     descMax: 2000
@@ -182,7 +191,7 @@ publish:
 # 定时任务（执行时间 + 每期条数）不在配置文件设默认值，统一在 SQLite schedules 表中手动新建管理
 
 notify:
-  provider: none # v1 仅保留抽象接口（none），后期可扩展 feishu 等渠道
+  provider: none # 当前默认不发送外部通知，后续可扩展飞书等渠道
   config: {}
 
 web:
