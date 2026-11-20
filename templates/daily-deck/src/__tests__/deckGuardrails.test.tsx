@@ -136,12 +136,14 @@ describe('Layer 2-5: Editorial Deck, Segmented Chapter Bar, Virtual Clock & Erro
     expect(mascotImg).toBeTruthy();
     expect(mascotImg!.getAttribute('src')).toBe('/mascots/deepseek.png');
 
-    // 跳转到第 2 条新闻（Claude），验证内容与看板娘切换
+    // 跳转到第 2 条新闻（Claude），验证内容与看板娘切换，且左下角不再贴网址与信源底栏
     await act(async () => {
       const target = await window.__NEWS_DECK__!.goToPage(2);
       expect(target).toBe(2);
     });
     expect(screen.getByText(/Claude 升级长程代码工作流/)).toBeInTheDocument();
+    expect(container.querySelector('.news-source-footer')).toBeNull();
+    expect(container.textContent).not.toContain(SAMPLE_DAILY_ISSUE.items[1]!.sourceUrl);
     const claudeImg = container.querySelector('.corner-mascot-img') as HTMLImageElement | null;
     expect(claudeImg!.getAttribute('src')).toBe('/mascots/claude.png');
 

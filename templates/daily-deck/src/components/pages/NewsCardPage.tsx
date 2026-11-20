@@ -380,19 +380,6 @@ export const NewsCardPage: React.FC<NewsCardPageProps> = ({
           />
         </section>
       )}
-
-      <footer className="news-source-footer">
-        <span className="source-label">信源</span>
-        <span className="source-value">{item.source}</span>
-        {item.sourceUrl && (
-          <>
-            <span className="source-dot">·</span>
-            <span className="source-url">{item.sourceUrl}</span>
-          </>
-        )}
-        <span className="source-dot">·</span>
-        <span className="source-date">{item.publishedAt}</span>
-      </footer>
     </div>
   );
 };

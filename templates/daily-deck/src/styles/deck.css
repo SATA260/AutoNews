@@ -1318,35 +1318,6 @@ button {
   white-space: nowrap;
 }
 
-.news-source-footer {
-  position: relative;
-  z-index: 1;
-  margin-top: auto;
-  padding-top: 10px;
-  border-top: 1.5px solid var(--line);
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  font-size: 17px;
-  font-weight: 600;
-  color: var(--ink-muted);
-  flex-shrink: 0;
-}
-
-.news-editorial-layout.has-mascot .news-source-footer {
-  padding-right: 220px;
-}
-
-.source-label {
-  font-family: var(--font-mono);
-  font-weight: 700;
-  color: var(--ink);
-}
-
-.source-url {
-  font-family: var(--font-mono);
-}
-
 /* 右侧官方配图引用栏（锚定右缘，支持随播放进度从右向左展开铺满整块信息板） */
 .news-reference-col {
   position: relative;
