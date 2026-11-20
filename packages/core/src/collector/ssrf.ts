@@ -41,6 +41,7 @@ export async function assertSafeFetchTarget(
   opts?: {
     fetchImpl?: typeof fetch;
     allowedOrigins?: readonly string[];
+    allowBenchmarkDns?: boolean;
     lookupImpl?: (hostname: string) => Promise<Array<{ address: string }>>;
   },
 ): Promise<void> {
@@ -53,6 +54,7 @@ export async function assertSafeFetchTarget(
     return;
   }
 
+  const allowBenchmarkDns = opts?.allowBenchmarkDns ?? true;
   const resolved = opts?.lookupImpl
     ? await opts.lookupImpl(targetUrl.hostname)
     : await lookup(targetUrl.hostname, { all: true, verbatim: true });
@@ -60,7 +62,10 @@ export async function assertSafeFetchTarget(
     const cls = classifyIpAddress(entry.address);
     if (
       !cls ||
-      !isAllowedResolvedIpClass(cls, targetUrl, { allowedOrigins: opts?.allowedOrigins })
+      !isAllowedResolvedIpClass(cls, targetUrl, {
+        allowedOrigins: opts?.allowedOrigins,
+        allowBenchmarkDns,
+      })
     ) {
       throw new BlockedSsrfError(targetUrl.toString());
     }
@@ -79,6 +84,7 @@ export async function fetchWithSsrfGuard(
     headers?: HeadersInit;
     method?: string;
     allowedOrigins?: readonly string[];
+    allowBenchmarkDns?: boolean;
     maxRedirects?: number;
     lookupImpl?: (hostname: string) => Promise<Array<{ address: string }>>;
   },
@@ -90,6 +96,7 @@ export async function fetchWithSsrfGuard(
     await assertSafeFetchTarget(currentUrl, {
       fetchImpl: opts.fetchImpl,
       allowedOrigins: opts.allowedOrigins,
+      allowBenchmarkDns: opts.allowBenchmarkDns,
       lookupImpl: opts.lookupImpl,
     });
 

@@ -395,6 +395,20 @@ describe('OpenAI 兼容模型 API', () => {
     await expect(
       apiLoopbackLiteral.invoke(request, { ...provider, baseUrl: 'http://127.0.0.1:8080/v1' }),
     ).rejects.toMatchObject({ retryable: false });
+    await expect(
+      apiLoopbackLiteral.invoke(request, { ...provider, baseUrl: 'http://198.18.0.5:8080/v1' }),
+    ).rejects.toMatchObject({ retryable: false });
     expect(fetchMock).not.toHaveBeenCalled();
+
+    const apiFakeIpDns = new ModelApi({
+      fetchImpl: fetchMock,
+      resolveApiKey: async () => key,
+      lookupFn: async () => [{ address: '198.18.0.5' }],
+      logCall: () => {},
+    });
+    await expect(apiFakeIpDns.invoke(request, provider)).resolves.toMatchObject({
+      data: { title: 'nope' },
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 });

@@ -4,6 +4,9 @@ import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { parse } from 'yaml';
 import {
+  classifyIpAddress,
+  isAllowedResolvedIpClass,
+  isAllowedUrlTarget,
   ModelApiProviderSchema,
   PolishedItemSchema,
   RETRYABLE_RUN_STATUSES,
@@ -280,5 +283,36 @@ describe('@aidaily/contracts', () => {
         process.env.AIDAILY_ALLOW_LOCAL_MODEL_API = prev;
       }
     }
+  });
+
+  it('classifies 198.18.0.0/15 separately so proxy Fake-IP DNS passes only for public domains when enabled', () => {
+    expect(classifyIpAddress('198.18.0.5')).toBe('benchmark');
+    expect(classifyIpAddress('198.19.255.254')).toBe('benchmark');
+    expect(classifyIpAddress('::ffff:198.18.0.5')).toBe('benchmark');
+
+    expect(isAllowedUrlTarget(new URL('http://198.18.0.5/feed.xml'))).toBe(false);
+    expect(
+      ModelApiProviderSchema.safeParse({
+        adapter: 'openai-compatible',
+        protocol: 'chat-completions',
+        baseUrl: 'http://198.18.0.5:8080/v1',
+      }).success,
+    ).toBe(false);
+
+    const publicUrl = new URL('https://openai.com/news/rss.xml');
+    expect(isAllowedResolvedIpClass('benchmark', publicUrl)).toBe(false);
+    expect(isAllowedResolvedIpClass('benchmark', publicUrl, { allowBenchmarkDns: true })).toBe(
+      true,
+    );
+    expect(
+      isAllowedResolvedIpClass('benchmark', new URL('http://198.18.0.5/feed.xml'), {
+        allowBenchmarkDns: true,
+      }),
+    ).toBe(false);
+    expect(
+      isAllowedResolvedIpClass('benchmark', new URL('https://router.local/feed.xml'), {
+        allowBenchmarkDns: true,
+      }),
+    ).toBe(false);
   });
 });

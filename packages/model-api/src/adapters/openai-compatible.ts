@@ -128,7 +128,7 @@ async function assertSafeModelEndpoint(
   }
   for (const entry of resolved) {
     const cls = classifyIpAddress(entry.address);
-    if (!cls || !isAllowedResolvedIpClass(cls, url, { allowLoopback })) {
+    if (!cls || !isAllowedResolvedIpClass(cls, url, { allowLoopback, allowBenchmarkDns: true })) {
       throw new ModelCallError('模型 API 域名解析指向受限内网或元数据地址，已拒绝请求', false);
     }
   }

@@ -1,5 +1,5 @@
 /** 目标地址或 IP 的网络可达性风险分类 */
-export type IpAddressClass = 'public' | 'loopback' | 'metadata' | 'private';
+export type IpAddressClass = 'public' | 'loopback' | 'metadata' | 'private' | 'benchmark';
 
 /** 检查一段主机名文本是否为严格的十进制 IPv4 四段地址，是则返回 4 个字节数字 */
 function parseIpv4Octets(host: string): [number, number, number, number] | null {
@@ -35,6 +35,10 @@ function classifyIpv4Octets(octets: [number, number, number, number]): IpAddress
   if (a === 100 && b === 100 && c === 100 && d === 200) {
     return 'metadata';
   }
+  // 198.18.0.0/15 为压测保留段，常见于桌面代理软件的虚拟 DNS 地址池，单独分类以便区分公网域名解析与直接 IP 访问
+  if (a === 198 && (b === 18 || b === 19)) {
+    return 'benchmark';
+  }
   if (
     a === 0 ||
     a === 10 ||
@@ -43,7 +47,6 @@ function classifyIpv4Octets(octets: [number, number, number, number]): IpAddress
     (a === 192 && b === 0 && (c === 0 || c === 2)) ||
     (a === 192 && b === 88 && c === 99) ||
     (a === 192 && b === 168) ||
-    (a === 198 && (b === 18 || b === 19)) ||
     (a === 198 && b === 51 && c === 100) ||
     (a === 203 && b === 0 && c === 113) ||
     a >= 224
@@ -218,18 +221,28 @@ export function classifyTargetHostname(rawHost: string): IpAddressClass {
 
 /**
  * 判断解析出的 IP 类别是否允许访问目标 URL：
- * 云元数据网段与未授权内网一律拒绝，本机回环仅在显式开启开关或位于受信本源列表时放行。
+ * 云元数据网段与未授权内网一律拒绝；本机回环仅在显式开启开关或位于受信本源列表时放行；
+ * 基准测试保留段仅在开启选项且目标本身为公共域名时放行，避免桌面代理虚拟 DNS 被误拦截。
  */
 export function isAllowedResolvedIpClass(
   ipClass: IpAddressClass,
   targetUrl: URL,
-  opts?: { allowLoopback?: boolean; allowedOrigins?: readonly string[] },
+  opts?: {
+    allowLoopback?: boolean;
+    allowBenchmarkDns?: boolean;
+    allowedOrigins?: readonly string[];
+  },
 ): boolean {
   if (ipClass === 'metadata') {
     return false;
   }
   if (ipClass === 'public') {
     return true;
+  }
+  if (ipClass === 'benchmark') {
+    return (
+      Boolean(opts?.allowBenchmarkDns) && classifyTargetHostname(targetUrl.hostname) === 'public'
+    );
   }
   if (opts?.allowedOrigins?.includes(targetUrl.origin)) {
     return true;

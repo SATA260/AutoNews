@@ -5,6 +5,11 @@ import { fileURLToPath } from 'node:url';
 import type { SourceDef } from '@aidaily/contracts';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
+  assertSafeFetchTarget,
+  BlockedSsrfError,
+  fetchWithSsrfGuard,
+} from '../src/collector/ssrf.js';
+import {
   type CollectorBrowserDriver,
   canonicalizeUrl,
   collectSources,
@@ -1457,6 +1462,44 @@ describe('collector module and SourceService', () => {
     expect(
       await fetchArticleHtml('https://example.com/redir-to-imds', mockFetch, { retries: 1 }),
     ).toBeNull();
+  });
+
+  it('允许公网域名经代理虚拟 DNS 解析到 198.18.0.0/15，但继续拦截直接访问与真实内网解析', async () => {
+    const allowedFetch: typeof fetch = async (input) => {
+      const url = String(input);
+      if (url === 'https://openai.com/redir-to-bench') {
+        return new Response(null, {
+          status: 302,
+          headers: { location: 'http://198.18.0.5/internal.xml' },
+        });
+      }
+      return new Response('<rss />', { status: 200 });
+    };
+
+    const res = await fetchWithSsrfGuard('https://openai.com/news/rss.xml', {
+      fetchImpl: allowedFetch,
+      lookupImpl: async () => [{ address: '198.18.0.5' }],
+    });
+    expect(res.status).toBe(200);
+
+    await expect(
+      fetchWithSsrfGuard('http://198.18.0.5/feed.xml', { fetchImpl: allowedFetch }),
+    ).rejects.toBeInstanceOf(BlockedSsrfError);
+
+    await expect(
+      fetchWithSsrfGuard('https://openai.com/redir-to-bench', {
+        fetchImpl: allowedFetch,
+        lookupImpl: async () => [{ address: '198.18.0.5' }],
+      }),
+    ).rejects.toBeInstanceOf(BlockedSsrfError);
+
+    for (const blockedIp of ['127.0.0.1', '192.168.1.10', '169.254.169.254']) {
+      await expect(
+        assertSafeFetchTarget(new URL('https://openai.com/news/rss.xml'), {
+          lookupImpl: async () => [{ address: blockedIp }],
+        }),
+      ).rejects.toBeInstanceOf(BlockedSsrfError);
+    }
   });
 
   it('永久 404 或非网页文章不阻塞后续订阅源的条件缓存 304 跳过', async () => {
