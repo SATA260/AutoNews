@@ -10,11 +10,14 @@ import {
   type ConfigService,
   createArticleService,
   createConfigService,
+  createDaemonService,
   createPublishService,
   createSchedulerService,
   createSourceService,
   createSystemService,
   createTaskService,
+  type DaemonService,
+  type DaemonServiceDeps,
   type LaunchctlExecutor,
   type PublishService,
   type SchedulerService,
@@ -32,6 +35,7 @@ export * from './collector/index.js';
 export * from './config/loader.js';
 export * from './config/writer.js';
 export * from './context.js';
+export * from './daemon/index.js';
 export * from './editorial/index.js';
 export * from './errors.js';
 export * from './media/index.js';
@@ -55,6 +59,7 @@ export interface Core {
   publish: PublishService;
   config: ConfigService;
   scheduler: SchedulerService;
+  daemon: DaemonService;
   sources: SourceService;
   system: SystemService;
   /** 关闭数据库连接并释放底层资源 */
@@ -75,6 +80,7 @@ export async function createCore(opts?: {
   launchAgentsDir?: string;
   launchctlExec?: LaunchctlExecutor;
   cliScriptPath?: string;
+  daemonDeps?: Omit<DaemonServiceDeps, 'launchAgentsDir' | 'launchctlExec' | 'cliScriptPath'>;
 }): Promise<Core> {
   const context = await createCoreContext(opts);
   recoverStaleRuns(context);
@@ -106,6 +112,15 @@ export async function createCore(opts?: {
     launchctlExec: opts?.launchctlExec,
     cliScriptPath: opts?.cliScriptPath,
   });
+  const daemon = createDaemonService(context, {
+    launchAgentsDir: opts?.launchAgentsDir,
+    launchctlExec: opts?.launchctlExec,
+    cliScriptPath: opts?.cliScriptPath,
+    ...opts?.daemonDeps,
+    onAfterUninstall: async () => {
+      await scheduler.sync();
+    },
+  });
   const sources = createSourceService(context);
   const system = createSystemService(context);
 
@@ -116,6 +131,7 @@ export async function createCore(opts?: {
     publish,
     config,
     scheduler,
+    daemon,
     sources,
     system,
     /** 安全关闭核心引擎持有的 SQLite 数据库连接 */

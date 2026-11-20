@@ -72,6 +72,9 @@ async function setupWorkflowWorkspace(
   const settingsFile = path.join(rootDir, 'config', 'settings.yaml');
   await editSettingsFile(settingsFile, (doc) => {
     doc.setIn(['ai', 'providers'], {});
+    doc.setIn(['ai', 'channels'], []);
+    doc.setIn(['publish', 'mode'], 'manual-review');
+    doc.setIn(['publish', 'bilibili', 'cookieFile'], path.join(rootDir, 'test-bili-cookies.json'));
     doc.setIn(['tts', 'provider'], 'silent');
     doc.deleteIn(['issue', 'minScore']);
     doc.setIn(['issue', 'allowPartial'], false);
@@ -83,6 +86,11 @@ async function setupWorkflowWorkspace(
       agy: {
         adapter: 'agy',
         bin: FAKE_AGY_BIN,
+        extraArgs: [],
+      },
+      biliup: {
+        adapter: 'generic',
+        bin: 'fixture-disabled-biliup',
         extraArgs: [],
       },
     },
@@ -102,12 +110,14 @@ async function setupWorkflowWorkspace(
       maxRevisions: opts.maxRevisions ?? 2,
     },
     ai: {
+      channels: [],
       stages: {
-        select: { cli: 'agy', model: 'gemini-3.8-flash-high', retries: 0 },
-        summarize: { cli: 'agy', model: 'gemini-3.8-flash-high', retries: 0 },
-        polish: { cli: 'agy', model: 'gemini-3.8-flash-high', retries: 0 },
-        factcheck: { cli: 'agy', model: 'gemini-4-carbon-high', retries: 0 },
+        select: { mode: 'custom', cli: 'agy', model: 'gemini-3.8-flash-high', retries: 0 },
+        summarize: { mode: 'custom', cli: 'agy', model: 'gemini-3.8-flash-high', retries: 0 },
+        polish: { mode: 'custom', cli: 'agy', model: 'gemini-3.8-flash-high', retries: 0 },
+        factcheck: { mode: 'custom', cli: 'agy', model: 'gemini-4-carbon-high', retries: 0 },
         package: {
+          mode: 'custom',
           cli: 'agy',
           model: opts.packageModel ?? 'gemini-3.8-flash-high',
           retries: 0,
@@ -265,7 +275,10 @@ describe('editorial workflow, TTS timeline, interruption recovery, and retry eng
         configSnapshotJson: JSON.stringify(legacy),
       });
       await core.config.updateSettings({ clis: { agy: { bin: 'fixture-missing-agy' } } });
-      await executeRun(core.context, legacyId, { stopAfterStage: 'select' });
+      await executeRun(core.context, legacyId, {
+        stopAfterStage: 'select',
+        useLatestConfig: false,
+      });
       expect(await core.tasks.getLlmCalls(legacyId)).toEqual([
         expect.objectContaining({ cli: 'agy', status: 'ok' }),
       ]);
@@ -285,7 +298,7 @@ describe('editorial workflow, TTS timeline, interruption recovery, and retry eng
               apiKeyFile: 'fixture-deepseek',
             },
           },
-          stages: { select: { cli: 'fixture', model: 'fixture-old' } },
+          stages: { select: { mode: 'custom', cli: 'fixture', model: 'fixture-old' } },
         },
       });
       expect(core.system.getModelRoutes()).toContain('fixture');
@@ -296,14 +309,17 @@ describe('editorial workflow, TTS timeline, interruption recovery, and retry eng
       await core.config.updateSettings({
         ai: {
           providers: { fixture: { baseUrl: 'https://new.gateway.test/v1' } },
-          stages: { select: { model: 'fixture-new' } },
+          stages: { select: { mode: 'custom', model: 'fixture-new' } },
         },
       });
-      await resumeRun(core.context, runId, { fromStage: 'select', stopAfterStage: 'edit' });
+      await resumeRun(core.context, runId, {
+        fromStage: 'select',
+        stopAfterStage: 'edit',
+        useLatestConfig: false,
+      });
       await resumeRun(core.context, runId, {
         fromStage: 'select',
         stopAfterStage: 'select',
-        useLatestConfig: true,
       });
       expect(requested).toEqual([
         { url: 'https://old.gateway.test/v1/chat/completions', model: 'fixture-old' },
@@ -2265,4 +2281,192 @@ describe('editorial workflow, TTS timeline, interruption recovery, and retry eng
       await core.close();
     }
   });
+
+  it('supports ordered AI channel fallback, mid-run live config reloads, and 1:1 non-repeating mascot/BGM binding', async () => {
+    const { rootDir, scriptFile } = await setupWorkflowWorkspace();
+    await fs.copyFile(
+      path.join(REPO_ROOT, 'config', 'personas.yaml'),
+      path.join(rootDir, 'config', 'personas.yaml'),
+    );
+    const bgmDir = path.join(rootDir, 'assets', 'bgm');
+    await fs.mkdir(bgmDir, { recursive: true });
+    for (const id of ['deepseek', 'gpt', 'gemini', 'claude']) {
+      await fs.writeFile(path.join(bgmDir, `${id}-bgm.mp3`), `${id}-audio`);
+    }
+
+    const fixtureKey = 'fallback-key-secret';
+    await fs
+      .writeFile(path.join(rootDir, 'storage', 'secrets', 'fb-key'), fixtureKey, {
+        mode: 0o600,
+      })
+      .catch(async () => {
+        await fs.mkdir(path.join(rootDir, 'storage', 'secrets'), { recursive: true });
+        await fs.writeFile(path.join(rootDir, 'storage', 'secrets', 'fb-key'), fixtureKey, {
+          mode: 0o600,
+        });
+      });
+
+    const settingsFile = path.join(rootDir, 'config', 'settings.yaml');
+    await fs.writeFile(
+      scriptFile,
+      JSON.stringify({
+        rules: [
+          {
+            stage: 'select',
+            modelEquals: 'primary-broken',
+            actions: [{ mode: 'exit_error', error: '主渠道暂时不可用' }],
+          },
+        ],
+      }),
+      'utf8',
+    );
+
+    const apiCalls: Array<{ model: string }> = [];
+    let feedBatch = 1;
+    const feed1 = makeFeedMockFetch([
+      {
+        slug: 'openai-1',
+        title: 'OpenAI 公布开发者工具定价调整',
+        pubDate: 'Mon, 16 Nov 2026 07:30:00 GMT',
+        body: 'OpenAI 宣布面向开发者的实时工具调用方案升级定价与响应速度。',
+      },
+      {
+        slug: 'claude-2',
+        title: 'Anthropic 发布 Claude Code 终端沙盒',
+        pubDate: 'Mon, 16 Nov 2026 07:10:00 GMT',
+        body: 'Anthropic 公布 Claude Code 全新安全沙盒工具链，大幅降低编程智能体误操作风险。',
+      },
+    ]);
+    const feed2 = makeFeedMockFetch([
+      {
+        slug: 'openai-3',
+        title: 'OpenAI 扩充团队推理算力配额',
+        pubDate: 'Mon, 16 Nov 2026 08:50:00 GMT',
+        body: 'OpenAI 宣布企业开发者默认配额翻倍并降低批处理接口延时。',
+      },
+      {
+        slug: 'deepseek-4',
+        title: 'DeepSeek 开源推理加速算子库',
+        pubDate: 'Mon, 16 Nov 2026 08:30:00 GMT',
+        body: 'DeepSeek 公布开源低显存推理优化库，支持单卡高效部署。',
+      },
+    ]);
+
+    const core = await createCore({
+      rootDir,
+      now: () => new Date('2026-11-16T10:00:00.000Z'),
+      fetchImpl: async (input, init) => {
+        const url = typeof input === 'string' ? input : input.toString();
+        if (url.includes('gw.test')) {
+          const body = JSON.parse(String(init?.body ?? '{}')) as { model?: string };
+          apiCalls.push({ model: body.model ?? '' });
+          if (body.model === 'http-broken') {
+            return Response.json({ error: { message: 'HTTP 网关故障' } }, { status: 500 });
+          }
+          // 第三候选（agy/gemini-3.8-flash-high）已在 CLI 上可用，或者这里让第二个成功
+          return Response.json({ error: { message: '意外到达' } }, { status: 500 });
+        }
+        return feedBatch === 1 ? feed1(input, init) : feed2(input, init);
+      },
+    });
+
+    try {
+      await updateSettingsFile(settingsFile, {
+        ai: {
+          providers: {
+            backupGw: {
+              adapter: 'openai-compatible',
+              protocol: 'chat-completions',
+              baseUrl: 'https://gw.test/v1',
+              apiKeyFile: 'fb-key',
+            },
+          },
+          channels: [
+            { cli: 'agy', model: 'primary-broken', retries: 1, enabled: true },
+            { cli: 'backupGw', model: 'http-broken', retries: 0, enabled: true },
+            { cli: 'agy', model: 'gemini-3.8-flash-high', retries: 0, enabled: true },
+          ],
+          stages: {
+            select: { mode: 'pool', cli: 'agy', model: 'primary-broken', retries: 1 },
+            summarize: { mode: 'pool', cli: 'agy', model: 'primary-broken', retries: 1 },
+            polish: { mode: 'pool', cli: 'agy', model: 'primary-broken', retries: 1 },
+            factcheck: { mode: 'pool', cli: 'agy', model: 'primary-broken', retries: 1 },
+            package: { mode: 'pool', cli: 'agy', model: 'primary-broken', retries: 1 },
+          },
+        },
+      });
+      await core.context.reloadConfig();
+
+      // 1. 禁止脱离主播或跨主播混用 BGM
+      await expect(
+        core.tasks.start({ itemCount: 1, bgmFile: 'gpt-bgm.mp3', trigger: 'manual-cli' }),
+      ).rejects.toThrow(/背景音乐|主播/);
+      await expect(
+        core.tasks.start({
+          itemCount: 1,
+          hostId: 'claude',
+          bgmFile: 'gpt-bgm.mp3',
+          trigger: 'manual-cli',
+        }),
+      ).rejects.toThrow(/不匹配/);
+
+      // 2. 第一期：channel #1 (agy/primary-broken) 重试1次共2次失败 -> channel #2 (backupGw/http-broken) 失败 -> channel #3 (agy/gemini-3.8-flash-high) 兜底成功
+      const run1 = createRun(core.context, { itemCount: 1, trigger: 'manual-cli' });
+      let midRunUpdated = false;
+      await executeRun(core.context, run1, {
+        stopAfterStage: 'edit',
+        stageOverrides: {
+          edit: async () => {
+            // 模拟阶段进行到 edit 时，磁盘配置已改成直连可用模型
+            midRunUpdated = true;
+            await updateSettingsFile(settingsFile, {
+              ai: {
+                channels: [
+                  { cli: 'agy', model: 'gemini-3.8-flash-high', retries: 0, enabled: true },
+                ],
+              },
+            });
+            return { passedItemIds: [], droppedItemIds: [] };
+          },
+        },
+      });
+      expect(midRunUpdated).toBe(true);
+      const events1 = await core.tasks.events(run1);
+      expect(events1.some((e) => e.type === 'llm_fallback')).toBe(true);
+      expect(events1.some((e) => e.type === 'llm_fallback_succeeded')).toBe(true);
+      expect(apiCalls.filter((c) => c.model === 'http-broken')).toHaveLength(1);
+      // 此时磁盘配置已经在 edit 时切到了 gemini-3.8-flash-high，snapshot 应立即同步生效
+      const syncedSnapshot = JSON.parse(
+        core.context.repos.runs.getById(run1)?.configSnapshotJson ?? '{}',
+      ) as { ai?: { channels?: Array<{ model?: string }> } };
+      expect(syncedSnapshot.ai?.channels?.[0]?.model).toBe('gemini-3.8-flash-high');
+
+      // 验证第一期选定了 gpt 并严格绑定了 gpt-bgm.mp3，且 setBgm 禁止跨形象改配乐
+      const detail1 = await core.tasks.get(run1);
+      expect(detail1.hostId).toBe('gpt');
+      expect(detail1.bgmFile).toBe('gpt-bgm.mp3');
+      core.context.repos.runs.updateStatus(run1, 'awaiting_review');
+      await expect(core.tasks.setBgm(run1, 'claude-bgm.mp3')).rejects.toThrow(/不匹配/);
+
+      // 3. 第二期依然以 OpenAI 新闻为主，但因上一期是 gpt，本期自动选择必须避开 gpt 并绑定对应专属 BGM
+      feedBatch = 2;
+      const run2 = createRun(core.context, { itemCount: 2, trigger: 'manual-web' });
+      await executeRun(core.context, run2, { stopAfterStage: 'select' });
+      const detail2 = await core.tasks.get(run2);
+      expect(detail2.hostId).toBeTruthy();
+      expect(detail2.hostId).not.toBe('gpt');
+      expect(detail2.bgmFile).toBe(`${detail2.hostId}-bgm.mp3`);
+
+      // 4. 人工破例选择仍允许，但依然严格锁定该形象对应的 BGM
+      const runManual = createRun(core.context, {
+        itemCount: 1,
+        hostId: 'gpt',
+        trigger: 'manual-web',
+      });
+      expect((await core.tasks.get(runManual)).hostId).toBe('gpt');
+      expect((await core.tasks.get(runManual)).bgmFile).toBe('gpt-bgm.mp3');
+    } finally {
+      await core.close();
+    }
+  }, 30_000);
 });

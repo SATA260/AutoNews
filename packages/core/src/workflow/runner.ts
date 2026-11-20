@@ -23,6 +23,7 @@ import {
   updateEditWatermark,
 } from '../editorial/item-pipeline.js';
 import { PipelineError } from '../errors.js';
+import { resolvePersonaBgmFileSync } from '../media/bgm.js';
 import { executeBilibiliUpload } from '../publish/bilibili.js';
 import { ensurePublishDraftForRun } from '../publish/description.js';
 import { cleanupStorage } from '../services/retention.js';
@@ -126,6 +127,30 @@ function parseRunSettingsSnapshot(rawJson: string): Settings {
   return parsed.data;
 }
 
+/** 重新加载磁盘最新配置并同步更新任务配置记录，使后续步骤严格按当前生效配置执行 */
+async function syncRunWithLatestConfig(
+  ctx: CoreContext,
+  runId: string,
+  opts?: { notifyEvent?: boolean; forceNotifyEvent?: boolean; currentSnapshotJson?: string },
+): Promise<Settings> {
+  await ctx.reloadConfig();
+  const nextJson = JSON.stringify(ctx.settings);
+  const prevJson = opts?.currentSnapshotJson ?? ctx.repos.runs.getById(runId)?.configSnapshotJson;
+  const changed = nextJson !== prevJson;
+  if (changed) {
+    ctx.db.prepare('UPDATE runs SET config_snapshot = ? WHERE id = ?').run(nextJson, runId);
+  }
+  if (opts?.forceNotifyEvent || (opts?.notifyEvent && changed)) {
+    emitRunEvent(ctx, {
+      runId,
+      level: 'info',
+      type: 'config_snapshot_refreshed',
+      message: '已按最新系统配置刷新本期运行快照',
+    });
+  }
+  return ctx.settings;
+}
+
 /** 创建一条新的生产任务记录并初始化各步骤状态 */
 export function createRun(
   ctx: CoreContext,
@@ -145,6 +170,20 @@ export function createRun(
   }
 
   validateTemplateItemCount(ctx.settings, opts.itemCount);
+  if (opts.bgmFile && !opts.hostId) {
+    throw new Error('背景音乐与主播形象严格绑定，不能脱离主播形象单独指定背景音乐');
+  }
+  let initialBgmFile: string | null = opts.bgmFile ?? null;
+  if (opts.hostId) {
+    const boundBgm = resolvePersonaBgmFileSync(ctx.paths.rootDir, opts.hostId);
+    if (opts.bgmFile && boundBgm && opts.bgmFile !== boundBgm) {
+      throw new Error(
+        `背景音乐 ${opts.bgmFile} 与主播 ${opts.hostId} 不匹配，每个形象只能使用对应背景音乐`,
+      );
+    }
+    initialBgmFile = boundBgm ?? opts.bgmFile ?? null;
+  }
+
   const now = ctx.now();
   const nowIso = now.toISOString();
   const runId = generateRunId(now, ctx.settings.timezone);
@@ -162,10 +201,10 @@ export function createRun(
       configSnapshotJson,
       createdAt: nowIso,
     });
-    if (opts.hostId || opts.bgmFile)
+    if (opts.hostId || initialBgmFile)
       ctx.db
         .prepare('UPDATE runs SET host_id = ?, bgm_file = ?, host_manual = ? WHERE id = ?')
-        .run(opts.hostId ?? null, opts.bgmFile ?? null, opts.hostId ? 1 : 0, runId);
+        .run(opts.hostId ?? null, initialBgmFile, opts.hostId ? 1 : 0, runId);
     ctx.repos.runStages.initStages(runId);
     emitRunEvent(ctx, {
       runId,
@@ -390,6 +429,7 @@ async function executePipelineStagesLocked(opts: {
   ctx: CoreContext;
   runId: string;
   settings: Settings;
+  useLatestConfig?: boolean;
   startStage: PipelineStage;
   stopAfterStage?: PipelineStage;
   stageOverrides?: Partial<Record<PipelineStage, StageExecutor>>;
@@ -402,19 +442,14 @@ async function executePipelineStagesLocked(opts: {
   }) => Promise<void>;
 }): Promise<void> {
   const { ctx, runId, settings, startStage, stopAfterStage, stageOverrides, limitsOverride } = opts;
+  const useLatestConfig = opts.useLatestConfig ?? true;
+  let currentSettings = settings;
 
   const startIdx = PIPELINE_STAGES.indexOf(startStage);
   const narrateIdx = PIPELINE_STAGES.indexOf('narrate');
-  // 配音后停下试听：没指定停止步骤，或明确停在配音步骤时，都进入试听而不是中断
-  const pauseAfterNarrate =
-    settings.tts.pauseAfterNarrate === true &&
-    startIdx <= narrateIdx &&
-    (stopAfterStage === undefined || stopAfterStage === 'narrate');
   const stopIdx = stopAfterStage
     ? PIPELINE_STAGES.indexOf(stopAfterStage)
-    : pauseAfterNarrate
-      ? narrateIdx
-      : PIPELINE_STAGES.length - 1;
+    : PIPELINE_STAGES.length - 1;
   if (stopIdx < startIdx) {
     throw new Error(`非法的步骤范围：起始 ${startStage} 晚于终止 ${stopAfterStage}`);
   }
@@ -446,6 +481,8 @@ async function executePipelineStagesLocked(opts: {
   });
 
   let activeStage: PipelineStage = startStage;
+  let lastExecutedStage: PipelineStage | undefined;
+  let pausedAtNarrate = false;
   let inPublishPhase = false;
   let onStarted = opts.onStarted;
 
@@ -458,6 +495,12 @@ async function executePipelineStagesLocked(opts: {
       if (cancelMonitor.checkNow()) {
         throw new DOMException('任务已取消', 'AbortError');
       }
+      if (useLatestConfig) {
+        currentSettings = await syncRunWithLatestConfig(ctx, runId, {
+          notifyEvent: true,
+          currentSnapshotJson: JSON.stringify(currentSettings),
+        });
+      }
 
       const stageRecs = ctx.repos.runStages.listByRun(runId);
       const existingRec = stageRecs.find((s) => s.stage === stage);
@@ -465,6 +508,16 @@ async function executePipelineStagesLocked(opts: {
         existingRec?.status === 'done' &&
         (await checkpointExistsOnDisk(ctx, runId, existingRec.checkpointPath))
       ) {
+        lastExecutedStage = stage;
+        if (
+          stage === 'narrate' &&
+          (stopAfterStage === undefined || stopAfterStage === 'narrate') &&
+          currentSettings.tts.pauseAfterNarrate === true &&
+          startIdx <= narrateIdx
+        ) {
+          pausedAtNarrate = true;
+          break;
+        }
         continue;
       }
 
@@ -495,7 +548,7 @@ async function executePipelineStagesLocked(opts: {
         stageOut = await executor({
           ctx,
           runId,
-          settings,
+          settings: currentSettings,
           signal: stageSignal,
           limitsOverride,
         });
@@ -530,8 +583,9 @@ async function executePipelineStagesLocked(opts: {
         type: 'stage_done',
         message: `阶段执行完成：${stage}`,
       });
+      lastExecutedStage = stage;
       if (
-        settings.issue.allowPartial &&
+        currentSettings.issue.allowPartial &&
         !stageOverrides?.[stage] &&
         stageOut &&
         typeof stageOut === 'object' &&
@@ -563,12 +617,29 @@ async function executePipelineStagesLocked(opts: {
         });
         return;
       }
+
+      if (
+        stage === 'narrate' &&
+        (stopAfterStage === undefined || stopAfterStage === 'narrate') &&
+        currentSettings.tts.pauseAfterNarrate === true &&
+        startIdx <= narrateIdx
+      ) {
+        pausedAtNarrate = true;
+        break;
+      }
+    }
+
+    if (useLatestConfig) {
+      currentSettings = await syncRunWithLatestConfig(ctx, runId, {
+        notifyEvent: true,
+        currentSnapshotJson: JSON.stringify(currentSettings),
+      });
     }
 
     const finishedIso = ctx.now().toISOString();
-    const lastStage = stagesToRun[stagesToRun.length - 1];
+    const lastStage = lastExecutedStage ?? stagesToRun[stagesToRun.length - 1];
     if (lastStage === 'qa') {
-      await ensurePublishDraftForRun(ctx, runId, settings, { regenerate: true });
+      await ensurePublishDraftForRun(ctx, runId, currentSettings, { regenerate: true });
       inTransaction(ctx.db, () => {
         ctx.db.prepare('UPDATE runs SET media_dirty = 0 WHERE id = ?').run(runId);
         ctx.repos.runs.updateStatus(runId, 'awaiting_review', {
@@ -590,24 +661,24 @@ async function executePipelineStagesLocked(opts: {
         runId,
         message: `第 ${runId} 期成片已完成，等待人工审核发布`,
       });
-      if (settings.publish.mode === 'auto' && !revivedRunHasBvid(ctx, runId)) {
+      if (currentSettings.publish.mode === 'auto' && !revivedRunHasBvid(ctx, runId)) {
         inPublishPhase = true;
         if (opts.onAwaitingReview) {
-          await opts.onAwaitingReview({ ctx, runId, settings });
+          await opts.onAwaitingReview({ ctx, runId, settings: currentSettings });
         } else {
           hb.stop();
           cancelMonitor.stop();
           await executeBilibiliUpload({
             ctx,
             runId,
-            settings,
+            settings: currentSettings,
             allowedRunStatuses: ['awaiting_review'],
             alreadyLocked: true,
             signal: stageSignal,
           });
         }
       }
-    } else if (pauseAfterNarrate && lastStage === 'narrate') {
+    } else if (pausedAtNarrate && lastStage === 'narrate') {
       ctx.repos.runs.updateStatus(runId, 'awaiting_audio_review', {
         currentStage: 'narrate',
         pid: null,
@@ -631,7 +702,7 @@ async function executePipelineStagesLocked(opts: {
         currentStage: lastStage ?? null,
         pid: null,
         finishedAt: finishedIso,
-        retryDeadlineAt: computeRetryDeadline(ctx, settings),
+        retryDeadlineAt: computeRetryDeadline(ctx, currentSettings),
       });
     }
   } catch (err) {
@@ -647,7 +718,7 @@ async function executePipelineStagesLocked(opts: {
     }
     const errIso = ctx.now().toISOString();
     const code = toErrorCode(err, activeStage);
-    const deadlineIso = computeRetryDeadline(ctx, settings);
+    const deadlineIso = computeRetryDeadline(ctx, currentSettings);
     const errMsg = err instanceof Error ? err.message : String(err);
 
     if (code === 'cancelled') {
@@ -709,6 +780,7 @@ export async function executeRun(
   opts?: {
     startStage?: Stage;
     stopAfterStage?: PipelineStage;
+    useLatestConfig?: boolean;
     stageOverrides?: Partial<Record<PipelineStage, StageExecutor>>;
     limitsOverride?: Partial<ContentLimits>;
     onAwaitingReview?: (opts: {
@@ -738,15 +810,23 @@ export async function executeRun(
     throw new Error(`任务 ${runId} 状态为 ${run.status}，不允许直接重新开始，请使用恢复指令`);
   }
 
-  const settings = parseRunSettingsSnapshot(run.configSnapshotJson);
+  const useLatestConfig = opts?.useLatestConfig ?? true;
+  let settings = parseRunSettingsSnapshot(run.configSnapshotJson);
   const startStage = assertPipelineStage(opts?.startStage ?? 'collect');
 
   acquirePipelineLock(ctx, runId, settings);
   try {
+    if (useLatestConfig) {
+      settings = await syncRunWithLatestConfig(ctx, runId, {
+        notifyEvent: true,
+        currentSnapshotJson: run.configSnapshotJson,
+      });
+    }
     await executePipelineStagesLocked({
       ctx,
       runId,
       settings,
+      useLatestConfig,
       startStage,
       stopAfterStage: opts?.stopAfterStage,
       stageOverrides: opts?.stageOverrides,
@@ -756,8 +836,9 @@ export async function executeRun(
   } finally {
     releasePipelineLock(ctx, runId);
   }
-  if (settings.retention.autoCleanup) {
-    await cleanupStorage(ctx, { settings }).catch((err: unknown) => {
+  const effectiveSettings = useLatestConfig ? ctx.settings : settings;
+  if (effectiveSettings.retention.autoCleanup) {
+    await cleanupStorage(ctx, { settings: effectiveSettings }).catch((err: unknown) => {
       ctx.logger.warn({ err, runId }, '任务结束后自动清理过期存储时出错');
     });
   }
@@ -819,20 +900,16 @@ export async function resumeRun(
     startStage = assertPipelineStage(retryOpts.resumeFrom);
   }
 
+  const useLatestConfig = opts?.useLatestConfig ?? true;
   let settings = parseRunSettingsSnapshot(run.configSnapshotJson);
   acquirePipelineLock(ctx, runId, settings);
 
   try {
-    if (opts?.useLatestConfig) {
-      await ctx.reloadConfig();
-      const nextJson = JSON.stringify(ctx.settings);
-      ctx.repos.runs.updateStatus(runId, run.status, { configSnapshotJson: nextJson });
-      settings = ctx.settings;
-      emitRunEvent(ctx, {
-        runId,
-        level: 'info',
-        type: 'config_snapshot_refreshed',
-        message: '已按要求使用最新系统配置刷新本期运行快照',
+    if (useLatestConfig) {
+      settings = await syncRunWithLatestConfig(ctx, runId, {
+        forceNotifyEvent: opts?.useLatestConfig === true,
+        notifyEvent: true,
+        currentSnapshotJson: run.configSnapshotJson,
       });
     }
 
@@ -855,7 +932,7 @@ export async function resumeRun(
         granularity: opts?.fromStage ? 'stage' : 'resume',
         startStage,
         attempt,
-        useLatestConfig: Boolean(opts?.useLatestConfig),
+        useLatestConfig,
         revived: revival.revived,
       },
     });
@@ -864,6 +941,7 @@ export async function resumeRun(
       ctx,
       runId,
       settings,
+      useLatestConfig,
       startStage,
       stopAfterStage: opts?.stopAfterStage,
       stageOverrides: opts?.stageOverrides,
@@ -933,6 +1011,7 @@ export async function retryRunItems(
 
   const singleItemId = uniqueItemIds.length === 1 ? uniqueItemIds[0] : undefined;
 
+  const useLatestConfig = opts?.useLatestConfig ?? true;
   let settings = parseRunSettingsSnapshot(run.configSnapshotJson);
   acquirePipelineLock(ctx, runId, settings);
 
@@ -948,16 +1027,11 @@ export async function retryRunItems(
   const itemSignal = AbortSignal.any([cancelMonitor.signal, lockAbort.signal]);
 
   try {
-    if (opts?.useLatestConfig) {
-      await ctx.reloadConfig();
-      const nextJson = JSON.stringify(ctx.settings);
-      ctx.repos.runs.updateStatus(runId, run.status, { configSnapshotJson: nextJson });
-      settings = ctx.settings;
-      emitRunEvent(ctx, {
-        runId,
-        level: 'info',
-        type: 'config_snapshot_refreshed',
-        message: '已按要求使用最新系统配置刷新本期运行快照',
+    if (useLatestConfig) {
+      settings = await syncRunWithLatestConfig(ctx, runId, {
+        forceNotifyEvent: opts?.useLatestConfig === true,
+        notifyEvent: true,
+        currentSnapshotJson: run.configSnapshotJson,
       });
     }
 
@@ -1094,6 +1168,7 @@ export async function retryRunItems(
       ctx,
       runId,
       settings,
+      useLatestConfig,
       startStage: 'package',
       stopAfterStage: opts?.stopAfterStage,
       stageOverrides: opts?.stageOverrides,

@@ -9,6 +9,7 @@ import {
   loadSettings,
   loadSources,
   resolveRenderTheme,
+  resolveStageChannelPlan,
   updateSettingsFile,
   updateSourcesFile,
 } from '../src/index.js';
@@ -169,6 +170,124 @@ describe('config loader and comment-preserving writer', () => {
       expect(restored.find((s) => s.id === firstId)?.enabled).toBe(true);
       expect(restored.find((s) => s.id === secondId)?.enabled).toBe(true);
       await expect(fs.stat(`${sourcesPath}.lock`)).rejects.toThrow();
+    } finally {
+      await core.close();
+    }
+  });
+
+  it('resolves ordered AI channel pool, validates routing, and updates connections in channels', async () => {
+    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'aidaily-cfg-pool-'));
+    tempDirs.push(tmpDir);
+    await fs.mkdir(path.join(tmpDir, 'config'), { recursive: true });
+    await fs.copyFile(
+      path.join(REPO_ROOT, 'config', 'settings.yaml'),
+      path.join(tmpDir, 'config', 'settings.yaml'),
+    );
+    await fs.copyFile(
+      path.join(REPO_ROOT, 'config', 'sources.yaml'),
+      path.join(tmpDir, 'config', 'sources.yaml'),
+    );
+
+    const settingsPath = path.join(tmpDir, 'config', 'settings.yaml');
+    await updateSettingsFile(settingsPath, {
+      ai: {
+        providers: {},
+        channels: [],
+        stages: {
+          select: { mode: 'custom', cli: 'agy', model: 'gemini-4-hydrogen-high', retries: 2 },
+          summarize: { mode: 'custom', cli: 'agy', model: 'gemini-4-hydrogen-high', retries: 2 },
+          polish: { mode: 'custom', cli: 'agy', model: 'gemini-4-hydrogen-high', retries: 2 },
+          factcheck: { mode: 'custom', cli: 'agy', model: 'gemini-4-hydrogen-high', retries: 2 },
+          package: { mode: 'custom', cli: 'agy', model: 'gemini-4-hydrogen-high', retries: 2 },
+        },
+      },
+    });
+
+    const core = await createCore({ rootDir: tmpDir });
+    try {
+      await core.config.saveModelApiConnection({
+        name: '备份网关',
+        baseUrl: 'https://backup-gw.test/v1',
+        protocol: 'chat-completions',
+        apiKey: 'sk-backup-key',
+      });
+
+      const currentStages = core.config.getSettings().ai.stages;
+      // 存在 pool 阶段但未启用任何渠道时必须拒绝保存
+      await expect(
+        core.config.updateStageRouting({
+          maxConcurrentCalls: 4,
+          channels: [{ cli: 'agy', model: 'm1', retries: 1, enabled: false }],
+          stages: {
+            ...currentStages,
+            select: { ...currentStages.select, mode: 'pool' },
+          },
+        }),
+      ).rejects.toThrow(/至少保留一个已启用/);
+
+      await core.config.updateStageRouting({
+        maxConcurrentCalls: 4,
+        channels: [
+          { cli: 'agy', model: 'm1', retries: 2, enabled: true },
+          { cli: 'codex', model: 'disabled-m', retries: 1, enabled: false },
+          { cli: '备份网关', model: 'deepseek-chat', retries: 3, timeoutSec: 90, enabled: true },
+          { cli: 'agy', model: 'm1', retries: 5, enabled: true },
+        ],
+        stages: {
+          ...currentStages,
+          select: { ...currentStages.select, mode: 'pool', timeoutSec: 180 },
+          polish: {
+            mode: 'custom',
+            cli: '备份网关',
+            model: 'deepseek-reasoner',
+            timeoutSec: 150,
+            retries: 1,
+          },
+        },
+      });
+
+      const reloaded = core.config.getSettings();
+      // pool 模式跳过 disabled 并去重重复的 agy/m1，custom 模式先尝试自定义再落回 channels
+      expect(resolveStageChannelPlan(reloaded, 'select')).toEqual([
+        { cli: 'agy', model: 'm1', retries: 2, timeoutSec: 180, source: 'channel_pool' },
+        {
+          cli: '备份网关',
+          model: 'deepseek-chat',
+          retries: 3,
+          timeoutSec: 90,
+          source: 'channel_pool',
+        },
+      ]);
+      expect(resolveStageChannelPlan(reloaded, 'polish')).toEqual([
+        {
+          cli: '备份网关',
+          model: 'deepseek-reasoner',
+          retries: 1,
+          timeoutSec: 150,
+          source: 'stage_custom',
+        },
+        { cli: 'agy', model: 'm1', retries: 2, timeoutSec: 150, source: 'channel_pool' },
+        {
+          cli: '备份网关',
+          model: 'deepseek-chat',
+          retries: 3,
+          timeoutSec: 90,
+          source: 'channel_pool',
+        },
+      ]);
+
+      // 被 ai.channels 引用的连接禁止直接删除；改名时自动同步更新 ai.channels 中的 cli
+      await expect(core.config.removeModelApiConnection('备份网关')).rejects.toThrow(
+        /渠道池|正在使用/,
+      );
+      await core.config.saveModelApiConnection({
+        previousName: '备份网关',
+        name: '已改名网关',
+        baseUrl: 'https://backup-gw.test/v1',
+        protocol: 'chat-completions',
+      });
+      expect(core.config.getSettings().ai.channels.some((c) => c.cli === '已改名网关')).toBe(true);
+      expect(core.config.getSettings().ai.stages.polish.cli).toBe('已改名网关');
     } finally {
       await core.close();
     }

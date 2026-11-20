@@ -1,5 +1,7 @@
 import type {
+  DaemonStatus,
   DoctorReport,
+  GlobalCliStatus,
   PublishDraft,
   RetryOptions,
   RunDetail,
@@ -323,4 +325,51 @@ export function formatDoctorReportText(report: DoctorReport, timezone: string): 
     report.checks.map((c) => [c.name, c.ok ? '通过' : '失败', c.required ? '是' : '否', c.detail]),
   );
   return `${header}\n\n${table}`;
+}
+
+/** 格式化全局命令注册状态文本 */
+export function formatGlobalCliStatusText(status: GlobalCliStatus): string {
+  const stateLabel = status.installed
+    ? status.managedBySelf
+      ? '已注册（由本项目托管）'
+      : '已存在同名文件（非本项目托管）'
+    : '未注册';
+  const lines = [
+    `全局命令状态: ${stateLabel}`,
+    `命令路径: ${status.binPath}`,
+    `绑定项目目录: ${status.repoRoot}`,
+    `入口脚本: ${status.targetScriptPath}`,
+    `当前 PATH 可用: ${status.inPath ? '是' : '否（请将所在目录加入 PATH）'}`,
+  ];
+  return lines.join('\n');
+}
+
+const WEB_STATE_LABELS: Record<DaemonStatus['webState'], string> = {
+  stopped: '休眠中（零网页内存占用）',
+  starting: '唤醒启动中',
+  running: '运行中',
+};
+
+/** 格式化后台守护进程与按需网页网关的运行状态文本 */
+export function formatDaemonStatusText(status: DaemonStatus, timezone: string): string {
+  const lines = [
+    `守护进程: ${status.running ? `运行中 (PID: ${status.pid ?? '-'})` : '未运行'}`,
+    `开机自启: ${status.serviceInstalled ? `已安装 (${status.serviceLabel})` : '未安装'}`,
+    `开机配置文件: ${status.plistPath}`,
+    `启动时间: ${formatTimestampInTz(status.startedAt, timezone)}`,
+    `下次定时触发: ${
+      status.nextScheduleRunAt
+        ? `${formatTimestampInTz(status.nextScheduleRunAt, timezone)}${status.nextScheduleName ? ` (${status.nextScheduleName})` : ''}`
+        : '暂无已启用定时任务'
+    }`,
+    `网页按需网关: ${
+      status.webEnabled
+        ? `${status.webUrl} · ${WEB_STATE_LABELS[status.webState]}${status.webPid ? ` (PID: ${status.webPid})` : ''} · 闲置 ${Math.round(status.webIdleTimeoutSec / 60)} 分钟自动休眠`
+        : '未启用'
+    }`,
+    `全局命令: ${status.globalCli.installed ? `已注册 (${status.globalCli.binPath})` : '未注册（可执行 aidaily global install）'}`,
+    `守护日志: ${status.logFile}`,
+    `网页日志: ${status.webLogFile}`,
+  ];
+  return lines.join('\n');
 }

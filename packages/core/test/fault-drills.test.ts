@@ -115,6 +115,8 @@ async function setupDrillWorkspace() {
 
   await editSettingsFile(path.join(rootDir, 'config', 'settings.yaml'), (doc) => {
     doc.setIn(['ai', 'providers'], {});
+    doc.setIn(['ai', 'channels'], []);
+    doc.setIn(['publish', 'mode'], 'manual-review');
     doc.setIn(['tts', 'provider'], 'silent');
     doc.deleteIn(['issue', 'minScore']);
     doc.setIn(['issue', 'allowPartial'], false);
@@ -130,17 +132,21 @@ async function setupDrillWorkspace() {
       active: 'solid-color',
     },
     ai: {
+      channels: [],
       stages: {
-        select: { cli: 'agy', model: 'gemini-3.8-flash-high', retries: 0 },
-        summarize: { cli: 'agy', model: 'gemini-3.8-flash-high', retries: 0 },
-        polish: { cli: 'agy', model: 'gemini-3.8-flash-high', retries: 0 },
-        factcheck: { cli: 'agy', model: 'gemini-4-carbon-high', retries: 0 },
-        package: { cli: 'agy', model: 'gemini-3.8-flash-high', retries: 0 },
+        select: { mode: 'custom', cli: 'agy', model: 'gemini-3.8-flash-high', retries: 0 },
+        summarize: { mode: 'custom', cli: 'agy', model: 'gemini-3.8-flash-high', retries: 0 },
+        polish: { mode: 'custom', cli: 'agy', model: 'gemini-3.8-flash-high', retries: 0 },
+        factcheck: { mode: 'custom', cli: 'agy', model: 'gemini-4-carbon-high', retries: 0 },
+        package: { mode: 'custom', cli: 'agy', model: 'gemini-3.8-flash-high', retries: 0 },
       },
     },
     publish: {
       mode: 'manual-review',
-      bilibili: { tid: 231 },
+      bilibili: {
+        tid: 231,
+        cookieFile: path.join(rootDir, 'test-bili-cookies.json'),
+      },
     },
   });
 

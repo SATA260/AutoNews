@@ -1,6 +1,9 @@
 'use server';
 
 import {
+  type AiChannel,
+  AiChannelSchema,
+  AiStageModeSchema,
   AiStageNameSchema,
   type ArticleDetail,
   type DeleteArticlesInput,
@@ -162,7 +165,8 @@ export async function resumeRunAction(formData: FormData): Promise<ActionResult>
       }
       fromStage = parsed as (typeof PIPELINE_STAGES)[number];
     }
-    const useLatestConfig = parseBooleanField(formData.get('useLatestConfig'));
+    const useLatestRaw = formData.get('useLatestConfig');
+    const useLatestConfig = useLatestRaw === null ? true : parseBooleanField(useLatestRaw);
 
     const core = await getCore();
     await core.tasks.resume(runId, {
@@ -204,7 +208,8 @@ export async function retryItemsAction(formData: FormData): Promise<ActionResult
       typeof rawStep === 'string' && rawStep.trim()
         ? EditStepSchema.parse(rawStep.trim())
         : 'summarize';
-    const useLatestConfig = parseBooleanField(formData.get('useLatestConfig'));
+    const useLatestRaw = formData.get('useLatestConfig');
+    const useLatestConfig = useLatestRaw === null ? true : parseBooleanField(useLatestRaw);
 
     const core = await getCore();
     await core.tasks.retryItems(runId, itemIds, {
@@ -508,6 +513,7 @@ export async function syncSchedulesAction(): Promise<ActionResult> {
 }
 
 const StageFieldPatchSchema = z.object({
+  mode: AiStageModeSchema.optional(),
   cli: z.string().trim().min(1),
   model: z.string().trim().min(1),
   timeoutSec: z.number().int().positive(),
@@ -548,21 +554,51 @@ export async function removeModelApiConnectionAction(formData: FormData): Promis
   }
 }
 
-/** 更新各阶段的调用方式与模型配置 */
+/** 更新各阶段的调用方式、模型配置与全局 AI 渠道优先级集合 */
 export async function updateStageRoutingAction(formData: FormData): Promise<ActionResult> {
   try {
-    const stageEntries = AiStageNameSchema.options.map((key) => [
-      key,
-      {
-        cli: formData.get(`stage_${key}_cli`),
-        model: formData.get(`stage_${key}_model`),
-        timeoutSec: parseRequiredIntField(
-          formData.get(`stage_${key}_timeoutSec`),
-          `${key} 阶段超时时间`,
-        ),
-        retries: parseRequiredIntField(formData.get(`stage_${key}_retries`), `${key} 阶段重试次数`),
-      },
-    ]);
+    const rawChannelsJson = formData.get('channelsJson');
+    let channels: AiChannel[] | undefined;
+    if (typeof rawChannelsJson === 'string' && rawChannelsJson.trim().length > 0) {
+      channels = z.array(AiChannelSchema).parse(JSON.parse(rawChannelsJson));
+    }
+    const primaryPoolChannel = channels?.find((ch) => ch.enabled !== false);
+
+    const stageEntries = AiStageNameSchema.options.map((key) => {
+      const rawMode = formData.get(`stage_${key}_mode`);
+      const mode =
+        typeof rawMode === 'string' && rawMode.trim()
+          ? AiStageModeSchema.parse(rawMode.trim())
+          : channels === undefined
+            ? ('custom' as const)
+            : undefined;
+      const rawCli = formData.get(`stage_${key}_cli`);
+      const rawModel = formData.get(`stage_${key}_model`);
+      const rawRetries = formData.get(`stage_${key}_retries`);
+      const usePoolFallback = mode === 'pool' && primaryPoolChannel !== undefined;
+      return [
+        key,
+        {
+          ...(mode ? { mode } : {}),
+          cli:
+            usePoolFallback && (!rawCli || !String(rawCli).trim())
+              ? primaryPoolChannel.cli
+              : rawCli,
+          model:
+            usePoolFallback && (!rawModel || !String(rawModel).trim())
+              ? primaryPoolChannel.model
+              : rawModel,
+          timeoutSec: parseRequiredIntField(
+            formData.get(`stage_${key}_timeoutSec`),
+            `${key} 阶段超时时间`,
+          ),
+          retries:
+            usePoolFallback && (!rawRetries || !String(rawRetries).trim())
+              ? primaryPoolChannel.retries
+              : parseRequiredIntField(rawRetries, `${key} 阶段重试次数`),
+        },
+      ];
+    });
     const stages = z
       .record(AiStageNameSchema, StageFieldPatchSchema)
       .parse(Object.fromEntries(stageEntries));
@@ -574,9 +610,15 @@ export async function updateStageRoutingAction(formData: FormData): Promise<Acti
       .parse(parseRequiredIntField(formData.get('maxConcurrentCalls'), '最大并发模型调用数'));
 
     const core = await getCore();
-    await core.config.updateStageRouting({ maxConcurrentCalls, stages });
+    await core.config.updateStageRouting({
+      maxConcurrentCalls,
+      ...(channels !== undefined ? { channels } : {}),
+      stages,
+    });
+    safeRevalidate('/');
     safeRevalidate('/settings');
-    return { ok: true, message: '各阶段模型配置已保存，对新任务生效' };
+    safeRevalidate('/runs');
+    return { ok: true, message: 'AI 渠道池与各阶段配置已保存，已即时生效' };
   } catch (err) {
     return { ok: false, error: err instanceof Error ? err.message : String(err) };
   }

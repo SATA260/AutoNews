@@ -10,6 +10,7 @@ import {
   NotFoundError,
   releasePipelineLock,
   resolveTimeRangeBounds,
+  updateSettingsFile,
   writeJsonAtomic,
 } from '../src/index.js';
 
@@ -33,6 +34,15 @@ async function setupTempWorkspace(): Promise<string> {
     path.join(REPO_ROOT, 'config', 'sources.yaml'),
     path.join(dir, 'config', 'sources.yaml'),
   );
+  await updateSettingsFile(path.join(dir, 'config', 'settings.yaml'), {
+    clis: {
+      biliup: { adapter: 'generic', bin: 'fixture-disabled-biliup', extraArgs: [] },
+    },
+    publish: {
+      mode: 'manual-review',
+      bilibili: { cookieFile: path.join(dir, 'test-bili-cookies.json') },
+    },
+  });
   return dir;
 }
 

@@ -14,7 +14,7 @@ import {
 import { resolveModelApiKey } from './config/api-credentials.js';
 import { loadSettings, loadSources } from './config/loader.js';
 import { NoopNotifier, type Notifier } from './notify/index.js';
-import { findRepoRoot, type RepoPaths, resolveRepoPaths } from './paths.js';
+import { type RepoPaths, resolveDefaultRepoRoot, resolveRepoPaths } from './paths.js';
 import { type DatabaseSync, openDatabase } from './storage/db.js';
 import { ensureDir, ensurePrivateDir, writeJsonAtomic } from './storage/files.js';
 import { runMigrations } from './storage/migrate.js';
@@ -130,7 +130,7 @@ export async function createCoreContext(opts?: {
   now?: () => Date;
   createCollectorDriver?: () => CollectorBrowserDriver;
 }): Promise<CoreContext> {
-  const rootDir = opts?.rootDir ?? findRepoRoot();
+  const rootDir = opts?.rootDir ?? resolveDefaultRepoRoot();
   const paths = resolveRepoPaths(rootDir);
 
   await Promise.all([
@@ -216,6 +216,9 @@ export async function createCoreContext(opts?: {
       sources = nextSources;
       if (typeof (bridge as { updateConfigs?: unknown }).updateConfigs === 'function') {
         bridge.updateConfigs(nextSettings.clis);
+      }
+      if (typeof (tts as { updateSettings?: unknown }).updateSettings === 'function') {
+        tts.updateSettings(nextSettings.tts);
       }
     },
   };

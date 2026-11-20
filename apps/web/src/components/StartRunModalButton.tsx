@@ -14,13 +14,21 @@ const CUTOFF_PRESETS: Array<{ value: string; label: string }> = [
   { value: 'custom', label: '自定义时间' },
 ];
 
+const HOST_LABELS: Record<string, string> = {
+  deepseek: 'DeepSeek 娘（对应 deepseek-bgm.mp3）',
+  gpt: 'GPT 娘（对应 gpt-bgm.mp3）',
+  gemini: 'Gemini 娘（对应 gemini-bgm.mp3）',
+  claude: 'Claude 娘（对应 claude-bgm.mp3）',
+};
+
 /** 打开「立即运行」弹窗的按钮与表单组件（必须由用户显式填写正整数条数，不预填任何默认值） */
 export function StartRunModalButton({
   label = '立即运行',
-  bgmFiles = [],
+  previousHostId = null,
 }: {
   label?: string;
   bgmFiles?: string[];
+  previousHostId?: string | null;
 }) {
   const router = useRouter();
   const [open, setOpen] = useState(false);
@@ -144,33 +152,23 @@ export function StartRunModalButton({
                   htmlFor="start-run-host"
                   className="block text-sm font-medium text-slate-700"
                 >
-                  主播
+                  Live2D 主播形象（专属配乐随形象自动绑定）
                 </label>
+                <p className="mt-0.5 text-xs text-slate-500">
+                  自动选择时将由 AI 根据本期新闻内容匹配形象，并严格避开上一期已使用的主播
+                  {previousHostId ? `（${previousHostId}）` : ''}
+                  ；人工指定可破例选择，背景音乐均自动绑定对应专属曲目。
+                </p>
                 <select
                   id="start-run-host"
                   name="hostId"
                   className="mt-1.5 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm"
                 >
-                  <option value="">自动选择</option>
-                  <option value="deepseek">DeepSeek 娘</option>
-                  <option value="gpt">GPT 娘</option>
-                  <option value="gemini">Gemini 娘</option>
-                  <option value="claude">Claude 娘</option>
-                </select>
-              </div>
-              <div>
-                <label htmlFor="start-run-bgm" className="block text-sm font-medium text-slate-700">
-                  背景音乐
-                </label>
-                <select
-                  id="start-run-bgm"
-                  name="bgmFile"
-                  className="mt-1.5 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm"
-                >
-                  <option value="">自动选择</option>
-                  {bgmFiles.map((file) => (
-                    <option key={file} value={file}>
-                      {file}
+                  <option value="">自动选择（按新闻内容选定且不连任）</option>
+                  {(['deepseek', 'gpt', 'gemini', 'claude'] as const).map((id) => (
+                    <option key={id} value={id}>
+                      {HOST_LABELS[id]}
+                      {previousHostId === id ? '（上一期已使用，可人工破例）' : ''}
                     </option>
                   ))}
                 </select>

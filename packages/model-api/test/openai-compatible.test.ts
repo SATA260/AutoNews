@@ -175,7 +175,11 @@ describe('OpenAI 兼容模型 API', () => {
       cover: { title: '封面标题', subtitle: '封面副标题' },
     };
     const checks: Array<{ schema: z.ZodType; wire: object; output: object }> = [
-      { schema: SelectionResultSchema, wire: { events: [] }, output: { events: [] } },
+      {
+        schema: SelectionResultSchema,
+        wire: { events: [], hostId: null, hostReason: null },
+        output: { events: [] },
+      },
       {
         schema: SummaryDraftSchema,
         wire: {

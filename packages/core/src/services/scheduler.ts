@@ -12,12 +12,15 @@ import {
   ScheduleTimeSchema,
 } from '@aidaily/contracts';
 import { TZDate } from '@date-fns/tz';
-import { addDays } from 'date-fns';
 import { execa } from 'execa';
 import type { CoreContext } from '../context.js';
-import { listBgmFiles } from '../media/bgm.js';
+import { notifyDaemonReload } from '../daemon/runtime-state.js';
+import { computeNextScheduleRunAt } from '../daemon/schedule-planner.js';
 import { writeFileAtomic } from '../storage/files.js';
 import { validateTemplateItemCount } from '../templates/registry.js';
+import { isDaemonServiceInstalledForRoot } from './daemon.js';
+
+export { computeNextScheduleRunAt };
 
 const SAFE_SCHEDULE_ID_PATTERN = /^[a-zA-Z0-9._-]+$/;
 
@@ -97,38 +100,6 @@ export function buildScheduleLabel(scheduleId: string): string {
   return `com.aidaily.schedule.${scheduleId}`;
 }
 
-/** 按照配置时区计算已启用定时任务的下一次触发时间（返回 UTC ISO 字符串，未启用则返回 null） */
-export function computeNextScheduleRunAt(
-  timeExpr: string,
-  enabled: boolean,
-  now: Date,
-  timezone: string,
-): string | null {
-  if (!enabled) {
-    return null;
-  }
-  const validated = ScheduleTimeSchema.parse(timeExpr);
-  const [hhStr, mmStr] = validated.split(':');
-  const hour = Number(hhStr);
-  const minute = Number(mmStr);
-
-  const tzNow = new TZDate(now.getTime(), timezone);
-  let target = new TZDate(
-    tzNow.getFullYear(),
-    tzNow.getMonth(),
-    tzNow.getDate(),
-    hour,
-    minute,
-    0,
-    0,
-    timezone,
-  );
-  if (target.getTime() <= now.getTime()) {
-    target = addDays(target, 1);
-  }
-  return new Date(target.getTime()).toISOString();
-}
-
 /** 构造 macOS `launchd` 定时任务的 XML plist 配置内容，按宿主本地时钟换算触发时刻并注入配置时区环境变量 */
 export function buildLaunchAgentPlist(opts: {
   id: string;
@@ -194,7 +165,6 @@ export function buildLaunchAgentPlist(opts: {
     'schedule',
     '--schedule-id',
     opts.id,
-    ...(opts.bgmFile ? ['--bgm', opts.bgmFile] : []),
   ];
 
   const argLines = programArgs.map((arg) => `      <string>${escapeXml(arg)}</string>`).join('\n');
@@ -302,8 +272,11 @@ export function createSchedulerService(
     return dirs;
   };
 
+  const isDaemonManaged = (): boolean =>
+    isDaemonServiceInstalledForRoot(launchAgentsDir, ctx.paths.rootDir);
+
   const toScheduleJob = (row: ReturnType<typeof ctx.repos.schedules.list>[number]): ScheduleJob => {
-    const installed = fsSync.existsSync(plistPathFor(row.id));
+    const installed = isDaemonManaged() ? row.enabled : fsSync.existsSync(plistPathFor(row.id));
     return ScheduleJobSchema.parse({
       ...row,
       installed,
@@ -317,6 +290,17 @@ export function createSchedulerService(
     const plistPath = plistPathFor(row.id);
     const domain = domainTarget();
 
+    // 统一守护进程已托管时不再额外挂载单条 launchd 配置，防止重复触发，仅清理旧配置并通知守护进程刷新
+    if (isDaemonManaged()) {
+      await launchctlExec(['bootout', domain, plistPath]).catch(() => ({
+        exitCode: 0,
+        stderr: '',
+      }));
+      await fs.rm(plistPath, { force: true }).catch(() => undefined);
+      await notifyDaemonReload(ctx.paths);
+      return;
+    }
+
     // 先尝试卸载旧任务，未曾挂载时忽略返回错误
     await launchctlExec(['bootout', domain, plistPath]).catch(() => ({
       exitCode: 0,
@@ -328,7 +312,7 @@ export function createSchedulerService(
         id: row.id,
         time: row.time,
         itemCount: row.itemCount,
-        bgmFile: row.bgmFile,
+        bgmFile: null,
         rootDir: ctx.paths.rootDir,
         logsDir: ctx.paths.logsDir,
         cliScriptPath: resolveCliScriptPath(ctx.paths.rootDir, opts?.cliScriptPath),
@@ -347,6 +331,7 @@ export function createSchedulerService(
     } else {
       await fs.rm(plistPath, { force: true });
     }
+    await notifyDaemonReload(ctx.paths);
   };
 
   return {
@@ -364,8 +349,11 @@ export function createSchedulerService(
         );
       }
 
-      if (input.bgmFile && !(await listBgmFiles(ctx)).includes(input.bgmFile))
-        throw new Error('指定的背景音乐不在曲库中');
+      if (typeof input.bgmFile === 'string' && input.bgmFile.trim().length > 0) {
+        throw new Error(
+          '定时任务不支持独立指定背景音乐，系统将根据自动选定的主播匹配对应专属背景音乐',
+        );
+      }
       validateTemplateItemCount(ctx.settings, input.itemCount);
       const cutoffMode = ScheduleCutoffModeSchema.parse(input.cutoffMode ?? 'none');
       let maxAgeHours: number | null = null;
@@ -394,7 +382,7 @@ export function createSchedulerService(
         itemCount: input.itemCount,
         cutoffMode,
         maxAgeHours,
-        bgmFile: input.bgmFile,
+        bgmFile: null,
         enabled,
         now: nowIso,
       });
@@ -425,8 +413,11 @@ export function createSchedulerService(
       ) {
         throw new RangeError(`每期新闻条数必须为正整数，当前传入: ${String(patch.itemCount)}`);
       }
-      if (patch.bgmFile && !(await listBgmFiles(ctx)).includes(patch.bgmFile))
-        throw new Error('指定的背景音乐不在曲库中');
+      if (typeof patch.bgmFile === 'string' && patch.bgmFile.trim().length > 0) {
+        throw new Error(
+          '定时任务不支持独立指定背景音乐，系统将根据自动选定的主播匹配对应专属背景音乐',
+        );
+      }
       if (patch.itemCount !== undefined) validateTemplateItemCount(ctx.settings, patch.itemCount);
       const nextName = patch.name !== undefined ? patch.name.trim() : undefined;
       if (nextName !== undefined && !nextName) {
@@ -509,23 +500,26 @@ export function createSchedulerService(
       }));
       await fs.rm(plistPath, { force: true });
       ctx.repos.schedules.remove(id);
+      await notifyDaemonReload(ctx.paths);
     },
 
-    /** 将数据库中的定时任务列表全量同步至 launchd，并清理已删除的本仓库残留配置 */
+    /** 将数据库中的定时任务列表全量同步至系统调度器，并在守护进程接管时清理旧有单条配置 */
     async sync(): Promise<void> {
       const jobs = ctx.repos.schedules.list();
-      const activeIds = new Set(jobs.map((j) => j.id));
+      const daemonManaged = isDaemonManaged();
+      const activeIds = daemonManaged ? new Set<string>() : new Set(jobs.map((j) => j.id));
 
       for (const job of jobs) {
         await syncSingleJob(job);
       }
 
-      // 清理属于当前仓库但数据库已无对应记录的残留 plist 文件
+      // 清理属于当前仓库的无效或被守护进程接管的残留 plist 文件
       let entries: string[] = [];
       try {
         entries = await fs.readdir(launchAgentsDir);
       } catch (err) {
         if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+          await notifyDaemonReload(ctx.paths);
           return;
         }
         throw err;
@@ -549,6 +543,7 @@ export function createSchedulerService(
         }));
         await fs.rm(plistPath, { force: true });
       }
+      await notifyDaemonReload(ctx.paths);
     },
   };
 }

@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url';
 import type { IssuePackage, Timeline } from '@aidaily/contracts';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
+  assertSafeUploadTargetInTestEnv,
   buildBilibiliDescription,
   buildBilibiliTags,
   commitRunConsumption,
@@ -63,6 +64,7 @@ async function setupPublishWorkspace(opts?: { mode?: 'manual-review' | 'auto'; d
       mode: opts?.mode ?? 'manual-review',
       bilibili: {
         tid: 231,
+        cookieFile: path.join(rootDir, 'test-bili-cookies.json'),
         ...(opts?.descMax ? { descMax: opts.descMax } : {}),
       },
     },
@@ -1116,4 +1118,85 @@ describe('Bilibili publishing, AI declaration, consumption, and uncertain recove
 
     await core.close();
   }, 60_000);
+
+  it('测试环境下强制拦截真实投稿命令和临时目录外的凭据路径', async () => {
+    const { rootDir, stateFile } = await setupPublishWorkspace({ mode: 'manual-review' });
+    const isolatedCookie = path.join(rootDir, 'test-bili-cookies.json');
+    const externalCookie = path.join(REPO_ROOT, 'forbidden-real-cookies.json');
+
+    expect(() =>
+      assertSafeUploadTargetInTestEnv({
+        rootDir,
+        configuredBin: 'biliup',
+        cookieFile: isolatedCookie,
+      }),
+    ).toThrow(/测试环境禁止调用真实投稿工具/);
+
+    expect(() =>
+      assertSafeUploadTargetInTestEnv({
+        rootDir,
+        configuredBin: '/opt/homebrew/bin/biliup',
+        cookieFile: isolatedCookie,
+      }),
+    ).toThrow(/测试环境禁止调用真实投稿工具/);
+
+    expect(() =>
+      assertSafeUploadTargetInTestEnv({
+        rootDir,
+        configuredBin: 'fixture-disabled-biliup',
+        cookieFile: isolatedCookie,
+      }),
+    ).toThrow(/测试环境禁止调用真实投稿工具/);
+
+    expect(() =>
+      assertSafeUploadTargetInTestEnv({
+        rootDir,
+        configuredBin: FAKE_BILIUP_BIN,
+        cookieFile: externalCookie,
+      }),
+    ).toThrow(/测试环境禁止使用临时目录之外/);
+
+    expect(() =>
+      assertSafeUploadTargetInTestEnv({
+        rootDir,
+        configuredBin: FAKE_BILIUP_BIN,
+        cookieFile: isolatedCookie,
+      }),
+    ).not.toThrow();
+
+    // 真实批准流程误配真实 biliup 命令时必须在改变状态和执行命令前直接拦截
+    await updateSettingsFile(path.join(rootDir, 'config', 'settings.yaml'), {
+      clis: {
+        biliup: { adapter: 'generic', bin: 'biliup', extraArgs: [] },
+      },
+    });
+    const core = await createCore({ rootDir });
+    try {
+      const runId = createRun(core.context, { itemCount: 1, trigger: 'manual-cli' });
+      await seedCompletedRunReadyForReview(core, runId);
+
+      await expect(core.publish.approve(runId, { retryDelaysMs: [0] })).rejects.toThrow(
+        /测试环境禁止调用真实投稿工具/,
+      );
+      expect(core.context.repos.runs.getById(runId)?.status).toBe('awaiting_review');
+
+      // 即使换回假投稿脚本，若凭据指向工作区和临时目录外部也必须被拦截且不触发调用
+      await core.config.updateSettings({
+        clis: {
+          biliup: { adapter: 'generic', bin: FAKE_BILIUP_BIN, extraArgs: [] },
+        },
+        publish: {
+          bilibili: { cookieFile: externalCookie },
+        },
+      });
+      await expect(core.publish.approve(runId, { retryDelaysMs: [0] })).rejects.toThrow(
+        /测试环境禁止使用临时目录之外/,
+      );
+      expect(core.context.repos.runs.getById(runId)?.status).toBe('awaiting_review');
+      const recorded = JSON.parse(await fs.readFile(stateFile, 'utf8')) as { calls: string[][] };
+      expect(recorded.calls).toHaveLength(0);
+    } finally {
+      await core.close();
+    }
+  });
 });

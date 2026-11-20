@@ -25,6 +25,7 @@ export const PersonaProfileSchema = z.object({
   introExamples: z.array(z.string().min(1)).min(1),
   outroExamples: z.array(z.string().min(1)).min(1),
   forbiddenTokens: z.array(z.string().min(1)),
+  bgmFile: z.string().trim().min(1).optional(),
 });
 /** 主播配置类型。 */
 export type PersonaProfile = z.infer<typeof PersonaProfileSchema>;

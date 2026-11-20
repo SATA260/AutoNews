@@ -35,6 +35,7 @@ import {
   resolveActiveTemplate,
   type TemplateRegistry,
 } from '../templates/registry.js';
+import { resolvePersonaBgmFile } from './bgm.js';
 import { closeBrowserSafely, resolveChromiumExecutablePath } from './browser.js';
 import { loadLogoCatalog, resolveCompanyIdentity, resolveLogoAssetsRoot } from './company-logos.js';
 import { renderRunCover } from './cover.js';
@@ -573,7 +574,8 @@ export async function buildRenderableIssue(opts: {
   const musicRow = ctx.db.prepare('SELECT bgm_file FROM runs WHERE id = ?').get(runId) as
     | { bgm_file: string | null }
     | undefined;
-  const customBgmName = musicRow?.bgm_file;
+  const boundBgm = await resolvePersonaBgmFile(ctx, activeHostId, personas);
+  const customBgmName = boundBgm ?? musicRow?.bgm_file;
   const resolvedBgmSpec =
     customBgmName &&
     path.basename(customBgmName) === customBgmName &&
@@ -1237,10 +1239,14 @@ export async function runRenderStage(opts: {
       signal,
     });
 
-    const musicRow = ctx.db.prepare('SELECT bgm_file FROM runs WHERE id = ?').get(runId) as
-      | { bgm_file: string | null }
+    const musicRow = ctx.db.prepare('SELECT host_id, bgm_file FROM runs WHERE id = ?').get(runId) as
+      | { host_id: string | null; bgm_file: string | null }
       | undefined;
-    const bgmName = musicRow?.bgm_file;
+    const boundBgm = await resolvePersonaBgmFile(ctx, musicRow?.host_id ?? issue.hostId);
+    if (boundBgm && musicRow?.bgm_file !== boundBgm) {
+      ctx.db.prepare('UPDATE runs SET bgm_file = ? WHERE id = ?').run(boundBgm, runId);
+    }
+    const bgmName = boundBgm ?? musicRow?.bgm_file;
     if (bgmName && (path.basename(bgmName) !== bgmName || !/\.(mp3|wav|flac|m4a)$/i.test(bgmName)))
       throw new Error('背景音乐文件名不合法');
     const masterTimeline = quantized ? quantized.audioTimeline : timeline;

@@ -19,7 +19,7 @@ export function RunRetryPanel({
   runStatus?: RunStatus;
 }) {
   const router = useRouter();
-  const [useLatestConfig, setUseLatestConfig] = useState(false);
+  const [useLatestConfig, setUseLatestConfig] = useState(true);
   const [confirmStage, setConfirmStage] = useState<Stage | null>(null);
   const [feedback, setFeedback] = useState<{ ok: boolean; text: string } | null>(null);
   const [isPending, startTransition] = useTransition();
@@ -48,9 +48,7 @@ export function RunRetryPanel({
     if (fromStage) {
       fd.set('fromStage', fromStage);
     }
-    if (useLatestConfig) {
-      fd.set('useLatestConfig', 'true');
-    }
+    fd.set('useLatestConfig', useLatestConfig ? 'true' : 'false');
     startTransition(async () => {
       try {
         const res = await resumeRunAction(fd);
@@ -112,7 +110,7 @@ export function RunRetryPanel({
             onChange={(e) => setUseLatestConfig(e.target.checked)}
             className="h-3.5 w-3.5 rounded border-slate-300"
           />
-          使用最新系统配置刷新本期快照（切换模型后勾选）
+          按当前显示设置执行（默认开启，取消则沿用创建时旧快照）
         </label>
       </div>
 

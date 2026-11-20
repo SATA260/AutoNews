@@ -1,7 +1,7 @@
 'use client';
 
-import type { AiStageName, Settings } from '@aidaily/contracts';
-import { ArrowRightLeft } from 'lucide-react';
+import type { AiChannel, AiStageName, Settings } from '@aidaily/contracts';
+import { ArrowDown, ArrowRightLeft, ArrowUp, Plus, Trash2 } from 'lucide-react';
 import { useRouter } from 'next/navigation';
 import { useEffect, useRef, useState, useTransition } from 'react';
 import {
@@ -60,12 +60,14 @@ export function StageRoutingForm({
   const router = useRouter();
   const effectiveKeys = routeCacheKeys ?? {};
   const [stageState, setStageState] = useState(settings.ai.stages);
+  const [channelsState, setChannelsState] = useState<AiChannel[]>(() => settings.ai.channels ?? []);
   const [maxConcurrentCalls, setMaxConcurrentCalls] = useState(
     String(settings.ai.maxConcurrentCalls),
   );
   const [prevAiConfigJson, setPrevAiConfigJson] = useState(() =>
     JSON.stringify({
       stages: settings.ai.stages,
+      channels: settings.ai.channels ?? [],
       maxConcurrentCalls: settings.ai.maxConcurrentCalls,
     }),
   );
@@ -88,13 +90,21 @@ export function StageRoutingForm({
 
   const nextAiConfigJson = JSON.stringify({
     stages: settings.ai.stages,
+    channels: settings.ai.channels ?? [],
     maxConcurrentCalls: settings.ai.maxConcurrentCalls,
   });
   if (nextAiConfigJson !== prevAiConfigJson) {
     setPrevAiConfigJson(nextAiConfigJson);
     setStageState(settings.ai.stages);
+    setChannelsState(settings.ai.channels ?? []);
     setMaxConcurrentCalls(String(settings.ai.maxConcurrentCalls));
   }
+  const hasUnsavedChanges =
+    JSON.stringify({
+      stages: stageState,
+      channels: channelsState,
+      maxConcurrentCalls: Number(maxConcurrentCalls) || settings.ai.maxConcurrentCalls,
+    }) !== prevAiConfigJson;
 
   const syncSignature = JSON.stringify({ modelsByCli, effectiveKeys, modelRoutes, modelsRevision });
   if (syncSignature !== prevSyncSignature) {
@@ -297,14 +307,27 @@ export function StageRoutingForm({
   /** 更新单个阶段表单项的本地草稿状态；目标调用方式模型列表尚未就绪时保留原模型 ID */
   const updateField = (
     stageKey: AiStageName,
-    field: 'cli' | 'model' | 'timeoutSec' | 'retries',
+    field: 'mode' | 'cli' | 'model' | 'timeoutSec' | 'retries',
     value: string,
   ) => {
     setStageState((prev) => {
       const next = { ...prev };
       const draft = prev[stageKey];
       const curr = modelRoutes.includes(draft.cli) ? draft : settings.ai.stages[stageKey];
-      if (field === 'cli') {
+      if (field === 'mode') {
+        const nextMode = value === 'custom' ? 'custom' : 'pool';
+        const firstPool = channelsState.find((ch) => ch.enabled !== false);
+        next[stageKey] =
+          nextMode === 'pool' && firstPool
+            ? {
+                ...curr,
+                mode: 'pool',
+                cli: firstPool.cli,
+                model: firstPool.model,
+                retries: firstPool.retries,
+              }
+            : { ...curr, mode: nextMode };
+      } else if (field === 'cli') {
         const savedStage = settings.ai.stages[stageKey];
         const savedModelForTarget = value === savedStage.cli ? savedStage.model : '';
         const targetEntry = modelEntries[value];
@@ -314,15 +337,90 @@ export function StageRoutingForm({
               ? curr.model
               : savedModelForTarget
             : curr.model || savedModelForTarget;
-        next[stageKey] = { ...curr, cli: value, model: nextModel };
+        next[stageKey] = { ...curr, mode: 'custom', cli: value, model: nextModel };
       } else if (field === 'model') {
-        next[stageKey] = { ...curr, model: value };
+        next[stageKey] = { ...curr, mode: 'custom', model: value };
       } else if (field === 'timeoutSec') {
         next[stageKey] = { ...curr, timeoutSec: Number(value) || curr.timeoutSec };
       } else {
         next[stageKey] = { ...curr, retries: Number(value) };
       }
       return next;
+    });
+  };
+
+  /** 在全局 AI 渠道优先级集合中新增一条渠道记录 */
+  const handleAddChannel = () => {
+    const defaultCli = modelRoutes.includes(effectiveBulkCli)
+      ? effectiveBulkCli
+      : (modelRoutes[0] ?? settings.ai.stages.select.cli);
+    const candidates = modelEntries[defaultCli]?.models ?? [];
+    const defaultModel = candidates[0] ?? settings.ai.stages.select.model;
+    setChannelsState((prev) => [
+      ...prev,
+      { cli: defaultCli, model: defaultModel, retries: 2, enabled: true },
+    ]);
+  };
+
+  /** 修改全局 AI 渠道池中某一条渠道的配置字段 */
+  const handleUpdateChannel = (index: number, patch: Partial<AiChannel>) => {
+    setChannelsState((prev) =>
+      prev.map((item, idx) => {
+        if (idx !== index) return item;
+        const nextItem = { ...item, ...patch };
+        if (patch.cli && patch.cli !== item.cli) {
+          const entry = modelEntries[patch.cli];
+          if (entry?.status === 'ready' && !entry.models.includes(nextItem.model)) {
+            nextItem.model = entry.models[0] ?? nextItem.model;
+          }
+        }
+        return nextItem;
+      }),
+    );
+  };
+
+  /** 上下调整全局 AI 渠道优先级顺序 */
+  const handleMoveChannel = (index: number, delta: -1 | 1) => {
+    setChannelsState((prev) => {
+      const target = index + delta;
+      if (target < 0 || target >= prev.length) return prev;
+      const next = [...prev];
+      const current = next[index];
+      const swapped = next[target];
+      if (!current || !swapped) return prev;
+      next[index] = swapped;
+      next[target] = current;
+      return next;
+    });
+  };
+
+  /** 从全局 AI 渠道池移除一条备选渠道 */
+  const handleRemoveChannel = (index: number) => {
+    setChannelsState((prev) => prev.filter((_, idx) => idx !== index));
+  };
+
+  /** 将全部阶段重置为跟随全局 AI 渠道优先级集合 */
+  const handleSetAllPoolMode = () => {
+    const firstPool = channelsState.find((ch) => ch.enabled !== false);
+    setStageState((prev) => {
+      const next = { ...prev };
+      for (const { key } of AI_STAGE_INFO) {
+        const curr = prev[key];
+        next[key] = firstPool
+          ? {
+              ...curr,
+              mode: 'pool',
+              cli: firstPool.cli,
+              model: firstPool.model,
+              retries: firstPool.retries,
+            }
+          : { ...curr, mode: 'pool' };
+      }
+      return next;
+    });
+    setFeedback({
+      ok: true,
+      text: '已将全部环节切回「跟随全局渠道池」，点击「保存模型路由设置」即可生效',
     });
   };
 
@@ -370,7 +468,10 @@ export function StageRoutingForm({
       return;
     }
     const { nextStages, missingModelStages } = buildSwitchedStageState(effectiveBulkCli, bulkModel);
-    setStageState(nextStages);
+    const customStages = Object.fromEntries(
+      AI_STAGE_INFO.map(({ key }) => [key, { ...nextStages[key], mode: 'custom' as const }]),
+    ) as Settings['ai']['stages'];
+    setStageState(customStages);
     if (missingModelStages.length > 0) {
       setFeedback({
         ok: false,
@@ -391,7 +492,10 @@ export function StageRoutingForm({
       return;
     }
     const { nextStages, missingModelStages } = buildSwitchedStageState(effectiveBulkCli, bulkModel);
-    setStageState(nextStages);
+    const customStages = Object.fromEntries(
+      AI_STAGE_INFO.map(({ key }) => [key, { ...nextStages[key], mode: 'custom' as const }]),
+    ) as Settings['ai']['stages'];
+    setStageState(customStages);
 
     if (missingModelStages.length > 0) {
       const missingTitles = AI_STAGE_INFO.filter(({ key }) => missingModelStages.includes(key)).map(
@@ -406,8 +510,10 @@ export function StageRoutingForm({
 
     const fd = new FormData();
     fd.set('maxConcurrentCalls', maxConcurrentCalls);
+    fd.set('channelsJson', JSON.stringify(channelsState));
     for (const { key } of AI_STAGE_INFO) {
-      const cfg = nextStages[key];
+      const cfg = customStages[key];
+      fd.set(`stage_${key}_mode`, 'custom');
       fd.set(`stage_${key}_cli`, cfg.cli);
       fd.set(`stage_${key}_model`, cfg.model.trim());
       fd.set(`stage_${key}_timeoutSec`, String(cfg.timeoutSec));
@@ -420,7 +526,7 @@ export function StageRoutingForm({
       setFeedback({
         ok: res.ok,
         text: res.ok
-          ? `已将全部模型切换至渠道「${effectiveBulkCli}」并保存，对新任务生效`
+          ? `已将全部模型切换至渠道「${effectiveBulkCli}」并保存，已即时生效`
           : (res.error ?? '保存失败'),
       });
       router.refresh();
@@ -432,6 +538,7 @@ export function StageRoutingForm({
     event.preventDefault();
     setFeedback(null);
     const fd = new FormData(event.currentTarget);
+    fd.set('channelsJson', JSON.stringify(channelsState));
     startTransition(async () => {
       const res = await updateStageRoutingAction(fd);
       setFeedback({
@@ -442,15 +549,19 @@ export function StageRoutingForm({
     });
   };
 
+  const enabledPoolChannels = channelsState.filter((ch) => ch.enabled !== false);
+  const primaryPoolChannel = enabledPoolChannels[0] ?? null;
+
   return (
     <form
       onSubmit={handleSubmit}
       className="space-y-4 rounded-2xl border border-slate-200/90 bg-white p-5 shadow-xs"
     >
+      <input type="hidden" name="channelsJson" value={JSON.stringify(channelsState)} />
       <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-100 pb-3.5">
         <div>
           <div className="flex flex-wrap items-center gap-2">
-            <h2 className="text-base font-semibold text-slate-900">分阶段模型设置</h2>
+            <h2 className="text-base font-semibold text-slate-900">AI 渠道优先级与分阶段模型</h2>
             <span
               className={`rounded-full px-2.5 py-0.5 text-[11px] font-medium ${
                 currentUnifiedCli
@@ -460,9 +571,15 @@ export function StageRoutingForm({
             >
               {currentUnifiedCli ? `当前统一渠道：${currentUnifiedCli}` : '当前多渠道混用'}
             </span>
+            {hasUnsavedChanges && (
+              <span className="rounded-full bg-amber-100 px-2.5 py-0.5 text-[11px] font-medium text-amber-800">
+                有未保存更改
+              </span>
+            )}
           </div>
           <p className="mt-0.5 text-xs text-slate-600">
-            每个环节可独立选择调用方式和模型，也支持一键统一切换至同一渠道；保存后对新任务生效。
+            按顺序配置 AI
+            调用渠道集合（前一渠道用完自身重试次数失效后，自动顺延到下一渠道）；保存后对定时任务、重跑与下一阶段即时生效。
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
@@ -488,6 +605,189 @@ export function StageRoutingForm({
             className="w-20 rounded-lg border border-slate-300 px-2.5 py-1 text-xs"
           />
         </div>
+      </div>
+
+      <div className="space-y-2.5 rounded-xl border border-slate-200 bg-slate-50/70 p-3.5">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div>
+            <h3 className="text-xs font-semibold text-slate-900">
+              AI 渠道集合与自动兜底顺序（按序号依次尝试）
+            </h3>
+            <p className="text-[11px] text-slate-500">
+              每个渠道独立设置单次失效后的最大重试次数；当某渠道耗尽重试仍失败时，自动切换下一已启用渠道。
+            </p>
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            {enabledPoolChannels.length > 0 && (
+              <button
+                type="button"
+                onClick={handleSetAllPoolMode}
+                className="rounded-lg border border-slate-300 bg-white px-2.5 py-1 text-xs font-medium text-slate-700 hover:bg-slate-100"
+              >
+                全部阶段跟随渠道池
+              </button>
+            )}
+            <button
+              type="button"
+              disabled={modelRoutes.length === 0}
+              onClick={handleAddChannel}
+              className="inline-flex items-center gap-1 rounded-lg bg-slate-900 px-2.5 py-1 text-xs font-medium text-white hover:bg-slate-800 disabled:opacity-50"
+            >
+              <Plus className="h-3.5 w-3.5" aria-hidden="true" />
+              添加 AI 渠道
+            </button>
+          </div>
+        </div>
+
+        {channelsState.length === 0 ? (
+          <div className="rounded-lg border border-dashed border-slate-300 bg-white px-3 py-3 text-xs text-slate-500">
+            暂未配置全局备选渠道池。点击右上角「添加 AI 渠道」即可建立多模型自动兜底顺序。
+          </div>
+        ) : (
+          <div className="space-y-2">
+            {channelsState.map((ch, idx) => {
+              const chModels = modelEntries[ch.cli]?.models ?? [];
+              const chModelCandidates = Array.from(
+                new Set([ch.model, ...chModels].filter(Boolean)),
+              );
+              const occurrence = channelsState
+                .slice(0, idx)
+                .filter((prev) => prev.cli === ch.cli && prev.model === ch.model).length;
+              const enabledOrder = ch.enabled !== false ? enabledPoolChannels.indexOf(ch) + 1 : -1;
+              return (
+                <div
+                  key={`${ch.cli}:${ch.model}:${occurrence}`}
+                  className="grid gap-2 rounded-lg border border-slate-200 bg-white p-2.5 md:grid-cols-12 md:items-center"
+                >
+                  <div className="flex items-center gap-2 md:col-span-2">
+                    <span
+                      className={`inline-flex rounded-md px-2 py-0.5 text-[11px] font-medium ${
+                        enabledOrder === 1
+                          ? 'bg-emerald-100 text-emerald-800'
+                          : enabledOrder > 1
+                            ? 'bg-sky-100 text-sky-800'
+                            : 'bg-slate-100 text-slate-500'
+                      }`}
+                    >
+                      {enabledOrder === 1
+                        ? `首选 #${idx + 1}`
+                        : enabledOrder > 1
+                          ? `兜底 #${enabledOrder}`
+                          : '已停用'}
+                    </span>
+                    <label className="inline-flex items-center gap-1 text-[11px] text-slate-600">
+                      <input
+                        type="checkbox"
+                        checked={ch.enabled !== false}
+                        onChange={(e) => handleUpdateChannel(idx, { enabled: e.target.checked })}
+                        className="h-3.5 w-3.5 rounded border-slate-300"
+                      />
+                      启用
+                    </label>
+                  </div>
+
+                  <div className="md:col-span-2">
+                    <select
+                      aria-label={`渠道 ${idx + 1} 调用方式`}
+                      value={modelRoutes.includes(ch.cli) ? ch.cli : ''}
+                      onChange={(e) => handleUpdateChannel(idx, { cli: e.target.value })}
+                      className="w-full rounded-md border border-slate-300 bg-white px-2 py-1 text-xs text-slate-900"
+                    >
+                      {!modelRoutes.includes(ch.cli) && ch.cli && (
+                        <option value="">{ch.cli}（未定义）</option>
+                      )}
+                      {modelRoutes.map((cliName) => (
+                        <option key={cliName} value={cliName}>
+                          {cliName}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+
+                  <div className="md:col-span-4">
+                    <input
+                      aria-label={`渠道 ${idx + 1} 模型`}
+                      list={`channel_${idx}_models`}
+                      value={ch.model}
+                      onChange={(e) => handleUpdateChannel(idx, { model: e.target.value })}
+                      placeholder="模型 ID"
+                      className="w-full rounded-md border border-slate-300 bg-white px-2 py-1 font-mono text-xs text-slate-900"
+                    />
+                    <datalist id={`channel_${idx}_models`}>
+                      {chModelCandidates.map((m) => (
+                        <option key={m} value={m} />
+                      ))}
+                    </datalist>
+                  </div>
+
+                  <div className="md:col-span-1">
+                    <input
+                      aria-label={`渠道 ${idx + 1} 重试次数`}
+                      type="number"
+                      min={0}
+                      max={10}
+                      value={ch.retries}
+                      onChange={(e) =>
+                        handleUpdateChannel(idx, {
+                          retries: Math.max(0, Math.min(10, Number(e.target.value) || 0)),
+                        })
+                      }
+                      title="单渠道失效前重试次数"
+                      className="w-full rounded-md border border-slate-300 bg-white px-2 py-1 text-xs text-slate-900"
+                    />
+                  </div>
+
+                  <div className="md:col-span-1">
+                    <input
+                      aria-label={`渠道 ${idx + 1} 超时秒数`}
+                      type="number"
+                      min={1}
+                      value={ch.timeoutSec ?? ''}
+                      onChange={(e) => {
+                        const val = Number(e.target.value);
+                        handleUpdateChannel(idx, {
+                          timeoutSec: val > 0 ? Math.trunc(val) : undefined,
+                        });
+                      }}
+                      placeholder="随阶段"
+                      title="留空则沿用所在阶段超时设置"
+                      className="w-full rounded-md border border-slate-300 bg-white px-2 py-1 text-xs text-slate-900 placeholder:text-slate-400"
+                    />
+                  </div>
+
+                  <div className="flex items-center justify-end gap-1 md:col-span-2">
+                    <button
+                      type="button"
+                      disabled={idx === 0}
+                      onClick={() => handleMoveChannel(idx, -1)}
+                      title="上移优先级"
+                      className="rounded border border-slate-200 p-1 text-slate-600 hover:bg-slate-100 disabled:opacity-40"
+                    >
+                      <ArrowUp className="h-3.5 w-3.5" aria-hidden="true" />
+                    </button>
+                    <button
+                      type="button"
+                      disabled={idx === channelsState.length - 1}
+                      onClick={() => handleMoveChannel(idx, 1)}
+                      title="下移优先级"
+                      className="rounded border border-slate-200 p-1 text-slate-600 hover:bg-slate-100 disabled:opacity-40"
+                    >
+                      <ArrowDown className="h-3.5 w-3.5" aria-hidden="true" />
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => handleRemoveChannel(idx)}
+                      title="移除该渠道"
+                      className="rounded border border-rose-200 p-1 text-rose-600 hover:bg-rose-50"
+                    >
+                      <Trash2 className="h-3.5 w-3.5" aria-hidden="true" />
+                    </button>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
       </div>
 
       {modelRoutes.length > 0 && (
@@ -590,58 +890,118 @@ export function StageRoutingForm({
         {AI_STAGE_INFO.map(({ key, title, hint }) => {
           const draft = stageState[key];
           const cfg = modelRoutes.includes(draft.cli) ? draft : settings.ai.stages[key];
-          const routeModels = modelEntries[cfg.cli]?.models ?? [];
-          const modelCandidates = Array.from(new Set([cfg.model, ...routeModels].filter(Boolean)));
+          const stageMode = cfg.mode ?? (channelsState.length > 0 ? 'pool' : 'custom');
+          const effectiveCli =
+            stageMode === 'pool' && primaryPoolChannel ? primaryPoolChannel.cli : cfg.cli;
+          const effectiveModel =
+            stageMode === 'pool' && primaryPoolChannel ? primaryPoolChannel.model : cfg.model;
+          const effectiveRetries =
+            stageMode === 'pool' && primaryPoolChannel ? primaryPoolChannel.retries : cfg.retries;
+          const routeModels = modelEntries[effectiveCli]?.models ?? [];
+          const modelCandidates = Array.from(
+            new Set([effectiveModel, ...routeModels].filter(Boolean)),
+          );
           return (
             <div
               key={key}
               className="grid gap-3 rounded-lg border border-slate-200 bg-slate-50/70 p-3 md:grid-cols-12 md:items-center"
             >
-              <div className="md:col-span-4">
+              <div className="md:col-span-3">
                 <div className="text-sm font-medium text-slate-900">{title}</div>
                 <div className="text-[11px] text-slate-500">{hint}</div>
               </div>
 
               <div className="md:col-span-2">
                 <label className="block text-[11px] text-slate-500">
-                  调用方式
+                  渠道模式
                   <select
-                    name={`stage_${key}_cli`}
-                    value={modelRoutes.includes(cfg.cli) ? cfg.cli : ''}
-                    required
-                    onChange={(e) => updateField(key, 'cli', e.target.value)}
+                    name={`stage_${key}_mode`}
+                    value={stageMode}
+                    onChange={(e) => updateField(key, 'mode', e.target.value)}
                     className="mt-1 w-full rounded-md border border-slate-300 bg-white px-2 py-1.5 text-xs font-normal text-slate-900"
                   >
-                    <option value="" disabled>
-                      请选择调用方式
-                    </option>
-                    {modelRoutes.map((cliName) => (
-                      <option key={cliName} value={cliName}>
-                        {cliName}
-                      </option>
-                    ))}
+                    <option value="pool">跟随全局渠道池</option>
+                    <option value="custom">单独主渠道</option>
                   </select>
                 </label>
               </div>
 
-              <div className="md:col-span-4">
-                <label className="block text-[11px] text-slate-500">
-                  模型 ID
+              {stageMode === 'pool' ? (
+                <>
+                  <input type="hidden" name={`stage_${key}_cli`} value={effectiveCli} />
+                  <input type="hidden" name={`stage_${key}_model`} value={effectiveModel} />
                   <input
-                    name={`stage_${key}_model`}
-                    list={`stage_${key}_models`}
-                    required
-                    value={cfg.model}
-                    onChange={(e) => updateField(key, 'model', e.target.value)}
-                    className="mt-1 w-full rounded-md border border-slate-300 bg-white px-2 py-1.5 font-mono text-xs font-normal text-slate-900"
+                    type="hidden"
+                    name={`stage_${key}_retries`}
+                    value={String(effectiveRetries)}
                   />
-                  <datalist id={`stage_${key}_models`}>
-                    {modelCandidates.map((m) => (
-                      <option key={m} value={m} />
-                    ))}
-                  </datalist>
-                </label>
-              </div>
+                  <div className="md:col-span-6">
+                    <div className="text-[11px] text-slate-500">当前生效优先级链</div>
+                    <div className="mt-1 rounded-md border border-slate-200 bg-white px-2.5 py-1.5 text-xs text-slate-700">
+                      {primaryPoolChannel
+                        ? `首选 ${primaryPoolChannel.cli} / ${primaryPoolChannel.model}（按渠道池顺序自动兜底）`
+                        : `使用默认主渠道 ${effectiveCli} / ${effectiveModel}（建议先添加启用渠道）`}
+                    </div>
+                  </div>
+                </>
+              ) : (
+                <>
+                  <div className="md:col-span-2">
+                    <label className="block text-[11px] text-slate-500">
+                      主调用方式
+                      <select
+                        name={`stage_${key}_cli`}
+                        value={modelRoutes.includes(cfg.cli) ? cfg.cli : ''}
+                        required
+                        onChange={(e) => updateField(key, 'cli', e.target.value)}
+                        className="mt-1 w-full rounded-md border border-slate-300 bg-white px-2 py-1.5 text-xs font-normal text-slate-900"
+                      >
+                        <option value="" disabled>
+                          请选择调用方式
+                        </option>
+                        {modelRoutes.map((cliName) => (
+                          <option key={cliName} value={cliName}>
+                            {cliName}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                  </div>
+
+                  <div className="md:col-span-3">
+                    <label className="block text-[11px] text-slate-500">
+                      模型 ID
+                      <input
+                        name={`stage_${key}_model`}
+                        list={`stage_${key}_models`}
+                        required
+                        value={cfg.model}
+                        onChange={(e) => updateField(key, 'model', e.target.value)}
+                        className="mt-1 w-full rounded-md border border-slate-300 bg-white px-2 py-1.5 font-mono text-xs font-normal text-slate-900"
+                      />
+                      <datalist id={`stage_${key}_models`}>
+                        {modelCandidates.map((m) => (
+                          <option key={m} value={m} />
+                        ))}
+                      </datalist>
+                    </label>
+                  </div>
+
+                  <div className="md:col-span-1">
+                    <label className="block text-[11px] text-slate-500">
+                      重试次
+                      <input
+                        name={`stage_${key}_retries`}
+                        type="number"
+                        min={0}
+                        value={cfg.retries}
+                        onChange={(e) => updateField(key, 'retries', e.target.value)}
+                        className="mt-1 w-full rounded-md border border-slate-300 bg-white px-2 py-1.5 text-xs font-normal text-slate-900"
+                      />
+                    </label>
+                  </div>
+                </>
+              )}
 
               <div className="md:col-span-1">
                 <label className="block text-[11px] text-slate-500">
@@ -652,20 +1012,6 @@ export function StageRoutingForm({
                     min={1}
                     value={cfg.timeoutSec}
                     onChange={(e) => updateField(key, 'timeoutSec', e.target.value)}
-                    className="mt-1 w-full rounded-md border border-slate-300 bg-white px-2 py-1.5 text-xs font-normal text-slate-900"
-                  />
-                </label>
-              </div>
-
-              <div className="md:col-span-1">
-                <label className="block text-[11px] text-slate-500">
-                  重试次
-                  <input
-                    name={`stage_${key}_retries`}
-                    type="number"
-                    min={0}
-                    value={cfg.retries}
-                    onChange={(e) => updateField(key, 'retries', e.target.value)}
                     className="mt-1 w-full rounded-md border border-slate-300 bg-white px-2 py-1.5 text-xs font-normal text-slate-900"
                   />
                 </label>

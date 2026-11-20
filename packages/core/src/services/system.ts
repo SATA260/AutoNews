@@ -133,7 +133,12 @@ function computeRouteFingerprint(ctx: CoreContext, cliName: string): string {
 
 /** 生成环境自检依赖项的整体配置与凭据指纹，相关工具或凭据内容变更时自动使旧自检缓存失效 */
 function computeDoctorFingerprint(ctx: CoreContext): string {
-  const llmClis = Array.from(new Set(Object.values(ctx.settings.ai.stages).map((s) => s.cli)));
+  const enabledPoolClis = (ctx.settings.ai.channels ?? [])
+    .filter((ch) => ch.enabled !== false)
+    .map((ch) => ch.cli);
+  const llmClis = Array.from(
+    new Set([...Object.values(ctx.settings.ai.stages).map((s) => s.cli), ...enabledPoolClis]),
+  );
   const llmFingerprints = llmClis.map((name) => [name, computeRouteFingerprint(ctx, name)]);
   const biliCliName = ctx.settings.publish.bilibili.cli;
   const biliCliCfg = Object.hasOwn(ctx.settings.clis, biliCliName)
@@ -210,13 +215,25 @@ async function executeDoctorChecks(ctx: CoreContext): Promise<DoctorReport> {
     };
   }
 
-  const llmClis = Array.from(new Set(Object.values(ctx.settings.ai.stages).map((s) => s.cli)));
+  const enabledPoolClis = (ctx.settings.ai.channels ?? [])
+    .filter((ch) => ch.enabled !== false)
+    .map((ch) => ch.cli);
+  const primaryClis = new Set<string>();
+  for (const stageCfg of Object.values(ctx.settings.ai.stages)) {
+    if (stageCfg.mode === 'pool') {
+      primaryClis.add(enabledPoolClis[0] ?? stageCfg.cli);
+    } else {
+      primaryClis.add(stageCfg.cli);
+    }
+  }
+  const llmClis = Array.from(new Set([...primaryClis, ...enabledPoolClis]));
   const llmChecksPromise = Promise.all(
     llmClis.map(async (cliName): Promise<DoctorCheckItem> => {
       const providers = ctx.settings.ai.providers;
       const provider =
         providers && Object.hasOwn(providers, cliName) ? providers[cliName] : undefined;
       const checkName = provider ? `api:${cliName}` : `cli:${cliName}`;
+      const isPrimary = primaryClis.has(cliName);
       try {
         const cliHealth = provider
           ? await ctx.modelApi.health(provider)
@@ -224,15 +241,15 @@ async function executeDoctorChecks(ctx: CoreContext): Promise<DoctorReport> {
         return {
           name: checkName,
           ok: cliHealth.ok,
-          detail: cliHealth.detail,
-          required: true,
+          detail: isPrimary ? cliHealth.detail : `${cliHealth.detail}（渠道池备选）`,
+          required: isPrimary,
         };
       } catch (err) {
         return {
           name: checkName,
           ok: false,
-          detail: err instanceof Error ? err.message : String(err),
-          required: true,
+          detail: `${err instanceof Error ? err.message : String(err)}${isPrimary ? '' : '（渠道池备选）'}`,
+          required: isPrimary,
         };
       }
     }),

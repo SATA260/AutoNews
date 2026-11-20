@@ -1,5 +1,17 @@
 # 配置示例。真正生效的是 config/settings.yaml。
-# 这里只标出配音与采集相关的可选项，避免把本机密钥写进示例。
+# 这里只标出 AI 渠道优先级、配音与采集相关的可选项，避免把本机密钥写进示例。
+
+ai:
+  # 按优先级排列的模型调用渠道集合：前一渠道耗尽 retries 次后自动切换至下一渠道
+  channels:
+    - { cli: agy, model: gemini-4-hydrogen-high, retries: 2, enabled: true }
+    - { cli: codex, model: gpt-5, retries: 2, enabled: true }
+  stages:
+    select: { mode: pool, cli: agy, model: gemini-4-hydrogen-high, timeoutSec: 300, retries: 2 }
+    summarize: { mode: pool, cli: agy, model: gemini-4-hydrogen-high, timeoutSec: 240, retries: 2 }
+    polish: { mode: pool, cli: agy, model: gemini-4-hydrogen-high, timeoutSec: 180, retries: 2 }
+    factcheck: { mode: pool, cli: agy, model: gemini-4-hydrogen-high, timeoutSec: 300, retries: 2 }
+    package: { mode: pool, cli: agy, model: gemini-4-hydrogen-high, timeoutSec: 240, retries: 2 }
 
 collector:
   xCookieFile: storage/secrets/x-cookies.json

@@ -37,13 +37,15 @@ const TRIGGER_TEXT: Record<Trigger, string> = {
 export default async function DashboardPage() {
   const core = await getCore();
   const settings = core.config.getSettings();
-  const bgmFiles = await core.tasks.listBgm();
-  const [recentRuns, sourceHealth, schedules, articleOverview] = await Promise.all([
-    core.tasks.list({ limit: 10 }),
-    core.sources.list(),
-    core.scheduler.list(),
-    core.articles.list({ page: 1, pageSize: 1 }),
-  ]);
+  const [recentRuns, sourceHealth, schedules, articleOverview, daemonStatus, previousHostId] =
+    await Promise.all([
+      core.tasks.list({ limit: 10 }),
+      core.sources.list(),
+      core.scheduler.list(),
+      core.articles.list({ page: 1, pageSize: 1 }),
+      core.daemon.getStatus(),
+      core.tasks.getLatestHostId(),
+    ]);
 
   const activeRunSummary = recentRuns.find(
     (r) => r.status === 'running' || r.status === 'queued' || r.status === 'publishing',
@@ -81,6 +83,16 @@ export default async function DashboardPage() {
             <span className="rounded-full border border-slate-200 bg-white px-2.5 py-0.5 text-xs font-medium text-slate-600">
               时区：{settings.timezone}
             </span>
+            {daemonStatus.running ? (
+              <span className="inline-flex items-center gap-1.5 rounded-full border border-emerald-200 bg-emerald-50 px-2.5 py-0.5 text-xs font-medium text-emerald-800">
+                <span className="h-1.5 w-1.5 rounded-full bg-emerald-500" />
+                守护进程运行中 · 网页闲置 {Math.round(daemonStatus.webIdleTimeoutSec / 60)} 分钟休眠
+              </span>
+            ) : daemonStatus.serviceInstalled ? (
+              <span className="rounded-full border border-amber-200 bg-amber-50 px-2.5 py-0.5 text-xs font-medium text-amber-800">
+                守护服务已配置自启（未运行）
+              </span>
+            ) : null}
           </div>
           <p className="mt-1 text-sm text-slate-600">
             实时掌握新闻抓取池、当期视频生成进度、待审稿件与每日定时调度状态。
@@ -95,7 +107,7 @@ export default async function DashboardPage() {
             <Newspaper className="h-4 w-4 text-slate-500" aria-hidden="true" />
             <span>浏览爬取新闻</span>
           </Link>
-          <StartRunModalButton bgmFiles={bgmFiles} label="手动启动一期任务" />
+          <StartRunModalButton previousHostId={previousHostId} label="手动启动一期任务" />
         </div>
       </div>
 
@@ -441,22 +453,60 @@ export default async function DashboardPage() {
             </div>
 
             <div className="mt-4 space-y-2">
-              <div className="text-[11px] font-medium text-slate-500">AI 各阶段模型路由</div>
-              <div className="divide-y divide-slate-100 rounded-xl border border-slate-100 bg-slate-50/60">
-                {Object.entries(settings.ai.stages).map(([stageKey, stageCfg]) => (
-                  <div
-                    key={stageKey}
-                    className="flex items-center justify-between gap-2 px-3 py-2 text-xs"
-                  >
-                    <span className="font-medium text-slate-700">{stageKey}</span>
-                    <span
-                      className="truncate font-mono text-[11px] text-slate-600"
-                      title={`${stageCfg.cli} / ${stageCfg.model}`}
-                    >
-                      {stageCfg.cli} / {stageCfg.model}
-                    </span>
+              <div className="flex items-center justify-between text-[11px] font-medium text-slate-500">
+                <span>AI 渠道优先级集合与各阶段路由</span>
+                <span>实时生效</span>
+              </div>
+              {(settings.ai.channels?.length ?? 0) > 0 && (
+                <div className="rounded-xl border border-slate-100 bg-slate-50/80 px-3 py-2 text-[11px] text-slate-600">
+                  <div className="font-medium text-slate-700">全局兜底顺序：</div>
+                  <div className="mt-1 flex flex-wrap gap-1.5">
+                    {settings.ai.channels.map((ch, idx) => {
+                      const occurrence = settings.ai.channels
+                        .slice(0, idx)
+                        .filter((prev) => prev.cli === ch.cli && prev.model === ch.model).length;
+                      return (
+                        <span
+                          key={`${ch.cli}:${ch.model}:${occurrence}`}
+                          className={`rounded-md border px-2 py-0.5 font-mono text-[11px] ${
+                            ch.enabled === false
+                              ? 'border-slate-200 bg-slate-100 text-slate-400 line-through'
+                              : 'border-slate-200 bg-white text-slate-700'
+                          }`}
+                        >
+                          {idx + 1}. {ch.cli}/{ch.model}（重试{ch.retries}次）
+                        </span>
+                      );
+                    })}
                   </div>
-                ))}
+                </div>
+              )}
+              <div className="divide-y divide-slate-100 rounded-xl border border-slate-100 bg-slate-50/60">
+                {Object.entries(settings.ai.stages).map(([stageKey, stageCfg]) => {
+                  const primaryChannel =
+                    stageCfg.mode === 'pool'
+                      ? (settings.ai.channels?.find((ch) => ch.enabled !== false) ?? stageCfg)
+                      : stageCfg;
+                  return (
+                    <div
+                      key={stageKey}
+                      className="flex items-center justify-between gap-2 px-3 py-2 text-xs"
+                    >
+                      <span className="font-medium text-slate-700">
+                        {stageKey}
+                        <span className="ml-1.5 text-[10px] font-normal text-slate-400">
+                          {stageCfg.mode === 'custom' ? '单独主渠道' : '渠道池'}
+                        </span>
+                      </span>
+                      <span
+                        className="truncate font-mono text-[11px] text-slate-600"
+                        title={`${primaryChannel.cli} / ${primaryChannel.model}`}
+                      >
+                        {primaryChannel.cli} / {primaryChannel.model}
+                      </span>
+                    </div>
+                  );
+                })}
               </div>
             </div>
           </div>

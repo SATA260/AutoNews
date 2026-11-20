@@ -3,6 +3,7 @@ import path from 'node:path';
 import {
   type EventRecord,
   type HostMascotId,
+  HostMascotIdSchema,
   type MascotMood,
   type PersonaProfile,
   PersonasFileSchema,
@@ -39,40 +40,86 @@ export async function loadPersonas(ctx: CoreContext): Promise<PersonaProfile[]> 
   }
 }
 
-/** 根据事件阵营与话题计算主播，并在同分时优先避开上一期。 */
+/** 查询当前任务之前最近一次有效任务所使用的主播标识，已放弃或跳过的任务不参与避重 */
+export function findPreviousHostId(
+  ctx: CoreContext,
+  excludeRunId: string,
+  notAfterIso?: string,
+): HostMascotId | null {
+  const row = ctx.db
+    .prepare(
+      `SELECT host_id FROM runs
+       WHERE id != ?
+         AND host_id IS NOT NULL
+         AND status NOT IN ('abandoned', 'skipped')
+         AND (? IS NULL OR created_at <= ?)
+       ORDER BY created_at DESC
+       LIMIT 1`,
+    )
+    .get(excludeRunId, notAfterIso ?? null, notAfterIso ?? null) as { host_id: string } | undefined;
+  const parsed = HostMascotIdSchema.safeParse(row?.host_id);
+  return parsed.success ? parsed.data : null;
+}
+
+/** 将本期允许自动选用的主播形象整理为提示词说明文本，并明确标注须避开的上一期形象 */
+export function formatEligibleHostCandidatesForPrompt(
+  personas: readonly PersonaProfile[],
+  previousHostId: HostMascotId | null,
+): string {
+  const eligible =
+    previousHostId && personas.length > 1
+      ? personas.filter((persona) => persona.id !== previousHostId)
+      : personas;
+  if (eligible.length === 0) return '';
+  const excludedNote = previousHostId
+    ? `上一期已使用主播形象「${previousHostId}」，本期自动选择严禁再次选用「${previousHostId}」。`
+    : '当前无上一期连续避重限制。';
+  const profiles = eligible.map((persona) => ({
+    id: persona.id,
+    displayName: persona.displayName,
+    affiliation: persona.affiliation,
+    coreTrait: persona.coreTrait,
+    campKeywords: persona.campKeywords,
+    topicKeywords: persona.topicKeywords,
+  }));
+  return `## 本期主播形象选择要求\n请根据你最终选中的核心新闻主题与阵营分布，从下方可选主播中挑选最适合播报本期的形象填入 \`hostId\`，并用一句话在 \`hostReason\` 中说明选择理由。\n${excludedNote}\n可选主播形象（\`hostId\` 仅可取自下列 \`id\`）：\n${JSON.stringify(profiles, null, 2)}`;
+}
+
+/** 根据事件阵营、话题及正文线索从可用主播中匹配最契合的形象，存在备选时严格避开上一期主播。 */
 export function chooseHost(
   events: readonly EventRecord[],
   personas: readonly PersonaProfile[],
   previous: string | null,
+  extraTextByEventId?: ReadonlyMap<string, string>,
 ): HostMascotId | null {
   if (!events.length || !personas.length) return null;
-  const candidates = personas.map((persona) => {
+  const eligiblePersonas =
+    previous && personas.length > 1
+      ? personas.filter((persona) => persona.id !== previous)
+      : personas;
+  const candidates = eligiblePersonas.map((persona) => {
     let camp = 0;
     let topic = 0;
     events.forEach((event, index) => {
-      const text = `${event.entity ?? ''} ${event.title}`.toLowerCase();
-      if (persona.campKeywords.some((keyword) => text.includes(keyword.toLowerCase())))
-        camp += index === 0 ? 2 : 1;
-      if (
-        persona.topicKeywords.some((keyword) =>
-          `${text} ${event.category ?? ''}`.toLowerCase().includes(keyword.toLowerCase()),
-        )
-      )
-        topic += index === 0 ? 2 : 1;
+      const weight = index === 0 ? 2 : 1;
+      const extraText = extraTextByEventId?.get(event.id) ?? '';
+      const campText = `${event.entity ?? ''} ${event.title} ${extraText}`.toLowerCase();
+      if (persona.campKeywords.some((keyword) => campText.includes(keyword.toLowerCase()))) {
+        camp += weight;
+      }
+      const topicText =
+        `${event.entity ?? ''} ${event.title} ${event.category ?? ''} ${event.reason ?? ''} ${extraText}`.toLowerCase();
+      if (persona.topicKeywords.some((keyword) => topicText.includes(keyword.toLowerCase()))) {
+        topic += weight;
+      }
     });
     return { persona, camp, topic };
   });
   const highestCamp = Math.max(...candidates.map((candidate) => candidate.camp));
-  const leaders = candidates.filter((candidate) => candidate.camp === highestCamp);
-  if (highestCamp > 0 && leaders.length === 1) return leaders[0]?.persona.id ?? null;
-  const pool = highestCamp > 0 ? leaders : candidates;
-  const bestTopic = Math.max(...pool.map((candidate) => candidate.topic));
-  const alternative = pool.filter(
-    (candidate) => candidate.persona.id !== previous && candidate.topic >= bestTopic - 1,
-  );
-  const eligible = alternative.length ? alternative : pool;
-  eligible.sort((a, b) => b.topic - a.topic);
-  return eligible[0]?.persona.id ?? null;
+  const pool =
+    highestCamp > 0 ? candidates.filter((candidate) => candidate.camp === highestCamp) : candidates;
+  pool.sort((a, b) => b.topic - a.topic || b.camp - a.camp);
+  return pool[0]?.persona.id ?? null;
 }
 
 /** 读取本期主播的人设资料，供写稿与编排使用。 */

@@ -50,7 +50,7 @@ export function BatchRetryItemsPanel({
     items.filter((it) => it.status === 'dropped').map((it) => it.id),
   );
   const [fromStep, setFromStep] = useState<'summarize' | 'polish' | 'factcheck'>('polish');
-  const [useLatestConfig, setUseLatestConfig] = useState(false);
+  const [useLatestConfig, setUseLatestConfig] = useState(true);
   const [feedback, setFeedback] = useState<{ ok: boolean; text: string } | null>(null);
   const [isPending, startTransition] = useTransition();
 
@@ -71,9 +71,7 @@ export function BatchRetryItemsPanel({
       fd.append('itemIds', id);
     }
     fd.set('fromStep', fromStep);
-    if (useLatestConfig) {
-      fd.set('useLatestConfig', 'true');
-    }
+    fd.set('useLatestConfig', useLatestConfig ? 'true' : 'false');
     startTransition(async () => {
       const res = await retryItemsAction(fd);
       setFeedback({
@@ -175,7 +173,7 @@ export function BatchRetryItemsPanel({
             onChange={(e) => setUseLatestConfig(e.target.checked)}
             className="h-3.5 w-3.5 rounded border-slate-300"
           />
-          用最新配置
+          按最新配置执行
         </label>
         <button
           type="submit"
@@ -198,7 +196,7 @@ export function BatchRetryItemsPanel({
 export function RetryItemForm({ runId, itemId }: { runId: string; itemId: string }) {
   const router = useRouter();
   const [fromStep, setFromStep] = useState<'summarize' | 'polish' | 'factcheck'>('polish');
-  const [useLatestConfig, setUseLatestConfig] = useState(false);
+  const [useLatestConfig, setUseLatestConfig] = useState(true);
   const [feedback, setFeedback] = useState<{ ok: boolean; text: string } | null>(null);
   const [isPending, startTransition] = useTransition();
 
@@ -209,9 +207,7 @@ export function RetryItemForm({ runId, itemId }: { runId: string; itemId: string
     fd.set('runId', runId);
     fd.set('itemId', itemId);
     fd.set('fromStep', fromStep);
-    if (useLatestConfig) {
-      fd.set('useLatestConfig', 'true');
-    }
+    fd.set('useLatestConfig', useLatestConfig ? 'true' : 'false');
     startTransition(async () => {
       const res = await retryItemAction(fd);
       setFeedback({

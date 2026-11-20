@@ -22,4 +22,15 @@ export default defineConfig([
     outExtension: () => ({ js: '.mjs' }),
     external: ['node:sqlite', 'jsdom', 'playwright'],
   },
+  {
+    entry: { daemon: 'src/daemon/main.ts' },
+    format: ['esm'],
+    platform: 'node',
+    removeNodeProtocol: false,
+    dts: false,
+    clean: false,
+    sourcemap: true,
+    outExtension: () => ({ js: '.mjs' }),
+    external: ['node:sqlite', 'jsdom', 'playwright'],
+  },
 ]);

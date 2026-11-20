@@ -26,6 +26,7 @@
     "test:e2e": "vitest run --project core",
     "test:live": "AIDAILY_LIVE=1 vitest run --project core",
     "aidaily": "node apps/cli/dist/index.js",
+    "global:install": "npm run aidaily -- global install",
     "web": "npm run start -w apps/web"
   },
   "devDependencies": {

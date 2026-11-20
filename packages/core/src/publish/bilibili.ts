@@ -154,6 +154,79 @@ async function sleepAbortable(ms: number, signal?: AbortSignal): Promise<void> {
   });
 }
 
+/** 判断当前进程是否处于自动化测试运行环境，避免测试误触真实投稿。 */
+function isTestRuntimeEnvironment(): boolean {
+  return Boolean(
+    process.env.VITEST || process.env.VITEST_WORKER_ID || process.env.NODE_ENV === 'test',
+  );
+}
+
+/** 解析目标路径的真实绝对位置；若末级文件尚未创建，则沿已存在的上级目录解析符号链接。 */
+function resolveCanonicalPath(targetPath: string): string {
+  const abs = path.resolve(targetPath);
+  if (fsSync.existsSync(abs)) {
+    try {
+      return fsSync.realpathSync(abs);
+    } catch {
+      return abs;
+    }
+  }
+  const parent = path.dirname(abs);
+  if (parent === abs) {
+    return abs;
+  }
+  return path.join(resolveCanonicalPath(parent), path.basename(abs));
+}
+
+/** 判断目标路径是否严格位于指定基目录内部。 */
+function isPathWithinDir(targetPath: string, baseDir: string): boolean {
+  const candidate = resolveCanonicalPath(targetPath);
+  const root = resolveCanonicalPath(baseDir);
+  const rel = path.relative(root, candidate);
+  return rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel));
+}
+
+/**
+ * 在测试环境中强制校验投稿工具和登录凭据路径：
+ * - 投稿命令必须解析到测试桩脚本或临时目录内的模拟脚本，禁止调用真实 `biliup`；
+ * - 登录凭据文件必须位于测试工作区或系统临时目录内，禁止读取宿主家目录凭据。
+ */
+export function assertSafeUploadTargetInTestEnv(opts: {
+  rootDir: string;
+  configuredBin: string;
+  cookieFile: string;
+}): void {
+  if (!isTestRuntimeEnvironment()) {
+    return;
+  }
+
+  const resolvedBin = resolveBiliupExecutable(opts.configuredBin);
+  const canonicalBin = resolveCanonicalPath(resolvedBin);
+  const binName = path.basename(canonicalBin).toLowerCase();
+  const isMockScript =
+    path.isAbsolute(resolvedBin) &&
+    binName !== 'biliup' &&
+    binName !== 'biliup.exe' &&
+    (/[\\/]test[\\/]fixtures[\\/]/.test(canonicalBin) ||
+      isPathWithinDir(canonicalBin, os.tmpdir()));
+
+  if (!isMockScript) {
+    throw new PipelineError(
+      'publish_failed',
+      `测试环境禁止调用真实投稿工具执行 B 站上传（当前命令: ${opts.configuredBin} -> ${resolvedBin}）`,
+    );
+  }
+
+  const cookieIsolated =
+    isPathWithinDir(opts.cookieFile, opts.rootDir) || isPathWithinDir(opts.cookieFile, os.tmpdir());
+  if (!cookieIsolated) {
+    throw new PipelineError(
+      'publish_failed',
+      `测试环境禁止使用临时目录之外的真实 B 站登录凭据路径: ${opts.cookieFile}`,
+    );
+  }
+}
+
 /** 检查成片是否包含最近保存的画面与音乐设置。 */
 function assertMediaReady(ctx: CoreContext, runId: string): void {
   const row = ctx.db.prepare('SELECT media_dirty FROM runs WHERE id = ?').get(runId) as
@@ -203,6 +276,13 @@ export async function assertReadyToUpload(opts: {
   const videoFile = path.resolve(ctx.paths.rootDir, draft.videoPath);
   const coverFile = path.resolve(ctx.paths.rootDir, draft.coverPath);
   const cookieFile = resolveBiliCookieFile(ctx.paths.rootDir, settings.publish.bilibili.cookieFile);
+  const configuredBin =
+    settings.clis[settings.publish.bilibili.cli]?.bin ?? settings.publish.bilibili.cli;
+  assertSafeUploadTargetInTestEnv({
+    rootDir: ctx.paths.rootDir,
+    configuredBin,
+    cookieFile,
+  });
 
   await fs.access(videoFile);
   await fs.access(coverFile);
@@ -431,9 +511,13 @@ export async function executeBilibiliUpload(opts: {
         updatedAt: ctx.now().toISOString(),
       });
 
-      const resolvedBin = resolveBiliupExecutable(
-        settings.clis[bilibiliCfg.cli]?.bin ?? bilibiliCfg.cli,
-      );
+      const configuredBin = settings.clis[bilibiliCfg.cli]?.bin ?? bilibiliCfg.cli;
+      assertSafeUploadTargetInTestEnv({
+        rootDir: ctx.paths.rootDir,
+        configuredBin,
+        cookieFile: payload.cookieFile,
+      });
+      const resolvedBin = resolveBiliupExecutable(configuredBin);
       const pathEntries = [
         path.dirname(resolvedBin),
         path.join(os.homedir(), '.local', 'bin'),

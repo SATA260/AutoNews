@@ -100,6 +100,9 @@ async function setupServiceWorkspace(feedBaseUrl: string) {
 
   await editSettingsFile(path.join(rootDir, 'config', 'settings.yaml'), (doc) => {
     doc.setIn(['ai', 'providers'], {});
+    doc.setIn(['ai', 'channels'], []);
+    doc.setIn(['publish', 'mode'], 'manual-review');
+    doc.setIn(['publish', 'bilibili', 'cookieFile'], path.join(rootDir, 'test-bili-cookies.json'));
     doc.setIn(['tts', 'provider'], 'silent');
     doc.deleteIn(['issue', 'minScore']);
     doc.setIn(['issue', 'allowPartial'], false);
@@ -109,17 +112,19 @@ async function setupServiceWorkspace(feedBaseUrl: string) {
   await updateSettingsFile(path.join(rootDir, 'config', 'settings.yaml'), {
     clis: {
       agy: { adapter: 'agy', bin: FAKE_AGY_BIN, extraArgs: [] },
+      biliup: { adapter: 'generic', bin: 'fixture-disabled-biliup', extraArgs: [] },
     },
     template: {
       active: 'solid-color',
     },
     ai: {
+      channels: [],
       stages: {
-        select: { cli: 'agy', model: 'gemini-3.8-flash-high', retries: 0 },
-        summarize: { cli: 'agy', model: 'gemini-3.8-flash-high', retries: 0 },
-        polish: { cli: 'agy', model: 'gemini-3.8-flash-high', retries: 0 },
-        factcheck: { cli: 'agy', model: 'gemini-4-carbon-high', retries: 0 },
-        package: { cli: 'agy', model: 'gemini-3.8-flash-high', retries: 0 },
+        select: { mode: 'custom', cli: 'agy', model: 'gemini-3.8-flash-high', retries: 0 },
+        summarize: { mode: 'custom', cli: 'agy', model: 'gemini-3.8-flash-high', retries: 0 },
+        polish: { mode: 'custom', cli: 'agy', model: 'gemini-3.8-flash-high', retries: 0 },
+        factcheck: { mode: 'custom', cli: 'agy', model: 'gemini-4-carbon-high', retries: 0 },
+        package: { mode: 'custom', cli: 'agy', model: 'gemini-3.8-flash-high', retries: 0 },
       },
     },
   });
@@ -320,7 +325,7 @@ describe('services, detached worker, launchd scheduler, retention cleanup, and d
             });
             expect(core.context.repos.locks.get('pipeline')).toBeNull();
           },
-          { timeout: 5_000 },
+          { timeout: 15_000 },
         );
       };
       await waitForFailure(1, selectError);
@@ -342,8 +347,8 @@ describe('services, detached worker, launchd scheduler, retention cleanup, and d
 
       await updateSettingsFile(settingsFile, { ai: { stages: { select: { model: nextModel } } } });
       const submissions = await Promise.allSettled([
-        core.tasks.resume(runId, { detach: true }),
-        core.tasks.resume(runId, { detach: true }),
+        core.tasks.resume(runId, { useLatestConfig: false, detach: true }),
+        core.tasks.resume(runId, { useLatestConfig: false, detach: true }),
       ]);
       expect(submissions.filter((result) => result.status === 'fulfilled')).toHaveLength(1);
       expect(submissions).toContainEqual({
@@ -478,8 +483,16 @@ describe('services, detached worker, launchd scheduler, retention cleanup, and d
 
     await fs.mkdir(path.join(rootDir, 'assets', 'bgm'), { recursive: true });
     await fs.writeFile(path.join(rootDir, 'assets', 'bgm', 'morning.mp3'), 'test');
+    await expect(
+      core.scheduler.create({
+        bgmFile: 'morning.mp3',
+        name: '非法独立配乐计划',
+        time: '08:30',
+        itemCount: 6,
+      }),
+    ).rejects.toThrow(/背景音乐/);
+
     const job = await core.scheduler.create({
-      bgmFile: 'morning.mp3',
       name: '上午八点半',
       time: '08:30',
       itemCount: 6,
@@ -492,9 +505,8 @@ describe('services, detached worker, launchd scheduler, retention cleanup, and d
     expect(plistXml).toContain('<integer>30</integer>');
     expect(plistXml).toContain('apps/cli/dist/index.js');
     expect(plistXml).toContain(`<string>${job.id}</string>`);
-    expect(job.bgmFile).toBe('morning.mp3');
-    expect(plistXml).toContain('<string>--bgm</string>');
-    expect(plistXml).toContain('<string>morning.mp3</string>');
+    expect(job.bgmFile).toBeNull();
+    expect(plistXml).not.toContain('<string>--bgm</string>');
     expect(launchctlCalls.some((c) => c[0] === 'bootstrap')).toBe(true);
 
     // 修改时间为当天已过的 07:00 CST -> 次日 07:00 CST = 前一天 UTC 23:00

@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { HostMascotIdSchema } from './persona.js';
 
 /** 原文依据条目：把总结中的某句事实陈述对应到原始文章和原文逐字摘录 */
 export const EvidenceSchema = z.object({
@@ -47,6 +48,8 @@ export type SelectedEventCandidate = z.infer<typeof SelectedEventCandidateSchema
 /** 新闻选题与合并阶段的完整输出结构 */
 export const SelectionResultSchema = z.object({
   events: z.array(SelectedEventCandidateSchema),
+  hostId: HostMascotIdSchema.optional(),
+  hostReason: z.string().min(1).optional(),
 });
 /** 新闻选题输出结果类型 */
 export type SelectionResult = z.infer<typeof SelectionResultSchema>;

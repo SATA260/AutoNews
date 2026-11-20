@@ -11,9 +11,10 @@ import type {
 import pLimit from 'p-limit';
 import type { CoreContext } from '../context.js';
 import { PipelineError } from '../errors.js';
+import { resolvePersonaBgmFile } from '../media/bgm.js';
 import { readJsonOrNull, writeJsonAtomic } from '../storage/files.js';
 import { normalizeStoredPolishedItem } from '../storage/repos/editorial-repo.js';
-import { getRunPersona } from './personas.js';
+import { chooseHost, findPreviousHostId, getRunPersona, loadPersonas } from './personas.js';
 import { type PrecheckResult, precheckPolishedItem } from './prechecks.js';
 import { runRefillRound } from './refill.js';
 import { loadEventArticles, summarizeEventItem } from './s3-summarize.js';
@@ -673,6 +674,43 @@ function sortPendingItems(
     });
 }
 
+/** 开写前检查本期主播形象与专属背景音乐，非人工指定时确保不缺失且不与上一期连续重复 */
+async function ensureRunHostAndBgmBeforeEdit(
+  ctx: CoreContext,
+  runId: string,
+  runCreatedAt: string,
+  events: readonly EventRecord[],
+  allItems: readonly RunItemRecord[],
+): Promise<void> {
+  const personas = await loadPersonas(ctx);
+  if (personas.length === 0) return;
+  const hostRow = ctx.db
+    .prepare('SELECT host_id, host_manual, bgm_file FROM runs WHERE id = ?')
+    .get(runId) as
+    | { host_id: string | null; host_manual: number; bgm_file: string | null }
+    | undefined;
+  const previousHostId = findPreviousHostId(ctx, runId, runCreatedAt);
+  const hasStartedAnyItem = allItems.some((item) => item.status !== 'queued');
+  let nextHostId = hostRow?.host_id ?? null;
+  if (
+    !hostRow?.host_manual &&
+    (!nextHostId || (personas.length > 1 && nextHostId === previousHostId && !hasStartedAnyItem))
+  ) {
+    const primary = events.filter((ev) => ev.role === 'primary');
+    const reselected = chooseHost(primary.length > 0 ? primary : events, personas, previousHostId);
+    if (reselected) {
+      nextHostId = reselected;
+      ctx.db.prepare('UPDATE runs SET host_id = ? WHERE id = ?').run(nextHostId, runId);
+    }
+  }
+  if (nextHostId) {
+    const boundBgm = await resolvePersonaBgmFile(ctx, nextHostId, personas);
+    if (boundBgm && hostRow?.bgm_file !== boundBgm) {
+      ctx.db.prepare('UPDATE runs SET bgm_file = ? WHERE id = ?').run(boundBgm, runId);
+    }
+  }
+}
+
 /**
  * 执行新闻编辑、润色、预检与核查并发协调器：
  * 按配置并发度推进新闻条目；若某条被剔除自动拉取替补事件；若备选池耗尽仍不够目标条数则触发补充抓稿；
@@ -705,6 +743,8 @@ export async function runEditStage(
   const events = ctx.repos.events.listByRun(runId);
   const eventById = new Map(events.map((e) => [e.id, e]));
   const allItems = ctx.repos.runItems.listByRun(runId);
+
+  await ensureRunHostAndBgmBeforeEdit(ctx, runId, run.createdAt, events, allItems);
 
   const usedArticleIds = new Set<string>();
   for (const ev of events) {
@@ -943,6 +983,8 @@ export async function retryMultipleEditItems(opts: {
   const events = ctx.repos.events.listByRun(runId);
   const eventById = new Map(events.map((e) => [e.id, e]));
   const allItems = ctx.repos.runItems.listByRun(runId);
+
+  await ensureRunHostAndBgmBeforeEdit(ctx, runId, run.createdAt, events, allItems);
   const itemById = new Map(allItems.map((i) => [i.id, i]));
 
   const targets: Array<{ item: RunItemRecord; event: EventRecord; maxVersionId: number }> = [];

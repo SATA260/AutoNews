@@ -172,7 +172,14 @@ describe('Company logos registry, HTTP mount & order clustering', () => {
       path.join(rootDir, 'config', 'personas.yaml'),
     );
     await updateSettingsFile(path.join(rootDir, 'config', 'settings.yaml'), {
-      clis: { agy: { adapter: 'agy', bin: FAKE_AGY_BIN, extraArgs: [] } },
+      clis: {
+        agy: { adapter: 'agy', bin: FAKE_AGY_BIN, extraArgs: [] },
+        biliup: { adapter: 'generic', bin: 'fixture-disabled-biliup', extraArgs: [] },
+      },
+      publish: {
+        mode: 'manual-review',
+        bilibili: { cookieFile: path.join(rootDir, 'test-bili-cookies.json') },
+      },
       ai: {
         stages: {
           select: { cli: 'agy', model: 'gemini-3.8-flash-high', retries: 0 },

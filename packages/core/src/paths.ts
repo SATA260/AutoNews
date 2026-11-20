@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 /** 项目中各类配置文件、数据库与任务运行产物的标准路径集合 */
 export interface RepoPaths {
@@ -22,8 +23,8 @@ export interface RepoPaths {
 
 const SAFE_ID_PATTERN = /^[a-zA-Z0-9._-]+$/;
 
-/** 从指定目录向上逐级查找包含 `config/settings.yaml` 的项目根目录 */
-export function findRepoRoot(startDir: string = process.cwd()): string {
+/** 从指定目录向上逐级尝试查找包含 `config/settings.yaml` 的项目根目录，找不到返回 null */
+export function tryFindRepoRoot(startDir: string): string | null {
   let current = path.resolve(startDir);
   while (true) {
     const candidate = path.join(current, 'config', 'settings.yaml');
@@ -32,10 +33,58 @@ export function findRepoRoot(startDir: string = process.cwd()): string {
     }
     const parent = path.dirname(current);
     if (parent === current) {
-      throw new Error(`未找到包含 config/settings.yaml 的项目根目录（起始目录: ${startDir}）`);
+      return null;
     }
     current = parent;
   }
+}
+
+/** 从指定目录向上逐级查找包含 `config/settings.yaml` 的项目根目录 */
+export function findRepoRoot(startDir: string = process.cwd()): string {
+  const found = tryFindRepoRoot(startDir);
+  if (!found) {
+    throw new Error(`未找到包含 config/settings.yaml 的项目根目录（起始目录: ${startDir}）`);
+  }
+  return found;
+}
+
+/**
+ * 解析当前默认使用的项目根目录：
+ * 优先读取 `AIDAILY_ROOT` 环境变量，其次从当前工作目录向上查找，
+ * 若从仓库外全局命令启动，则按代码实际安装路径回溯定位项目根目录。
+ */
+export function resolveDefaultRepoRoot(opts?: {
+  cwd?: string;
+  envRoot?: string;
+  moduleUrl?: string;
+}): string {
+  const envRoot = (opts?.envRoot ?? process.env.AIDAILY_ROOT)?.trim();
+  if (envRoot) {
+    const resolvedEnv = path.resolve(envRoot);
+    if (fs.existsSync(path.join(resolvedEnv, 'config', 'settings.yaml'))) {
+      return resolvedEnv;
+    }
+    throw new Error(`环境变量 AIDAILY_ROOT 指向的目录缺少 config/settings.yaml: ${resolvedEnv}`);
+  }
+
+  const cwd = opts?.cwd ?? process.cwd();
+  const fromCwd = tryFindRepoRoot(cwd);
+  if (fromCwd) {
+    return fromCwd;
+  }
+
+  const targetUrl = opts?.moduleUrl ?? import.meta.url;
+  try {
+    const modulePath = fs.realpathSync(fileURLToPath(targetUrl));
+    const fromInstall = tryFindRepoRoot(path.dirname(modulePath));
+    if (fromInstall) {
+      return fromInstall;
+    }
+  } catch {
+    // 忽略虚拟 URL 或无法解析真实路径的情况，走统一错误提示
+  }
+
+  throw new Error(`未找到包含 config/settings.yaml 的项目根目录（起始目录: ${cwd}）`);
 }
 
 /** 根据项目根目录拼装配置、数据库、缓存与任务目录的完整路径映射 */

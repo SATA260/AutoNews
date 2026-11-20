@@ -354,13 +354,12 @@ export default async function RunDetailPage({
             }
 
             const canAdjustMedia = MEDIA_ADJUSTABLE_RUN_STATUSES.includes(detail.status);
-            const [narrationSections, candidatesByItemId, bgmFiles] = canAdjustMedia
+            const [narrationSections, candidatesByItemId] = canAdjustMedia
               ? await Promise.all([
                   core.tasks.getNarrationSections(detail.id).catch(() => []),
                   core.tasks.getRunMediaCandidates(detail.id).catch(() => ({})),
-                  core.tasks.listBgm(),
                 ])
-              : [[], {}, []];
+              : [[], {}];
             const renderStage = detail.stages.find((stage) => stage.stage === 'render');
             const renderStale = renderStage?.status === 'stale';
 
@@ -409,7 +408,6 @@ export default async function RunDetailPage({
                           item.customImageCaption ?? item.finalJson?.imageCaption ?? null,
                       }))}
                     candidatesByItemId={candidatesByItemId}
-                    bgmFiles={bgmFiles}
                     bgmFile={detail.bgmFile}
                   />
                 ) : null}

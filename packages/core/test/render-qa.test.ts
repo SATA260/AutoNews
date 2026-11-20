@@ -69,6 +69,9 @@ async function setupRenderWorkspace(templateName: 'solid-color' | 'daily-deck') 
   const settingsFile = path.join(rootDir, 'config', 'settings.yaml');
   await editSettingsFile(settingsFile, (doc) => {
     doc.setIn(['ai', 'providers'], {});
+    doc.setIn(['ai', 'channels'], []);
+    doc.setIn(['publish', 'mode'], 'manual-review');
+    doc.setIn(['publish', 'bilibili', 'cookieFile'], path.join(rootDir, 'test-bili-cookies.json'));
     doc.setIn(['tts', 'provider'], 'silent');
     doc.deleteIn(['issue', 'minScore']);
     doc.setIn(['issue', 'allowPartial'], false);
@@ -78,6 +81,7 @@ async function setupRenderWorkspace(templateName: 'solid-color' | 'daily-deck') 
   await updateSettingsFile(settingsFile, {
     clis: {
       agy: { adapter: 'agy', bin: FAKE_AGY_BIN, extraArgs: [] },
+      biliup: { adapter: 'generic', bin: 'fixture-disabled-biliup', extraArgs: [] },
     },
     template: {
       active: templateName,
@@ -93,12 +97,13 @@ async function setupRenderWorkspace(templateName: 'solid-color' | 'daily-deck') 
       },
     },
     ai: {
+      channels: [],
       stages: {
-        select: { cli: 'agy', model: 'gemini-3.8-flash-high', retries: 0 },
-        summarize: { cli: 'agy', model: 'gemini-3.8-flash-high', retries: 0 },
-        polish: { cli: 'agy', model: 'gemini-3.8-flash-high', retries: 0 },
-        factcheck: { cli: 'agy', model: 'gemini-4-carbon-high', retries: 0 },
-        package: { cli: 'agy', model: 'gemini-3.8-flash-high', retries: 0 },
+        select: { mode: 'custom', cli: 'agy', model: 'gemini-3.8-flash-high', retries: 0 },
+        summarize: { mode: 'custom', cli: 'agy', model: 'gemini-3.8-flash-high', retries: 0 },
+        polish: { mode: 'custom', cli: 'agy', model: 'gemini-3.8-flash-high', retries: 0 },
+        factcheck: { mode: 'custom', cli: 'agy', model: 'gemini-4-carbon-high', retries: 0 },
+        package: { mode: 'custom', cli: 'agy', model: 'gemini-3.8-flash-high', retries: 0 },
       },
     },
   });
@@ -410,6 +415,7 @@ describe('template rendering, Playwright capture, ffmpeg composition, and QA', (
 
     const core = await createCore({
       rootDir,
+      now: () => new Date('2026-11-16T10:00:00.000Z'),
       fetchImpl: makeSimpleFetch([
         {
           slug: 'n1',
@@ -759,6 +765,15 @@ describe('template rendering, Playwright capture, ffmpeg composition, and QA', (
       path.join(REPO_ROOT, 'config', 'sources.yaml'),
       path.join(tmpDir, 'config', 'sources.yaml'),
     );
+    await updateSettingsFile(path.join(tmpDir, 'config', 'settings.yaml'), {
+      clis: {
+        biliup: { adapter: 'generic', bin: 'fixture-disabled-biliup', extraArgs: [] },
+      },
+      publish: {
+        mode: 'manual-review',
+        bilibili: { cookieFile: path.join(tmpDir, 'test-bili-cookies.json') },
+      },
+    });
 
     const core = await createCore({ rootDir: tmpDir });
     const png1x1 = Buffer.from(

@@ -1,6 +1,6 @@
 'use client';
 
-import type { ScheduleCutoffMode, ScheduleJob } from '@aidaily/contracts';
+import type { DaemonStatus, ScheduleCutoffMode, ScheduleJob } from '@aidaily/contracts';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { useState, useTransition } from 'react';
@@ -27,11 +27,12 @@ function formatCutoffSummary(job: ScheduleJob): string {
 export function ScheduleManager({
   jobs,
   timezone,
-  bgmFiles,
+  daemonStatus,
 }: {
   jobs: ScheduleJob[];
   timezone: string;
-  bgmFiles: string[];
+  bgmFiles?: string[];
+  daemonStatus?: DaemonStatus;
 }) {
   const router = useRouter();
   const [modalOpen, setModalOpen] = useState(false);
@@ -95,8 +96,9 @@ export function ScheduleManager({
         <div>
           <h1 className="text-2xl font-bold tracking-tight text-slate-900">定时任务管理</h1>
           <p className="mt-1 text-sm text-slate-600">
-            通过 macOS launchd
-            每日按指定时间自动运行一期生产流程；每个计划需显式指定每日触发时间（HH:mm）与新闻条数，不设默认值。
+            {daemonStatus?.serviceInstalled || daemonStatus?.running
+              ? '当前由后台守护进程统一在指定时间拉起独立子进程执行生产流程（执行完即释放内存）；每个计划需显式指定每日触发时间（HH:mm）与新闻条数，不设默认值。'
+              : '通过 macOS launchd 每日按指定时间自动运行一期生产流程；每个计划需显式指定每日触发时间（HH:mm）与新闻条数，不设默认值。'}
           </p>
         </div>
 
@@ -107,7 +109,9 @@ export function ScheduleManager({
             onClick={() => handleAction(() => syncSchedulesAction())}
             className="rounded-lg border border-slate-300 bg-white px-3.5 py-2 text-xs font-medium text-slate-700 shadow-xs transition hover:bg-slate-50 disabled:opacity-50"
           >
-            全量重同步 launchd
+            {daemonStatus?.serviceInstalled || daemonStatus?.running
+              ? '通知守护进程立即刷新'
+              : '全量重同步 launchd'}
           </button>
           <button
             type="button"
@@ -125,6 +129,34 @@ export function ScheduleManager({
           </button>
         </div>
       </div>
+
+      {(daemonStatus?.running || daemonStatus?.serviceInstalled) && (
+        <div className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-sky-200/80 bg-sky-50/70 px-4 py-2.5 text-xs text-slate-700">
+          <div className="flex flex-wrap items-center gap-2">
+            <span
+              className={`h-2 w-2 rounded-full ${
+                daemonStatus.running ? 'bg-emerald-500' : 'bg-amber-500'
+              }`}
+            />
+            <span className="font-medium text-slate-900">
+              {daemonStatus.running
+                ? `守护进程运行中（PID ${daemonStatus.pid ?? '-'}）`
+                : '守护服务已配置开机自启（当前未运行，可通过 aidaily daemon start 启动）'}
+            </span>
+            <span className="text-slate-500">·</span>
+            <span>
+              {daemonStatus.webEnabled
+                ? `网页控制台闲置 ${Math.round(daemonStatus.webIdleTimeoutSec / 60)} 分钟自动休眠释放内存`
+                : '仅调度模式'}
+            </span>
+          </div>
+          {daemonStatus.globalCli.installed && (
+            <span className="rounded-md bg-white/90 px-2 py-0.5 font-mono text-[11px] text-slate-600 ring-1 ring-slate-200/80">
+              {daemonStatus.globalCli.binPath}
+            </span>
+          )}
+        </div>
+      )}
 
       {feedback && (
         <div
@@ -185,7 +217,11 @@ export function ScheduleManager({
                           job.installed ? 'bg-sky-100 text-sky-800' : 'bg-slate-100 text-slate-500'
                         }`}
                       >
-                        {job.installed ? 'launchd 已挂载' : '未挂载'}
+                        {job.installed
+                          ? daemonStatus?.serviceInstalled || daemonStatus?.running
+                            ? '守护进程托管'
+                            : 'launchd 已挂载'
+                          : '未挂载'}
                       </span>
                     </div>
                   </td>
@@ -353,26 +389,10 @@ export function ScheduleManager({
                   </div>
                 )}
               </div>
-              <div>
-                <label
-                  htmlFor="create-sched-bgm"
-                  className="block text-xs font-medium text-slate-700"
-                >
-                  背景音乐
-                </label>
-                <select
-                  id="create-sched-bgm"
-                  name="bgmFile"
-                  className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm"
-                >
-                  <option value="">每次自动选择</option>
-                  {bgmFiles.map((file) => (
-                    <option key={file} value={file}>
-                      {file}
-                    </option>
-                  ))}
-                </select>
-              </div>
+              <p className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-600">
+                每次触发将由 AI 根据新闻内容自动选定不与上一期重复的 Live2D
+                主播，并自动使用该形象对应的专属背景音乐。
+              </p>
               <input type="hidden" name="enabled" value="true" />
               <div className="flex justify-end gap-2 pt-2">
                 <button
@@ -489,27 +509,10 @@ export function ScheduleManager({
                   </div>
                 )}
               </div>
-              <div>
-                <label
-                  htmlFor="edit-sched-bgm"
-                  className="block text-xs font-medium text-slate-700"
-                >
-                  背景音乐
-                </label>
-                <select
-                  id="edit-sched-bgm"
-                  name="bgmFile"
-                  defaultValue={editingJob.bgmFile ?? ''}
-                  className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm"
-                >
-                  <option value="">每次自动选择</option>
-                  {bgmFiles.map((file) => (
-                    <option key={file} value={file}>
-                      {file}
-                    </option>
-                  ))}
-                </select>
-              </div>
+              <p className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-600">
+                每次触发时均实时读取当前系统设置，由 AI
+                按新闻内容匹配非连任主播并绑定其专属背景音乐。
+              </p>
               <div className="flex justify-end gap-2 pt-2">
                 <button
                   type="button"

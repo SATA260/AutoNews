@@ -29,6 +29,13 @@ async function setupCore() {
     path.join(rootDir, 'config', 'sources.yaml'),
   );
   await updateSettingsFile(path.join(rootDir, 'config', 'settings.yaml'), {
+    clis: {
+      biliup: { adapter: 'generic', bin: 'fixture-disabled-biliup', extraArgs: [] },
+    },
+    publish: {
+      mode: 'manual-review',
+      bilibili: { cookieFile: path.join(rootDir, 'test-bili-cookies.json') },
+    },
     tts: { provider: 'silent' },
   });
   const core = await createCore({

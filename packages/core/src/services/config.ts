@@ -6,6 +6,7 @@ import {
 } from '../config/model-connections.js';
 import { editSourcesFile, updateSettingsFile, updateSourcesFile } from '../config/writer.js';
 import type { CoreContext } from '../context.js';
+import { notifyDaemonReload } from '../daemon/runtime-state.js';
 
 /** 系统配置与信源清单读写服务接口（支持随时切换模型与更新订阅源） */
 export interface ConfigService {
@@ -13,8 +14,12 @@ export interface ConfigService {
   getSettings(): Settings;
   /** 局部更新全局配置并校验、原子写回配置文件后即时刷新内存快照 */
   updateSettings(patch: DeepPartial<Settings>): Promise<Settings>;
-  /** 保存各模型阶段配置，确保选择的调用方式仍然存在 */
-  updateStageRouting(ai: Pick<Settings['ai'], 'stages' | 'maxConcurrentCalls'>): Promise<void>;
+  /** 保存各模型阶段配置与全局渠道池，确保选择的调用方式仍然存在 */
+  updateStageRouting(
+    ai: Pick<Settings['ai'], 'stages' | 'maxConcurrentCalls'> & {
+      channels?: Settings['ai']['channels'];
+    },
+  ): Promise<void>;
   /** 新增或编辑网页提交的模型 API 连接及密钥 */
   saveModelApiConnection(input: unknown): Promise<void>;
   /** 从当前配置移除未被阶段选用的模型 API 连接 */
@@ -51,15 +56,48 @@ export function createConfigService(ctx: CoreContext): ConfigService {
       return serializeConfigUpdate(async () => {
         await updateSettingsFile(ctx.paths.settingsFile, patch);
         await ctx.reloadConfig();
+        await notifyDaemonReload(ctx.paths);
         return ctx.settings;
       });
     },
 
-    /** 在保存阶段设置时检查最新的调用方式，避免与删除连接的请求冲突 */
+    /** 在保存阶段与渠道池设置时校验全部调用方式是否有效，并同步跟随渠道池阶段的主渠道标识 */
     async updateStageRouting(ai) {
       await serializeConfigUpdate(async () => {
-        await updateSettingsFile(ctx.paths.settingsFile, { ai }, (settings) => {
+        const hasChannelsPatch = ai.channels !== undefined;
+        const effectiveChannels = ai.channels ?? ctx.settings.ai.channels;
+        const primaryEnabled = effectiveChannels.find((ch) => ch.enabled !== false);
+        const normalizedStages = { ...ai.stages };
+        if (primaryEnabled) {
+          for (const key of Object.keys(normalizedStages) as Array<keyof typeof normalizedStages>) {
+            const cfg = normalizedStages[key];
+            if (cfg.mode === 'pool') {
+              normalizedStages[key] = {
+                ...cfg,
+                cli: primaryEnabled.cli,
+                model: primaryEnabled.model,
+                retries: primaryEnabled.retries,
+              };
+            }
+          }
+        }
+        const normalizedAi = {
+          ...ai,
+          stages: normalizedStages,
+        };
+        await updateSettingsFile(ctx.paths.settingsFile, { ai: normalizedAi }, (settings) => {
           const routes = getModelRouteNames(settings);
+          if (hasChannelsPatch) {
+            for (const channel of settings.ai.channels) {
+              if (!routes.includes(channel.cli)) {
+                throw new Error(`AI 渠道池中存在未在配置中定义的调用方式：${channel.cli}`);
+              }
+            }
+          }
+          const hasPoolStage = Object.values(settings.ai.stages).some((s) => s.mode === 'pool');
+          if (hasPoolStage && !settings.ai.channels.some((ch) => ch.enabled !== false)) {
+            throw new Error('存在使用全局渠道池的处理环节，请至少保留一个已启用的 AI 渠道');
+          }
           for (const stage of Object.values(settings.ai.stages)) {
             if (!routes.includes(stage.cli)) {
               throw new Error(`未在配置中定义调用方式：${stage.cli}`);
@@ -67,6 +105,7 @@ export function createConfigService(ctx: CoreContext): ConfigService {
           }
         });
         await ctx.reloadConfig();
+        await notifyDaemonReload(ctx.paths);
       });
     },
 
@@ -75,6 +114,7 @@ export function createConfigService(ctx: CoreContext): ConfigService {
       await serializeConfigUpdate(async () => {
         await saveModelApiConnection(ctx.paths, input);
         await ctx.reloadConfig();
+        await notifyDaemonReload(ctx.paths);
       });
     },
 
@@ -83,6 +123,7 @@ export function createConfigService(ctx: CoreContext): ConfigService {
       await serializeConfigUpdate(async () => {
         await removeModelApiConnection(ctx.paths, name);
         await ctx.reloadConfig();
+        await notifyDaemonReload(ctx.paths);
       });
     },
 
@@ -96,6 +137,7 @@ export function createConfigService(ctx: CoreContext): ConfigService {
       await serializeConfigUpdate(async () => {
         await updateSourcesFile(ctx.paths.sourcesFile, next);
         await ctx.reloadConfig();
+        await notifyDaemonReload(ctx.paths);
       });
     },
 
@@ -110,6 +152,7 @@ export function createConfigService(ctx: CoreContext): ConfigService {
           return current.map((s) => (s.id === sourceId ? { ...s, enabled } : s));
         });
         await ctx.reloadConfig();
+        await notifyDaemonReload(ctx.paths);
         return updated;
       });
     },

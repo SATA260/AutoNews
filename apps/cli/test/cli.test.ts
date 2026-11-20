@@ -126,6 +126,9 @@ async function setupCliWorkspace(feedBaseUrl: string) {
   const tempSettingsPath = path.join(rootDir, 'config', 'settings.yaml');
   await editSettingsFile(tempSettingsPath, (doc) => {
     doc.setIn(['ai', 'providers'], {});
+    doc.setIn(['ai', 'channels'], []);
+    doc.setIn(['publish', 'mode'], 'manual-review');
+    doc.setIn(['publish', 'bilibili', 'cookieFile'], path.join(rootDir, 'test-bili-cookies.json'));
     doc.setIn(['tts', 'provider'], 'silent');
     doc.deleteIn(['issue', 'minScore']);
     doc.setIn(['issue', 'allowPartial'], false);
@@ -141,12 +144,13 @@ async function setupCliWorkspace(feedBaseUrl: string) {
       active: 'solid-color',
     },
     ai: {
+      channels: [],
       stages: {
-        select: { cli: 'agy', model: 'gemini-3.8-flash-high', retries: 0 },
-        summarize: { cli: 'agy', model: 'gemini-3.8-flash-high', retries: 0 },
-        polish: { cli: 'agy', model: 'gemini-3.8-flash-high', retries: 0 },
-        factcheck: { cli: 'agy', model: 'gemini-4-carbon-high', retries: 0 },
-        package: { cli: 'agy', model: 'gemini-3.8-flash-high', retries: 0 },
+        select: { mode: 'custom', cli: 'agy', model: 'gemini-3.8-flash-high', retries: 0 },
+        summarize: { mode: 'custom', cli: 'agy', model: 'gemini-3.8-flash-high', retries: 0 },
+        polish: { mode: 'custom', cli: 'agy', model: 'gemini-3.8-flash-high', retries: 0 },
+        factcheck: { mode: 'custom', cli: 'agy', model: 'gemini-4-carbon-high', retries: 0 },
+        package: { mode: 'custom', cli: 'agy', model: 'gemini-3.8-flash-high', retries: 0 },
       },
     },
   });
@@ -493,4 +497,71 @@ describe('aidaily CLI commands, JSON output, streaming logs, and exit codes', ()
     );
     expect(JSON.parse(abandonBuf.getOut())).toMatchObject({ abandoned: true });
   }, 35_000);
+
+  it('supports global CLI registration and daemon status queries without touching host home', async () => {
+    const fakeHome = await fs.mkdtemp(path.join(os.tmpdir(), 'aidaily-cli-home-'));
+    const fakeRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'aidaily-cli-root-'));
+    tempDirs.push(fakeHome, fakeRoot);
+    await fs.mkdir(path.join(fakeRoot, 'config'), { recursive: true });
+    await fs.copyFile(
+      path.join(REPO_ROOT, 'config', 'settings.yaml'),
+      path.join(fakeRoot, 'config', 'settings.yaml'),
+    );
+    await fs.copyFile(
+      path.join(REPO_ROOT, 'config', 'sources.yaml'),
+      path.join(fakeRoot, 'config', 'sources.yaml'),
+    );
+    await updateSettingsFile(path.join(fakeRoot, 'config', 'settings.yaml'), {
+      clis: {
+        biliup: { adapter: 'generic', bin: 'fixture-disabled-biliup', extraArgs: [] },
+      },
+      publish: {
+        mode: 'manual-review',
+        bilibili: { cookieFile: path.join(fakeRoot, 'test-bili-cookies.json') },
+      },
+    });
+
+    process.env.HOME = fakeHome;
+    const expectedBin = path.join(fakeHome, '.local', 'bin', 'aidaily');
+    process.env.PATH = `${path.dirname(expectedBin)}:${process.env.PATH ?? ''}`;
+
+    const beforeStatus = createBufferedIo();
+    expect(await runCli(['--root', fakeRoot, 'global', 'status', '--json'], beforeStatus.io)).toBe(
+      1,
+    );
+    expect(JSON.parse(beforeStatus.getOut())).toMatchObject({
+      installed: false,
+      binPath: expectedBin,
+    });
+
+    const installBuf = createBufferedIo();
+    expect(await runCli(['--root', fakeRoot, 'global', 'install', '--json'], installBuf.io)).toBe(
+      0,
+    );
+    expect(JSON.parse(installBuf.getOut())).toMatchObject({
+      installed: true,
+      managedBySelf: true,
+      binPath: expectedBin,
+      inPath: true,
+    });
+
+    const daemonStatusBuf = createBufferedIo();
+    expect(
+      await runCli(['--root', fakeRoot, 'daemon', 'status', '--json'], daemonStatusBuf.io),
+    ).toBe(0);
+    expect(JSON.parse(daemonStatusBuf.getOut())).toMatchObject({
+      running: false,
+      serviceInstalled: false,
+      globalCli: { installed: true, binPath: expectedBin },
+    });
+
+    const uninstallBuf = createBufferedIo();
+    expect(
+      await runCli(['--root', fakeRoot, 'global', 'uninstall', '--json'], uninstallBuf.io),
+    ).toBe(0);
+    expect(JSON.parse(uninstallBuf.getOut())).toMatchObject({
+      removed: true,
+      binPath: expectedBin,
+    });
+  });
 });

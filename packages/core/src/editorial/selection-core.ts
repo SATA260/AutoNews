@@ -1,5 +1,6 @@
 import {
   type Article,
+  type HostMascotId,
   type SelectedEventCandidate,
   SelectionResultSchema,
   type Settings,
@@ -29,6 +30,8 @@ export interface CandidateSelectionOutput {
     allArticleIds: string[];
   }>;
   consideredArticleIds: string[];
+  recommendedHostId?: HostMascotId;
+  recommendedHostReason?: string;
 }
 
 /** 计算候选文章发布时间的毫秒时间戳 */
@@ -168,6 +171,7 @@ export async function selectCandidateEvents(opts: {
   targetCount: number;
   itemCount: number;
   excludeArticleIds?: ReadonlySet<string>;
+  hostSelectionRule?: string;
   signal?: AbortSignal;
 }): Promise<CandidateSelectionOutput> {
   const {
@@ -371,6 +375,7 @@ export async function selectCandidateEvents(opts: {
     itemCount: String(Math.max(1, itemCount)),
     historyDedupDays: String(settings.editorial.historyDedupDays),
     timeCutoffRule: buildTimeCutoffRuleText(notBeforeAt, settings.timezone, originReferences),
+    hostSelectionRule: opts.hostSelectionRule ?? '',
     historyTitles: historyText,
     candidates: JSON.stringify(promptCandidates, null, 2),
   });
@@ -461,5 +466,7 @@ export async function selectCandidateEvents(opts: {
       ? selected
       : selected.sort((a, b) => b.candidate.score - a.candidate.score).slice(0, itemCount + 2),
     consideredArticleIds: dedupedGroups.flatMap((g) => g.aliases),
+    recommendedHostId: llmRes.data.hostId,
+    recommendedHostReason: llmRes.data.hostReason,
   };
 }

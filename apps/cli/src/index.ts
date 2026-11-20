@@ -5,6 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
+  type DaemonStatus,
   HostMascotIdSchema,
   PIPELINE_STAGES,
   type RunStatus,
@@ -17,7 +18,13 @@ import {
   type Trigger,
   TriggerSchema,
 } from '@aidaily/contracts';
-import { type Core, createCore, LockBusyError } from '@aidaily/core';
+import {
+  assertWebBuildPresent,
+  type Core,
+  createCore,
+  LockBusyError,
+  resolveNextBinPath,
+} from '@aidaily/core';
 import { Command, CommanderError } from 'commander';
 import {
   buildPatchFromDotPath,
@@ -26,8 +33,10 @@ import {
   parseCliValue,
 } from './config-path.js';
 import {
+  formatDaemonStatusText,
   formatDoctorReportText,
   formatDraftReviewText,
+  formatGlobalCliStatusText,
   formatRetryOptionsText,
   formatRunDetailText,
   formatRunEventLine,
@@ -152,6 +161,10 @@ function hasJsonFlag(program: Command, argv: readonly string[]): boolean {
     '--cutoff',
     '--max-age-hours',
     '--import',
+    '--port',
+    '--host',
+    '--idle-sec',
+    '--lines',
   ]);
   let skipNextValue = false;
   for (const token of argv) {
@@ -326,7 +339,7 @@ export function buildProgram(io: CliIo = DEFAULT_IO, onExitCode?: (code: number)
       '最早新闻时间下限（支持 12h / 24h / 48h / today / last-published / YYYY-MM-DD / ISO）',
     )
     .option('--host <id>', '指定主播：deepseek、gpt、gemini 或 claude')
-    .option('--bgm <file>', '指定曲库中的背景音乐文件名')
+    .option('--bgm <file>', '兼容参数：须与 --host 所选主播的专属背景音乐一致')
     .option('--detach', '在后台独立工作进程中执行并立即返回', false)
     .option('--trigger <trigger>', '触发来源 (manual-cli | manual-web | schedule)', 'manual-cli')
     .option('--schedule-id <id>', '关联定时任务 ID')
@@ -465,17 +478,19 @@ export function buildProgram(io: CliIo = DEFAULT_IO, onExitCode?: (code: number)
     .description('恢复中断/失败的任务，或从指定历史阶段重新执行')
     .argument('<runId>', '任务 ID')
     .option('--from <stage>', '从指定自动化阶段重新开始并作废归档之后产物')
-    .option('--latest-config', '使用磁盘最新配置刷新本期任务快照', false)
+    .option('--latest-config', '使用最新生效配置执行（默认已开启）', false)
+    .option('--keep-snapshot', '仅沿用任务创建时的旧快照，不读取最新配置', false)
     .option('--detach', '在后台独立进程中异步恢复', false)
     .action(
       async (
         runId: string,
-        opts: { from?: string; latestConfig: boolean; detach: boolean },
+        opts: { from?: string; latestConfig: boolean; keepSnapshot: boolean; detach: boolean },
         cmd: Command,
       ) => {
         const gOpts = getGlobals(cmd);
         const jsonMode = Boolean(gOpts.json);
         const print = createPrinter(io, jsonMode);
+        const useLatestConfig = !opts.keepSnapshot;
 
         let fromStage: Stage | undefined;
         if (opts.from !== undefined) {
@@ -492,14 +507,14 @@ export function buildProgram(io: CliIo = DEFAULT_IO, onExitCode?: (code: number)
           if (opts.detach) {
             await core.tasks.resume(runId, {
               fromStage,
-              useLatestConfig: opts.latestConfig,
+              useLatestConfig,
               detach: true,
             });
             print(
               {
                 runId,
                 fromStage: fromStage ?? null,
-                latestConfig: opts.latestConfig,
+                latestConfig: useLatestConfig,
                 detached: true,
               },
               `已提交后台恢复任务 ${runId}${fromStage ? `（起点：${fromStage}）` : '（从断点继续）'}。`,
@@ -515,7 +530,7 @@ export function buildProgram(io: CliIo = DEFAULT_IO, onExitCode?: (code: number)
             jsonMode,
             core.tasks.resume(runId, {
               fromStage,
-              useLatestConfig: opts.latestConfig,
+              useLatestConfig,
               detach: false,
             }),
           );
@@ -536,18 +551,20 @@ export function buildProgram(io: CliIo = DEFAULT_IO, onExitCode?: (code: number)
     .argument('<runId>', '任务 ID')
     .argument('<itemIds...>', '一个或多个新闻条目 ID')
     .option('--from <step>', '起始处理子步骤 (summarize | polish | factcheck)')
-    .option('--latest-config', '使用磁盘最新配置刷新本期快照', false)
+    .option('--latest-config', '使用最新生效配置执行（默认已开启）', false)
+    .option('--keep-snapshot', '仅沿用任务创建时的旧快照，不读取最新配置', false)
     .option('--detach', '在后台独立进程中异步重做', false)
     .action(
       async (
         runId: string,
         rawItemIds: string[],
-        opts: { from?: string; latestConfig: boolean; detach: boolean },
+        opts: { from?: string; latestConfig: boolean; keepSnapshot: boolean; detach: boolean },
         cmd: Command,
       ) => {
         const gOpts = getGlobals(cmd);
         const jsonMode = Boolean(gOpts.json);
         const print = createPrinter(io, jsonMode);
+        const useLatestConfig = !opts.keepSnapshot;
 
         const itemIds = Array.from(
           new Set(
@@ -576,7 +593,7 @@ export function buildProgram(io: CliIo = DEFAULT_IO, onExitCode?: (code: number)
           if (opts.detach) {
             await core.tasks.retryItems(runId, itemIds, {
               fromStep,
-              useLatestConfig: opts.latestConfig,
+              useLatestConfig,
               detach: true,
             });
             print(
@@ -602,7 +619,7 @@ export function buildProgram(io: CliIo = DEFAULT_IO, onExitCode?: (code: number)
             jsonMode,
             core.tasks.retryItems(runId, itemIds, {
               fromStep,
-              useLatestConfig: opts.latestConfig,
+              useLatestConfig,
               detach: false,
             }),
           );
@@ -1135,7 +1152,6 @@ export function buildProgram(io: CliIo = DEFAULT_IO, onExitCode?: (code: number)
     .option('--name <name>', '自定义定时任务名称')
     .option('--cutoff <mode>', '最早新闻时间策略 (none | since_last_published | hours)', 'none')
     .option('--max-age-hours <H>', '当策略为 hours 时的回溯小时数（正整数）')
-    .option('--bgm <file>', '指定曲库中的背景音乐文件名')
     .option('--disabled', '创建后先保持停用状态，暂不挂载到系统调度器', false)
     .action(
       async (
@@ -1145,7 +1161,6 @@ export function buildProgram(io: CliIo = DEFAULT_IO, onExitCode?: (code: number)
           name?: string;
           cutoff: string;
           maxAgeHours?: string;
-          bgm?: string;
           disabled: boolean;
         },
         cmd: Command,
@@ -1185,7 +1200,6 @@ export function buildProgram(io: CliIo = DEFAULT_IO, onExitCode?: (code: number)
             itemCount,
             cutoffMode,
             maxAgeHours,
-            bgmFile: opts.bgm,
             enabled: !opts.disabled,
           });
           print(job, formatSchedulesTable([job], core.config.getSettings().timezone));
@@ -1204,7 +1218,7 @@ export function buildProgram(io: CliIo = DEFAULT_IO, onExitCode?: (code: number)
     .option('-n, --items <N>', '新的每期新闻条数上限')
     .option('--cutoff <mode>', '新的最早新闻时间策略 (none | since_last_published | hours)')
     .option('--max-age-hours <H>', '当策略为 hours 时的回溯小时数（正整数）')
-    .option('--bgm <file>', '曲库文件名；传 auto 恢复自动选择')
+    .option('--bgm <file>', '已废弃（背景音乐由当期主播专属绑定）；仅支持传 auto 清除历史配置')
     .option('--enable', '启用并挂载到系统调度器', false)
     .option('--disable', '停用并从系统调度器卸载', false)
     .action(
@@ -1326,6 +1340,357 @@ export function buildProgram(io: CliIo = DEFAULT_IO, onExitCode?: (code: number)
         print(
           { cli: routeName, models },
           `调用方式「${routeName}」的模型列表（共 ${models.length} 个）\n${text}`,
+        );
+        return 0;
+      });
+      setExit(code);
+    });
+
+  // 查询全局命令注册与守护进程管控
+  const globalCmd = program
+    .command('global')
+    .description('管理本机全局 `aidaily` 命令注册，实现在任意目录直接启动');
+
+  globalCmd
+    .command('status')
+    .description('查看全局命令安装与 PATH 状态')
+    .action(async (_opts: Record<string, unknown>, cmd: Command) => {
+      const gOpts = getGlobals(cmd);
+      const print = createPrinter(io, Boolean(gOpts.json));
+      const code = await withCore(gOpts, async (core) => {
+        const status = await core.daemon.getGlobalCliStatus();
+        print(status, formatGlobalCliStatusText(status));
+        return status.installed ? 0 : 1;
+      });
+      setExit(code);
+    });
+
+  globalCmd
+    .command('install')
+    .description('将 `aidaily` 注册到本机 ~/.local/bin 并绑定当前项目目录')
+    .action(async (_opts: Record<string, unknown>, cmd: Command) => {
+      const gOpts = getGlobals(cmd);
+      const print = createPrinter(io, Boolean(gOpts.json));
+      const code = await withCore(gOpts, async (core) => {
+        const status = await core.daemon.installGlobalCli();
+        print(status, `全局命令注册成功。\n${formatGlobalCliStatusText(status)}`);
+        return 0;
+      });
+      setExit(code);
+    });
+
+  globalCmd
+    .command('uninstall')
+    .description('取消本机全局 `aidaily` 命令注册')
+    .action(async (_opts: Record<string, unknown>, cmd: Command) => {
+      const gOpts = getGlobals(cmd);
+      const print = createPrinter(io, Boolean(gOpts.json));
+      const code = await withCore(gOpts, async (core) => {
+        const res = await core.daemon.uninstallGlobalCli();
+        print(
+          res,
+          res.removed
+            ? `已卸载全局命令：${res.binPath}`
+            : `全局命令尚未注册，无需卸载（${res.binPath}）`,
+        );
+        return 0;
+      });
+      setExit(code);
+    });
+
+  // 管理低占用后台守护进程与开机自启
+  const daemonCmd = program
+    .command('daemon')
+    .description('管理低占用后台守护进程（定时自动触发 + 按需唤醒网页控制台）');
+
+  const parseDaemonOpts = (opts: {
+    port?: string;
+    host?: string;
+    idleSec?: string;
+    web?: boolean;
+  }) => {
+    const webPort = opts.port !== undefined ? parsePositiveInt(opts.port, '--port') : undefined;
+    if (webPort !== undefined && webPort > 65535) {
+      throw new CliUsageError(`端口号 --port 必须在 1..65535 范围内，当前传入: ${opts.port}`);
+    }
+    const webIdleTimeoutSec =
+      opts.idleSec !== undefined ? parsePositiveInt(opts.idleSec, '--idle-sec') : undefined;
+    if (webIdleTimeoutSec !== undefined && webIdleTimeoutSec < 10) {
+      throw new CliUsageError('--idle-sec 至少为 10 秒');
+    }
+    return {
+      webEnabled: opts.web !== false,
+      webHost: opts.host,
+      webPort,
+      webIdleTimeoutSec,
+    };
+  };
+
+  daemonCmd
+    .command('status')
+    .description('查看后台守护进程、开机自启服务及按需网页网关的运行状态')
+    .action(async (_opts: Record<string, unknown>, cmd: Command) => {
+      const gOpts = getGlobals(cmd);
+      const print = createPrinter(io, Boolean(gOpts.json));
+      const code = await withCore(gOpts, async (core) => {
+        const status = await core.daemon.getStatus();
+        print(status, formatDaemonStatusText(status, core.config.getSettings().timezone));
+        return 0;
+      });
+      setExit(code);
+    });
+
+  daemonCmd
+    .command('start')
+    .description('启动后台守护进程（平时仅占用极小内存等待定时或网页访问）')
+    .option('--port <port>', '按需网页网关监听端口（默认 3000）')
+    .option('--host <host>', '按需网页网关绑定地址（默认 127.0.0.1）')
+    .option('--idle-sec <sec>', '网页无访问后自动休眠的空闲秒数（默认 900）')
+    .option('--no-web', '仅启动定时调度守护，不监听网页端口')
+    .action(
+      async (
+        opts: { port?: string; host?: string; idleSec?: string; web: boolean },
+        cmd: Command,
+      ) => {
+        const gOpts = getGlobals(cmd);
+        const print = createPrinter(io, Boolean(gOpts.json));
+        const parsed = parseDaemonOpts(opts);
+        const code = await withCore(gOpts, async (core) => {
+          const status = await core.daemon.start(parsed);
+          print(status, formatDaemonStatusText(status, core.config.getSettings().timezone));
+          return 0;
+        });
+        setExit(code);
+      },
+    );
+
+  daemonCmd
+    .command('stop')
+    .description('停止后台守护进程并关闭托管中的网页子进程')
+    .action(async (_opts: Record<string, unknown>, cmd: Command) => {
+      const gOpts = getGlobals(cmd);
+      const print = createPrinter(io, Boolean(gOpts.json));
+      const code = await withCore(gOpts, async (core) => {
+        const res = await core.daemon.stop();
+        print(res, res.stopped ? `守护进程已停止 (PID: ${res.pid})` : '守护进程当前未运行');
+        return 0;
+      });
+      setExit(code);
+    });
+
+  daemonCmd
+    .command('restart')
+    .description('重启后台守护进程')
+    .option('--port <port>', '按需网页网关监听端口（默认 3000）')
+    .option('--host <host>', '按需网页网关绑定地址（默认 127.0.0.1）')
+    .option('--idle-sec <sec>', '网页无访问后自动休眠的空闲秒数（默认 900）')
+    .option('--no-web', '仅启动定时调度守护，不监听网页端口')
+    .action(
+      async (
+        opts: { port?: string; host?: string; idleSec?: string; web: boolean },
+        cmd: Command,
+      ) => {
+        const gOpts = getGlobals(cmd);
+        const print = createPrinter(io, Boolean(gOpts.json));
+        const parsed = parseDaemonOpts(opts);
+        const code = await withCore(gOpts, async (core) => {
+          const status = await core.daemon.restart(parsed);
+          print(status, formatDaemonStatusText(status, core.config.getSettings().timezone));
+          return 0;
+        });
+        setExit(code);
+      },
+    );
+
+  daemonCmd
+    .command('install')
+    .description('安装为 macOS 开机自启守护服务并立即拉起')
+    .option('--port <port>', '按需网页网关监听端口（默认 3000）')
+    .option('--host <host>', '按需网页网关绑定地址（默认 127.0.0.1）')
+    .option('--idle-sec <sec>', '网页无访问后自动休眠的空闲秒数（默认 900）')
+    .option('--no-web', '仅安装定时调度守护，不监听网页端口')
+    .action(
+      async (
+        opts: { port?: string; host?: string; idleSec?: string; web: boolean },
+        cmd: Command,
+      ) => {
+        const gOpts = getGlobals(cmd);
+        const print = createPrinter(io, Boolean(gOpts.json));
+        const parsed = parseDaemonOpts(opts);
+        const code = await withCore(gOpts, async (core) => {
+          const status = await core.daemon.install(parsed);
+          print(
+            status,
+            `已安装并启动开机自启守护服务。\n${formatDaemonStatusText(status, core.config.getSettings().timezone)}`,
+          );
+          return 0;
+        });
+        setExit(code);
+      },
+    );
+
+  daemonCmd
+    .command('uninstall')
+    .description('卸载 macOS 开机自启守护服务，并恢复已启用的独立系统定时任务')
+    .action(async (_opts: Record<string, unknown>, cmd: Command) => {
+      const gOpts = getGlobals(cmd);
+      const print = createPrinter(io, Boolean(gOpts.json));
+      const code = await withCore(gOpts, async (core) => {
+        const res = await core.daemon.uninstall();
+        print(
+          res,
+          res.uninstalled
+            ? `已卸载开机自启守护服务：${res.plistPath}`
+            : `未检测到已安装的守护服务（${res.plistPath}）`,
+        );
+        return 0;
+      });
+      setExit(code);
+    });
+
+  daemonCmd
+    .command('logs')
+    .description('查看守护进程或网页控制台的最近运行日志')
+    .option('--lines <N>', '显示最近多少行日志（默认 50）', '50')
+    .option('--web', '查看网页控制台子进程日志而非守护调度日志', false)
+    .action(async (opts: { lines: string; web: boolean }, cmd: Command) => {
+      const gOpts = getGlobals(cmd);
+      const print = createPrinter(io, Boolean(gOpts.json));
+      const lines = parsePositiveInt(opts.lines, '--lines');
+      const code = await withCore(gOpts, async (core) => {
+        const res = await core.daemon.readLogs({ web: opts.web, lines });
+        print(
+          res,
+          res.lines.length > 0
+            ? `日志文件: ${res.file}\n${res.lines.join('\n')}`
+            : `日志文件: ${res.file}\n（暂无日志记录）`,
+        );
+        return 0;
+      });
+      setExit(code);
+    });
+
+  // 打开、唤醒、休眠或前台启动网页管理台
+  const webCmd = program
+    .command('web')
+    .description('打开或管理网页控制台（守护进程运行中时自动按需唤醒）')
+    .option('--open', '自动在系统默认浏览器中打开管理台网址', false)
+    .option('--port <port>', '监听端口（默认 3000）', '3000')
+    .option('--host <host>', '监听地址（默认 127.0.0.1）', '127.0.0.1')
+    .option('--dev', '以前台开发模式启动网页控制台（不走守护进程按需代理）', false)
+    .option('--foreground', '直接以前台进程启动生产版网页控制台', false)
+    .action(
+      async (
+        opts: { open: boolean; port: string; host: string; dev: boolean; foreground: boolean },
+        cmd: Command,
+      ) => {
+        const gOpts = getGlobals(cmd);
+        const print = createPrinter(io, Boolean(gOpts.json));
+        const port = parsePositiveInt(opts.port, '--port');
+        if (port > 65535) {
+          throw new CliUsageError(`端口号 --port 必须在 1..65535 范围内，当前传入: ${opts.port}`);
+        }
+
+        let fgRunSpec: {
+          rootDir: string;
+          url: string;
+          nextBin: string;
+          mode: 'dev' | 'start';
+        } | null = null;
+        let resolvedDaemonStatus: DaemonStatus | null = null;
+
+        const code = await withCore(gOpts, async (core) => {
+          if (!opts.dev && !opts.foreground) {
+            const daemonStatus = await core.daemon.getStatus();
+            if (daemonStatus.running && daemonStatus.webEnabled) {
+              resolvedDaemonStatus = await core.daemon.wakeWeb();
+              if (opts.open) {
+                await spawnInheritProcess('open', [resolvedDaemonStatus.webUrl]);
+              }
+              print(
+                resolvedDaemonStatus,
+                `网页控制台已在守护进程托管下就绪：${resolvedDaemonStatus.webUrl}（无访问闲置 ${Math.round(resolvedDaemonStatus.webIdleTimeoutSec / 60)} 分钟自动休眠）`,
+              );
+              return 0;
+            }
+          }
+
+          const rootDir = core.context.paths.rootDir;
+          if (!opts.dev) {
+            assertWebBuildPresent(rootDir);
+          }
+          fgRunSpec = {
+            rootDir,
+            url: `http://${opts.host}:${port}`,
+            nextBin: resolveNextBinPath(rootDir),
+            mode: opts.dev ? 'dev' : 'start',
+          };
+          return 0;
+        });
+
+        if (!fgRunSpec) {
+          setExit(code);
+          return;
+        }
+
+        const spec: { rootDir: string; url: string; nextBin: string; mode: 'dev' | 'start' } =
+          fgRunSpec;
+        if (opts.open) {
+          void spawnInheritProcess('open', [spec.url]).catch(() => undefined);
+        }
+        io.stdout(`正在前台启动网页控制台：${spec.url}（项目目录：${spec.rootDir}）\n`);
+        const exitCode = await new Promise<number>((resolve, reject) => {
+          const child = spawn(
+            process.execPath,
+            [spec.nextBin, spec.mode, '-H', opts.host, '-p', String(port)],
+            {
+              cwd: path.join(spec.rootDir, 'apps', 'web'),
+              stdio: 'inherit',
+              env: {
+                ...process.env,
+                AIDAILY_ROOT: spec.rootDir,
+                ...(spec.mode === 'start' ? { NODE_ENV: 'production' } : {}),
+              },
+            },
+          );
+          child.on('error', reject);
+          child.on('close', (c) => resolve(c ?? 0));
+        });
+        setExit(exitCode);
+      },
+    );
+
+  webCmd
+    .command('wake')
+    .description('主动预热唤醒守护进程托管的网页后台')
+    .option('--open', '唤醒后在系统浏览器打开', false)
+    .action(async (opts: { open: boolean }, cmd: Command) => {
+      const gOpts = getGlobals(cmd);
+      const print = createPrinter(io, Boolean(gOpts.json));
+      const code = await withCore(gOpts, async (core) => {
+        const status = await core.daemon.wakeWeb();
+        if (opts.open) {
+          await spawnInheritProcess('open', [status.webUrl]);
+        }
+        print(status, `网页控制台已唤醒：${status.webUrl} (PID: ${status.webPid ?? '-'})`);
+        return 0;
+      });
+      setExit(code);
+    });
+
+  webCmd
+    .command('sleep')
+    .description('立即休眠空闲中的托管网页子进程以回收内存')
+    .action(async (_opts: Record<string, unknown>, cmd: Command) => {
+      const gOpts = getGlobals(cmd);
+      const print = createPrinter(io, Boolean(gOpts.json));
+      const code = await withCore(gOpts, async (core) => {
+        const status = await core.daemon.sleepWeb();
+        print(
+          status,
+          status.webState === 'stopped'
+            ? '网页子进程已进入休眠状态，内存已回收。'
+            : '当前仍有浏览器或事件连接占用，暂未强行休眠。',
         );
         return 0;
       });

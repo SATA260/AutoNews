@@ -27,7 +27,7 @@ async function readConfigFingerprint(core: Core): Promise<string | null> {
       fs.stat(core.context.paths.settingsFile),
       fs.stat(core.context.paths.sourcesFile).catch(() => null),
     ]);
-    return `${settingsStat.mtimeMs}:${sourcesStat?.mtimeMs ?? 0}`;
+    return `${settingsStat.mtimeMs}:${settingsStat.size}:${settingsStat.ino}:${sourcesStat?.mtimeMs ?? 0}:${sourcesStat?.size ?? 0}:${sourcesStat?.ino ?? 0}`;
   } catch {
     return null;
   }

@@ -1,13 +1,123 @@
 import crypto from 'node:crypto';
-import type { EventRecord, RunItemRecord, Settings } from '@aidaily/contracts';
+import type {
+  EventRecord,
+  HostMascotId,
+  PersonaProfile,
+  RunItemRecord,
+  Settings,
+} from '@aidaily/contracts';
 import { collectSources } from '../collector/index.js';
 import type { CoreContext } from '../context.js';
 import { PipelineError } from '../errors.js';
+import { resolvePersonaBgmFile } from '../media/bgm.js';
 import { inTransaction } from '../storage/db.js';
 import { emitRunEvent } from '../workflow/events.js';
-import { chooseHost, loadPersonas } from './personas.js';
+import {
+  chooseHost,
+  findPreviousHostId,
+  formatEligibleHostCandidatesForPrompt,
+  loadPersonas,
+} from './personas.js';
 import { runRefillRound } from './refill.js';
 import { selectCandidateEvents } from './selection-core.js';
+
+/** 为本期最终选定的事件列表确定主播形象与唯一对应的背景音乐，自动选择时避开上一期 */
+async function finalizeRunHostAndBgm(opts: {
+  ctx: CoreContext;
+  runId: string;
+  personas: readonly PersonaProfile[];
+  events: readonly EventRecord[];
+  manualHostId: string | null;
+  previousHostId: HostMascotId | null;
+  aiRecommendedHostId?: HostMascotId;
+  aiRecommendedHostReason?: string;
+  allowAiRecommendation: boolean;
+}): Promise<void> {
+  const {
+    ctx,
+    runId,
+    personas,
+    events,
+    manualHostId,
+    previousHostId,
+    aiRecommendedHostId,
+    aiRecommendedHostReason,
+    allowAiRecommendation,
+  } = opts;
+  const primary = events.filter((event) => event.role === 'primary');
+  const scoringEvents = primary.length > 0 ? primary : events;
+
+  const extraTextByEventId = new Map<string, string>();
+  const allArticleIds = Array.from(new Set(scoringEvents.flatMap((event) => event.articleIds)));
+  if (allArticleIds.length > 0) {
+    const articles = ctx.repos.articles.getByIds(allArticleIds);
+    const articleMap = new Map(articles.map((article) => [article.id, article]));
+    for (const event of scoringEvents) {
+      const joined = event.articleIds
+        .map((id) => articleMap.get(id))
+        .filter((article): article is NonNullable<typeof article> => Boolean(article))
+        .map((article) => `${article.title} ${article.excerpt ?? ''}`)
+        .join(' ');
+      if (joined) {
+        extraTextByEventId.set(event.id, joined);
+      }
+    }
+  }
+
+  let host: string | null = null;
+  let source: 'manual' | 'ai_select' | 'rule_fallback' | 'none' = 'none';
+  let reason = '';
+
+  if (manualHostId) {
+    host = manualHostId;
+    source = 'manual';
+    reason = '沿用人工指定主播形象';
+  } else if (personas.length > 0) {
+    const aiValid =
+      allowAiRecommendation &&
+      aiRecommendedHostId !== undefined &&
+      personas.some((persona) => persona.id === aiRecommendedHostId) &&
+      (personas.length <= 1 || aiRecommendedHostId !== previousHostId);
+    if (aiValid && aiRecommendedHostId) {
+      host = aiRecommendedHostId;
+      source = 'ai_select';
+      reason = aiRecommendedHostReason ?? '按本期新闻内容由选题模型自动匹配';
+    } else {
+      host = chooseHost(scoringEvents, personas, previousHostId, extraTextByEventId);
+      source = host ? 'rule_fallback' : 'none';
+      reason =
+        aiRecommendedHostId && aiRecommendedHostId === previousHostId
+          ? `选题模型推荐的 ${aiRecommendedHostId} 与上一期相同，已按避重规则改选 ${host ?? '无'}`
+          : '按事件阵营、话题与正文字段匹配主播形象';
+    }
+  }
+
+  const boundBgm = host ? await resolvePersonaBgmFile(ctx, host, personas) : null;
+  if (boundBgm) {
+    ctx.db
+      .prepare('UPDATE runs SET host_id = ?, bgm_file = ? WHERE id = ?')
+      .run(host, boundBgm, runId);
+  } else {
+    ctx.db.prepare('UPDATE runs SET host_id = ? WHERE id = ?').run(host, runId);
+  }
+
+  if (host) {
+    emitRunEvent(ctx, {
+      runId,
+      level: 'info',
+      stage: 'select',
+      type: 'host_selected',
+      message: `已确定本期主播形象为 ${host}${boundBgm ? `，并绑定专属背景音乐 ${boundBgm}` : ''}（${reason}）`,
+      data: {
+        hostId: host,
+        bgmFile: boundBgm,
+        previousHostId,
+        source,
+        reason,
+      },
+    });
+  }
+}
 
 /** 选题阶段完成后的检查点产物 */
 export interface SelectCheckpoint {
@@ -52,6 +162,17 @@ export async function runSelectStage(
   const initialIncludeExpired = hasCutoff && notBeforeMs < maxLookbackMs;
   const targetCount = itemCount * settings.issue.reserveFactor;
 
+  const personas = await loadPersonas(ctx);
+  const currentHostRow = ctx.db
+    .prepare('SELECT host_id, host_manual FROM runs WHERE id = ?')
+    .get(runId) as { host_id: string | null; host_manual: number } | undefined;
+  const manualHostId = currentHostRow?.host_manual ? currentHostRow.host_id : null;
+  const previousHostId = findPreviousHostId(ctx, runId, run.createdAt);
+  const hostSelectionRule =
+    !manualHostId && personas.length > 0
+      ? formatEligibleHostCandidatesForPrompt(personas, previousHostId)
+      : '';
+
   let initialSelection = await selectCandidateEvents({
     ctx,
     runId,
@@ -61,6 +182,7 @@ export async function runSelectStage(
     includeExpired: initialIncludeExpired,
     targetCount,
     itemCount,
+    hostSelectionRule,
     signal,
   });
 
@@ -85,6 +207,7 @@ export async function runSelectStage(
       includeExpired: initialIncludeExpired,
       targetCount,
       itemCount,
+      hostSelectionRule,
       signal,
     });
   }
@@ -135,26 +258,6 @@ export async function runSelectStage(
     });
   });
 
-  const personas = await loadPersonas(ctx);
-  const previous = ctx.db
-    .prepare(
-      'SELECT host_id FROM runs WHERE id != ? AND host_id IS NOT NULL ORDER BY created_at DESC LIMIT 1',
-    )
-    .get(runId) as { host_id: string } | undefined;
-  const current = ctx.db
-    .prepare('SELECT host_id, host_manual FROM runs WHERE id = ?')
-    .get(runId) as {
-    host_id: string | null;
-    host_manual: number;
-  };
-  const host =
-    (current.host_manual ? current.host_id : null) ??
-    chooseHost(
-      allEvents.filter((event) => event.role === 'primary'),
-      personas,
-      previous?.host_id ?? null,
-    );
-
   inTransaction(ctx.db, () => {
     if (initialReserveIds.length > 0) {
       ctx.repos.articles.markReserved(initialReserveIds, runId);
@@ -163,7 +266,9 @@ export async function runSelectStage(
       ctx.repos.events.insertMany(allEvents);
       ctx.repos.runItems.createMany(allItems);
     }
-    ctx.db.prepare('UPDATE runs SET host_id = ? WHERE id = ?').run(host, runId);
+    if (manualHostId) {
+      ctx.db.prepare('UPDATE runs SET host_id = ? WHERE id = ?').run(manualHostId, runId);
+    }
   });
 
   let refillRoundsUsed = 0;
@@ -228,6 +333,18 @@ export async function runSelectStage(
 
   const primaryCount = allEvents.filter((e) => e.role === 'primary').length;
   const reserveCount = allEvents.length - primaryCount;
+
+  await finalizeRunHostAndBgm({
+    ctx,
+    runId,
+    personas,
+    events: allEvents,
+    manualHostId,
+    previousHostId,
+    aiRecommendedHostId: initialSelection.recommendedHostId,
+    aiRecommendedHostReason: initialSelection.recommendedHostReason,
+    allowAiRecommendation: initialSelection.selected.length > 0,
+  });
 
   return {
     selectedCount: allEvents.length,

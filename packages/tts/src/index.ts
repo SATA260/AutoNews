@@ -36,10 +36,12 @@ const SAFE_SECTION_KEY_PATTERN = /^[a-zA-Z0-9_-]+$/;
  */
 export class TtsService {
   readonly bridge?: CliBridge;
-  private readonly settings: TtsSettings;
+  private settings: TtsSettings;
   private readonly cacheDir: string;
   private readonly ffmpegBin: string;
   private readonly ffprobeBin: string;
+  private readonly rootDir: string;
+  private readonly fetchImpl?: typeof fetch;
   private readonly providers = new Map<string, TtsProvider>();
 
   constructor(opts: TtsServiceOptions) {
@@ -48,18 +50,38 @@ export class TtsService {
     this.bridge = opts.bridge;
     this.ffmpegBin = opts.ffmpegBin ?? 'ffmpeg';
     this.ffprobeBin = opts.ffprobeBin ?? 'ffprobe';
+    this.rootDir = opts.rootDir ?? process.cwd();
+    this.fetchImpl = opts.fetchImpl;
+    this.registerBuiltinProviders();
+  }
 
-    const rootDir = opts.rootDir ?? process.cwd();
-    const fetchImpl = opts.fetchImpl;
+  /** 按当前语音合成配置重新注册内置合成器，保留外部扩展注册的合成器 */
+  private registerBuiltinProviders(): void {
     this.register(createSilentTtsProvider(this.settings, this.ffmpegBin));
     this.register(
-      createIndexTtsProvider(rootDir, this.settings.providers.indextts ?? {}, { fetchImpl }),
-    );
-    this.register(
-      createQwenLocalTtsProvider(rootDir, this.settings.providers['qwen-local'] ?? {}, {
-        fetchImpl,
+      createIndexTtsProvider(this.rootDir, this.settings.providers.indextts ?? {}, {
+        fetchImpl: this.fetchImpl,
       }),
     );
+    this.register(
+      createQwenLocalTtsProvider(this.rootDir, this.settings.providers['qwen-local'] ?? {}, {
+        fetchImpl: this.fetchImpl,
+      }),
+    );
+  }
+
+  /** 热更新语音合成配置并仅在参数实际变更时重建内置合成器，保留扩展注册引擎 */
+  updateSettings(nextSettings: TtsSettings): void {
+    if (JSON.stringify(this.settings) === JSON.stringify(nextSettings)) {
+      return;
+    }
+    this.settings = nextSettings;
+    this.registerBuiltinProviders();
+  }
+
+  /** 判断指定标识的语音合成引擎是否已注册 */
+  hasProvider(id: string): boolean {
+    return this.providers.has(id);
   }
 
   /** 注册或替换一个语音合成引擎实例 */

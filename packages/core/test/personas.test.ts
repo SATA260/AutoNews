@@ -101,6 +101,18 @@ describe('主播配置、情绪推导、口型包络提取与帧时间轴量化'
       ),
     ).not.toBe('gemini');
     expect(chooseHost([event('第三方', '新闻')], personas, 'gpt')).not.toBe('gpt');
+    // 即使单一新闻阵营压倒性命中上一期主播，也必须强制避开上一期
+    expect(chooseHost([event('OpenAI', '产品')], personas, 'gpt')).not.toBe('gpt');
+    // 支持传入正文摘要线索辅助匹配主播阵营
+    expect(
+      chooseHost(
+        [event('第三方', '新闻')],
+        personas,
+        null,
+        new Map([['第三方', 'Claude Code agent coding workflow update']]),
+      ),
+    ).toBe('claude');
+    expect(personas.every((p) => p.bgmFile === `${p.id}-bgm.mp3`)).toBe(true);
 
     expect(deriveMascotMood('deepseek', 'DeepSeek 开源推理引擎', personas)).toBe('proud');
     expect(deriveMascotMood('deepseek', '多名用户反馈DeepSeek算力不足出现限流', personas)).toBe(

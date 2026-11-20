@@ -73,11 +73,15 @@ ai:
         }
     }
   stages:
-    select: { cli: agy, model: gemini-4-hydrogen-high, timeoutSec: 300, retries: 2 }
-    summarize: { cli: agy, model: gemini-4-hydrogen-high, timeoutSec: 240, retries: 2 }
-    polish: { cli: agy, model: gemini-4-hydrogen-high, timeoutSec: 180, retries: 2 }
-    factcheck: { cli: agy, model: gemini-4-hydrogen-high, timeoutSec: 300, retries: 2 }
-    package: { cli: agy, model: gemini-4-hydrogen-high, timeoutSec: 240, retries: 2 }
+    select: { mode: pool, cli: agy, model: gemini-4-hydrogen-high, timeoutSec: 300, retries: 2 }
+    summarize: { mode: pool, cli: agy, model: gemini-4-hydrogen-high, timeoutSec: 240, retries: 2 }
+    polish: { mode: pool, cli: agy, model: gemini-4-hydrogen-high, timeoutSec: 180, retries: 2 }
+    factcheck: { mode: pool, cli: agy, model: gemini-4-hydrogen-high, timeoutSec: 300, retries: 2 }
+    package: { mode: pool, cli: agy, model: gemini-4-hydrogen-high, timeoutSec: 240, retries: 2 }
+  channels:
+    - { cli: agy, model: gemini-4-hydrogen-high, retries: 2, enabled: true }
+    - { cli: icomp, model: deepseek-v4.1-flash, retries: 2, enabled: true }
+    - { cli: deepseek官key, model: deepseek-chat, retries: 1, enabled: true }
 
 clis:
   codex:
@@ -152,6 +156,7 @@ tts:
     denoise: true
     sentenceGapMs: 240
     sectionGapMs: 0
+  pauseAfterNarrate: false
 
 template:
   active: daily-deck
@@ -178,7 +183,7 @@ render:
     }
 
 publish:
-  mode: manual-review # manual-review | auto（auto 只在 qa 通过时自动发布）
+  mode: auto # manual-review | auto（auto 只在 qa 通过时自动发布）
   bilibili:
     cli: biliup
     cookieFile: ~/cookies.json # 直接复用在家目录执行 biliup login 生成的登录凭据
@@ -193,7 +198,7 @@ publish:
       - 科技资讯
       - AI每日报
     aiDeclaration: true # 强制开启 B 站平台 AI 生成内容声明标识
-    aiDisclaimerText: "本视频由 AI 辅助整理与配音，内容均经原文核查。"
+    aiDisclaimerText: "本视频由 AI 整理与配音，不对内容负责。"
 
 # 定时任务（执行时间 + 每期条数）不在配置文件设默认值，统一在 SQLite schedules 表中手动新建管理
 

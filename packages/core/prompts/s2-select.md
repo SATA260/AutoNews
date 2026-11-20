@@ -29,6 +29,8 @@
 
 {{timeCutoffRule}}
 
+{{hostSelectionRule}}
+
 ## 近期已播事件列表
 {{historyTitles}}
 

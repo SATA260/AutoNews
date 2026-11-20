@@ -12,7 +12,6 @@ import {
   type SectionAudio,
   SectionAudioSchema,
   type Settings,
-  SettingsSchema,
   type Timeline,
   TimelineSchema,
   UpdateSectionNarrationInputSchema,
@@ -224,17 +223,18 @@ async function settingsForNarrationProviders(
   };
 }
 
-/** 读取任务保存下来的配置。旧配置没有新字段时按默认值补上 */
-function readRunSettings(ctx: CoreContext, runId: string): Settings {
+/** 读取磁盘最新全局配置并同步任务记录快照，确保配音与字幕调整按当前界面配置生效 */
+async function readRunSettings(ctx: CoreContext, runId: string): Promise<Settings> {
   const run = ctx.repos.runs.getById(runId);
   if (!run) {
     throw new Error(`未找到任务记录: ${runId}`);
   }
-  const parsed = SettingsSchema.safeParse(JSON.parse(run.configSnapshotJson));
-  if (!parsed.success) {
-    throw new Error(`任务配置快照无效: ${parsed.error.message}`);
+  await ctx.reloadConfig();
+  const nextJson = JSON.stringify(ctx.settings);
+  if (nextJson !== run.configSnapshotJson) {
+    ctx.db.prepare('UPDATE runs SET config_snapshot = ? WHERE id = ?').run(nextJson, runId);
   }
-  return parsed.data;
+  return ctx.settings;
 }
 
 /** 确认当前状态允许改配音、字幕、配图或背景音乐 */
@@ -543,7 +543,7 @@ export async function listNarrationSectionViews(
   if (!rawPackage?.packageData) {
     return [];
   }
-  const settings = readRunSettings(ctx, runId);
+  const settings = await readRunSettings(ctx, runId);
   const items = ctx.repos.runItems.listByRun(runId);
   const itemsById = new Map(items.map((item) => [item.id, item]));
   const overrides = await readNarrationOverrides(runDir);
@@ -591,8 +591,13 @@ export async function updateSingleSectionNarration(
   }
   assertNarrationEditable(ctx, runId);
   const input = UpdateSectionNarrationInputSchema.parse(rawInput);
-  const settings = readRunSettings(ctx, runId);
-  if (input.provider && !Object.hasOwn(settings.tts.providers, input.provider)) {
+  const settings = await readRunSettings(ctx, runId);
+  const builtinTtsProviders = new Set(['silent', 'indextts', 'qwen-local']);
+  const hasProvider =
+    !input.provider ||
+    Object.hasOwn(settings.tts.providers, input.provider) ||
+    (!builtinTtsProviders.has(input.provider) && ctx.tts.hasProvider(input.provider));
+  if (!hasProvider) {
     throw new Error(`未配置语音合成引擎: ${input.provider}`);
   }
   const runDir = ctx.paths.runDir(runId);
@@ -717,7 +722,7 @@ export async function resetSingleSectionNarration(
     throw new Error(`非法的口播段落标识: ${sectionKey}`);
   }
   assertNarrationEditable(ctx, runId);
-  const settings = readRunSettings(ctx, runId);
+  const settings = await readRunSettings(ctx, runId);
   const runDir = ctx.paths.runDir(runId);
   const packageData = await loadIssuePackage(ctx, runId);
   const itemsById = new Map(ctx.repos.runItems.listByRun(runId).map((item) => [item.id, item]));

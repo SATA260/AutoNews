@@ -3,7 +3,7 @@
 import Image from 'next/image';
 import { useRouter } from 'next/navigation';
 import { useState, useTransition } from 'react';
-import { resumeRunAction, setItemImageAction, setRunBgmAction } from '@/app/actions';
+import { resumeRunAction, setItemImageAction } from '@/app/actions';
 import { buildArtifactUrl } from '@/components/run-detail/artifact-url';
 
 /** 网页端展示的单个候选视觉素材信息 */
@@ -34,18 +34,17 @@ const KIND_LABELS: Record<MediaCandidateView['kind'], string> = {
   cover: '网页封面',
 };
 
-/** 审核阶段更换配图（每条新闻最多 1 张，支持候选选图与本地上传）、音乐并重新合成画面。 */
+/** 审核阶段更换配图（每条新闻最多 1 张，支持候选选图与本地上传）、查看专属背景音乐并重新合成画面。 */
 export function MediaAdjustments({
   runId,
   items,
   candidatesByItemId = {},
-  bgmFiles,
   bgmFile,
 }: {
   runId: string;
   items: MediaAdjustmentsItemView[];
   candidatesByItemId?: Record<string, MediaCandidateView[]>;
-  bgmFiles: string[];
+  bgmFiles?: string[];
   bgmFile?: string | null;
 }) {
   const router = useRouter();
@@ -235,36 +234,13 @@ export function MediaAdjustments({
         );
       })}
       <div className="flex flex-wrap items-center justify-between gap-3 border-t border-slate-100 pt-3">
-        <form
-          onSubmit={(event) => {
-            event.preventDefault();
-            const form = new FormData(event.currentTarget);
-            form.set('runId', runId);
-            submit(setRunBgmAction, form);
-          }}
-          className="flex flex-wrap items-center gap-2"
-        >
-          <select
-            name="bgmFile"
-            defaultValue={bgmFile ?? ''}
-            className="rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-xs text-slate-900"
-            required
-          >
-            <option value="">选择背景音乐</option>
-            {bgmFiles.map((file) => (
-              <option key={file} value={file}>
-                {file}
-              </option>
-            ))}
-          </select>
-          <button
-            disabled={pending}
-            className="rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-50"
-            type="submit"
-          >
-            保存音乐
-          </button>
-        </form>
+        <p className="text-xs text-slate-600">
+          背景音乐：
+          <span className="font-medium text-slate-900">
+            {bgmFile ?? '将随本期主播形象自动绑定'}
+          </span>
+          （已与 Live2D 形象专属绑定，不可跨形象混用）
+        </p>
         <button
           disabled={pending}
           type="button"

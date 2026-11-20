@@ -17,6 +17,7 @@ personas:
     introExamples: [大家好，我是聪明的大肥鱼，今天咱们来盘一盘AI圈又整了什么新活，下面直接看报道。]
     outroExamples: [今天的新闻账就先算到这儿，我是聪明的大肥鱼，下期见。]
     forbiddenTokens: ['~', '～', '♪', '……', 呐呐, 呢喵, DeepSeek娘, DeepSeek 娘, deepseek娘]
+    bgmFile: deepseek-bgm.mp3
   - id: gpt
     selfName: gpt
     displayName: gpt
@@ -35,6 +36,7 @@ personas:
     introExamples: [大家好，我是gpt，欢迎收看今天的AI每日报，一起来看看今天圈里又有哪些真假猛料。]
     outroExamples: [今天的AI每日报就聊到这儿，我是gpt，咱们下期继续看热闹。]
     forbiddenTokens: ['~', '～', '♪', '……', 呐呐, 呢喵, GPT娘, GPT 娘, gpt娘]
+    bgmFile: gpt-bgm.mp3
   - id: gemini
     selfName: 哈基米
     displayName: 哈基米
@@ -53,6 +55,7 @@ personas:
     introExamples: [哈喽大家好，我是哈基米，欢迎收看今天的AI每日报，今天瓜和干货都不少，咱们直接开聊！]
     outroExamples: [今天的新闻就播到这儿啦，我是哈基米，咱们明天见！]
     forbiddenTokens: ['~', '～', '♪', '……', 呐呐, 呢喵, Gemini娘, Gemini 娘, gemini娘]
+    bgmFile: gemini-bgm.mp3
   - id: claude
     selfName: 小克
     displayName: 小克
@@ -71,3 +74,4 @@ personas:
     introExamples: [大家好，我是小克，欢迎收看今天的AI每日报，下面按事实把今天的关键进展捋一遍。]
     outroExamples: [今天的AI每日报播送完毕，我是小克，我们下期见。]
     forbiddenTokens: ['~', '～', '♪', '……', 呐呐, 呢喵, Claude娘, Claude 娘, claude娘]
+    bgmFile: claude-bgm.mp3

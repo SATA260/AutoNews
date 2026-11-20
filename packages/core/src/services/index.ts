@@ -1,5 +1,6 @@
 export * from './article.js';
 export * from './config.js';
+export * from './daemon.js';
 export * from './publish.js';
 export * from './retention.js';
 export * from './scheduler.js';

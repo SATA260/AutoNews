@@ -8,8 +8,7 @@ export const runtime = 'nodejs';
 export default async function SchedulesPage() {
   const core = await getCore();
   const settings = core.config.getSettings();
-  const jobs = await core.scheduler.list();
-  const bgmFiles = await core.tasks.listBgm();
+  const [jobs, daemonStatus] = await Promise.all([core.scheduler.list(), core.daemon.getStatus()]);
 
-  return <ScheduleManager jobs={jobs} timezone={settings.timezone} bgmFiles={bgmFiles} />;
+  return <ScheduleManager jobs={jobs} timezone={settings.timezone} daemonStatus={daemonStatus} />;
 }

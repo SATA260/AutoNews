@@ -16,6 +16,8 @@ import {
   previewDeleteArticlesAction,
   previewDeleteRunsAction,
   removeModelApiConnectionAction,
+  resumeRunAction,
+  retryItemsAction,
   runDoctorCheckAction,
   saveModelApiConnectionAction,
   setItemImageAction,
@@ -62,9 +64,14 @@ async function setupWebTestWorkspace(): Promise<string> {
   );
   await editSettingsFile(tempSettingsPath, (doc) => {
     doc.setIn(['ai', 'providers'], {});
+    doc.setIn(['ai', 'channels'], []);
+    doc.setIn(['publish', 'mode'], 'manual-review');
+    doc.setIn(['publish', 'bilibili', 'cookieFile'], path.join(rootDir, 'test-bili-cookies.json'));
     doc.setIn(['clis', 'agy', 'bin'], FAKE_AGY_BIN);
     doc.setIn(['clis', 'codex', 'bin'], FAKE_CODEX_BIN);
+    doc.setIn(['clis', 'biliup', 'bin'], 'fixture-disabled-biliup');
     for (const stage of ['select', 'summarize', 'polish', 'factcheck', 'package']) {
+      doc.setIn(['ai', 'stages', stage, 'mode'], 'custom');
       doc.setIn(['ai', 'stages', stage, 'cli'], 'agy');
       doc.setIn(['ai', 'stages', stage, 'model'], 'gemini-3.8-flash-high');
     }
@@ -1096,5 +1103,62 @@ describe('apps/web routes and Server Actions', () => {
     }
     expect(savedStages.polish.timeoutSec).toBe(210);
     expect(savedStages.polish.retries).toBe(2);
+  });
+
+  it('saves ordered AI channels, respects default useLatestConfig on resume/retry, and blocks mismatched BGM', async () => {
+    const root = await setupWebTestWorkspace();
+    const core = await getCore();
+
+    const poolFd = new FormData();
+    poolFd.set('maxConcurrentCalls', '6');
+    poolFd.set(
+      'channelsJson',
+      JSON.stringify([
+        { cli: 'agy', model: 'gemini-3.8-flash-high', retries: 2, enabled: true },
+        { cli: 'codex', model: 'gpt-5', retries: 1, timeoutSec: 120, enabled: true },
+      ]),
+    );
+    for (const key of AI_STAGE_KEYS) {
+      poolFd.set(`stage_${key}_mode`, 'pool');
+      poolFd.set(`stage_${key}_timeoutSec`, '240');
+    }
+    expect(await updateStageRoutingAction(poolFd)).toMatchObject({ ok: true });
+    const latest = core.config.getSettings();
+    expect(latest.ai.channels).toHaveLength(2);
+    expect(latest.ai.stages.select.mode).toBe('pool');
+    expect(latest.ai.stages.select.cli).toBe('agy');
+
+    // 启动任务和定时任务均禁止脱离形象单独指定或错配背景音乐
+    await fs.mkdir(path.join(root, 'assets', 'bgm'), { recursive: true });
+    await fs.writeFile(path.join(root, 'assets', 'bgm', 'gpt-bgm.mp3'), 'gpt');
+    await fs.writeFile(path.join(root, 'assets', 'bgm', 'claude-bgm.mp3'), 'claude');
+    const badStartFd = new FormData();
+    badStartFd.set('itemCount', '2');
+    badStartFd.set('hostId', 'gpt');
+    badStartFd.set('bgmFile', 'claude-bgm.mp3');
+    expect(await startRunAction(badStartFd)).toMatchObject({
+      ok: false,
+      error: expect.stringContaining('不匹配'),
+    });
+
+    const badSchedFd = new FormData();
+    badSchedFd.set('time', '09:00');
+    badSchedFd.set('itemCount', '3');
+    badSchedFd.set('bgmFile', 'gpt-bgm.mp3');
+    expect(await createScheduleAction(badSchedFd)).toMatchObject({
+      ok: false,
+      error: expect.stringContaining('背景音乐'),
+    });
+
+    // 验证 resumeRunAction / retryItemsAction 参数校验正常，且可显式传 false
+    const badResumeFd = new FormData();
+    badResumeFd.set('runId', 'non-existent-run');
+    expect(await resumeRunAction(badResumeFd)).toMatchObject({ ok: false });
+
+    const badRetryFd = new FormData();
+    badRetryFd.set('runId', 'non-existent-run');
+    badRetryFd.set('itemIds', 'item-1');
+    badRetryFd.set('useLatestConfig', 'false');
+    expect(await retryItemsAction(badRetryFd)).toMatchObject({ ok: false });
   });
 });

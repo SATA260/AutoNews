@@ -40,6 +40,7 @@ interface ParsedWorkerArgs {
   scheduleId?: string;
   itemCount?: number;
   notBeforeAt?: string;
+  bgmFile?: string;
   dtimeUnixSec?: number;
 }
 
@@ -59,12 +60,13 @@ export function parseWorkerArgs(argv: readonly string[]): ParsedWorkerArgs {
   let runId: string | undefined;
   const itemIds: string[] = [];
   let from: string | undefined;
-  let latestConfig = false;
+  let latestConfig = true;
   let requiresRetryGrant = false;
   let trigger: Trigger | undefined;
   let scheduleId: string | undefined;
   let itemCount: number | undefined;
   let notBeforeAt: string | undefined;
+  let bgmFile: string | undefined;
   let dtimeUnixSec: number | undefined;
 
   for (let i = 0; i < argv.length; i++) {
@@ -105,6 +107,9 @@ export function parseWorkerArgs(argv: readonly string[]): ParsedWorkerArgs {
       case '--latest-config':
         latestConfig = true;
         break;
+      case '--keep-snapshot':
+        latestConfig = false;
+        break;
       case '--wait-for-retry-grant':
         requiresRetryGrant = true;
         break;
@@ -128,6 +133,10 @@ export function parseWorkerArgs(argv: readonly string[]): ParsedWorkerArgs {
       }
       case '--since':
         notBeforeAt = requireFlagValue(argv, i, '--since');
+        i += 1;
+        break;
+      case '--bgm':
+        bgmFile = requireFlagValue(argv, i, '--bgm');
         i += 1;
         break;
       case '--dtime': {
@@ -163,6 +172,7 @@ export function parseWorkerArgs(argv: readonly string[]): ParsedWorkerArgs {
     scheduleId,
     itemCount,
     notBeforeAt,
+    bgmFile,
     dtimeUnixSec,
   };
 }
@@ -236,6 +246,7 @@ async function executeWorkerAction(
         await core.tasks.start({
           itemCount: parsed.itemCount,
           notBeforeAt: parsed.notBeforeAt,
+          bgmFile: parsed.bgmFile,
           trigger: parsed.trigger,
           scheduleId: parsed.scheduleId,
           detach: false,

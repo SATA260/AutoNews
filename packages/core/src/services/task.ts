@@ -25,16 +25,16 @@ import {
   type RunSummary,
   RunSummarySchema,
   type SelectedMediaOverride,
-  SettingsSchema,
   type Stage,
   type Trigger,
 } from '@aidaily/contracts';
 import { TZDate } from '@date-fns/tz';
 import type { CoreContext } from '../context.js';
 import type { EditSubStep } from '../editorial/item-pipeline.js';
+import { findPreviousHostId } from '../editorial/personas.js';
 import { collectEventMediaPool, loadEventArticles } from '../editorial/s3-summarize.js';
 import { NotFoundError } from '../errors.js';
-import { listBgmFiles } from '../media/bgm.js';
+import { assertHostBgmMatch, listBgmFiles } from '../media/bgm.js';
 import {
   listNarrationSectionViews,
   resetSingleSectionNarration,
@@ -120,6 +120,8 @@ export interface TaskWatchOptions {
 export interface TaskService {
   /** 列出可用于新任务的背景音乐。 */
   listBgm(): Promise<string[]>;
+  /** 查询最近一次有效任务所选定的主播形象标识（无历史记录时返回 null） */
+  getLatestHostId(): Promise<HostMascotId | null>;
   /** 查询最近一次成功投稿或本地完结发版的时间戳（无历史记录时返回 null） */
   getLatestPublishedAt(): Promise<string | null>;
   /** 读取某期任务各条新闻可用的多模态候选素材列表，并将文件暂存到任务目录以供页面安全预览 */
@@ -243,7 +245,7 @@ async function sleepUntilAbort(ms: number, signal: AbortSignal): Promise<void> {
 }
 
 /** 判断某期任务是否已进入稳定停顿状态（监听事件流可以安全收尾退出） */
-function isWatchingTerminalStatus(status: RunStatus, configSnapshotJson: string): boolean {
+async function isWatchingTerminalStatus(ctx: CoreContext, status: RunStatus): Promise<boolean> {
   switch (status) {
     case 'queued':
     case 'running':
@@ -253,15 +255,8 @@ function isWatchingTerminalStatus(status: RunStatus, configSnapshotJson: string)
       return true;
     case 'awaiting_review': {
       // 自动发布模式在审阅点会紧接着直接发起上传，因此继续观察直到发布落定
-      try {
-        const parsed = SettingsSchema.safeParse(JSON.parse(configSnapshotJson));
-        if (parsed.success && parsed.data.publish.mode === 'auto') {
-          return false;
-        }
-      } catch {
-        // 无法解析快照时按需人工审核的停止状态处理
-      }
-      return true;
+      await ctx.reloadConfig().catch(() => undefined);
+      return ctx.settings.publish.mode !== 'auto';
     }
     default:
       return true;
@@ -527,6 +522,10 @@ export function createTaskService(ctx: CoreContext): TaskService {
     async listBgm() {
       return listBgmFiles(ctx);
     },
+    /** 查询最近一次有效任务所选定的主播形象标识 */
+    async getLatestHostId() {
+      return findPreviousHostId(ctx, '');
+    },
     /** 查询最近一次成功发版或投稿的时间戳 */
     async getLatestPublishedAt() {
       return getLatestPublishedAt(ctx);
@@ -690,9 +689,11 @@ export function createTaskService(ctx: CoreContext): TaskService {
         throw error;
       }
     },
-    /** 锁定新的背景音乐。 */
+    /** 锁定或同步指定任务与其主播形象唯一匹配的背景音乐。 */
     async setBgm(runId, bgmFile) {
-      if (!(await listBgmFiles(ctx)).includes(bgmFile)) throw new Error('指定的背景音乐不在曲库中');
+      const run = ctx.repos.runs.getById(runId);
+      if (!run) throw new NotFoundError(`未找到任务记录: ${runId}`);
+      await assertHostBgmMatch(ctx, run.hostId, bgmFile);
       inTransaction(ctx.db, () => {
         const result = ctx.db
           .prepare(
@@ -712,8 +713,12 @@ export function createTaskService(ctx: CoreContext): TaskService {
       }
 
       if (opts.hostId !== undefined) HostMascotIdSchema.parse(opts.hostId);
-      if (opts.bgmFile !== undefined && !(await listBgmFiles(ctx)).includes(opts.bgmFile))
-        throw new Error('指定的背景音乐不在曲库中');
+      if (opts.bgmFile !== undefined) {
+        if (!opts.hostId) {
+          throw new Error('背景音乐与主播形象严格绑定，不能脱离主播形象单独指定背景音乐');
+        }
+        await assertHostBgmMatch(ctx, opts.hostId, opts.bgmFile);
+      }
       const trigger: Trigger = opts.trigger ?? 'manual-cli';
 
       try {
@@ -848,22 +853,21 @@ export function createTaskService(ctx: CoreContext): TaskService {
       }
 
       assertPipelineLockAvailable(ctx);
+      const useLatestConfig = opts?.useLatestConfig ?? true;
 
       if (opts?.detach) {
         const args = ['--root', ctx.paths.rootDir, '--action', 'resume', '--run-id', runId];
         if (opts.fromStage) {
           args.push('--from', opts.fromStage);
         }
-        if (opts.useLatestConfig) {
-          args.push('--latest-config');
-        }
+        args.push(useLatestConfig ? '--latest-config' : '--keep-snapshot');
         await startDetachedRetry(ctx, runId, args, run);
         return;
       }
 
       await resumeRun(ctx, runId, {
         fromStage: opts?.fromStage,
-        useLatestConfig: opts?.useLatestConfig,
+        useLatestConfig,
       });
     },
 
@@ -901,6 +905,7 @@ export function createTaskService(ctx: CoreContext): TaskService {
       }
 
       assertPipelineLockAvailable(ctx);
+      const useLatestConfig = opts?.useLatestConfig ?? true;
 
       if (opts?.detach) {
         const args = ['--root', ctx.paths.rootDir, '--action', 'retry-item', '--run-id', runId];
@@ -910,16 +915,14 @@ export function createTaskService(ctx: CoreContext): TaskService {
         if (opts.fromStep) {
           args.push('--from', opts.fromStep);
         }
-        if (opts.useLatestConfig) {
-          args.push('--latest-config');
-        }
+        args.push(useLatestConfig ? '--latest-config' : '--keep-snapshot');
         await startDetachedRetry(ctx, runId, args, run);
         return;
       }
 
       await retryRunItems(ctx, runId, uniqueItemIds, {
         fromStep: opts?.fromStep,
-        useLatestConfig: opts?.useLatestConfig,
+        useLatestConfig,
       });
     },
 
@@ -1271,7 +1274,7 @@ export function createTaskService(ctx: CoreContext): TaskService {
         if (!currentRun) {
           break;
         }
-        if (isWatchingTerminalStatus(currentRun.status, currentRun.configSnapshotJson)) {
+        if (await isWatchingTerminalStatus(ctx, currentRun.status)) {
           // 稍作等待后再执行两次补刷，避免跨进程状态更新与尾随日志事件之间出现瞬时错位
           await sleepUntilAbort(Math.min(pollMs, 50), signal);
           drainEvents();

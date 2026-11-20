@@ -76,6 +76,11 @@ export async function saveModelApiConnection(paths: RepoPaths, input: unknown): 
             doc.setIn(['ai', 'stages', stage, 'cli'], name);
           }
         }
+        settings.ai.channels.forEach((channel, index) => {
+          if (channel.cli === previousName) {
+            doc.setIn(['ai', 'channels', index, 'cli'], name);
+          }
+        });
       }
       doc.setIn(['ai', 'providers', name], next);
     });
@@ -92,8 +97,10 @@ export async function removeModelApiConnection(paths: RepoPaths, name: string): 
     if (!ai.providers || !Object.hasOwn(ai.providers, name)) {
       throw new Error('要删除的 API 连接已不存在，请刷新设置页');
     }
-    if (Object.values(ai.stages).some((stage) => stage.cli === name)) {
-      throw new Error('有阶段正在使用此连接，请先保存其他调用方式');
+    const usedByStage = Object.values(ai.stages).some((stage) => stage.cli === name);
+    const usedByChannel = ai.channels.some((channel) => channel.cli === name);
+    if (usedByStage || usedByChannel) {
+      throw new Error('有阶段或 AI 渠道池正在使用此连接，请先保存其他调用方式');
     }
     doc.deleteIn(['ai', 'providers', name]);
   });

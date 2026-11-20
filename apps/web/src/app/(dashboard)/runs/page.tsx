@@ -68,7 +68,7 @@ export default async function RunsPage({
 
   const core = await getCore();
   const settings = core.config.getSettings();
-  const bgmFiles = await core.tasks.listBgm();
+  const previousHostId = await core.tasks.getLatestHostId();
 
   let runs: Awaited<ReturnType<typeof core.tasks.list>> = [];
   let filterError: string | null = null;
@@ -95,7 +95,7 @@ export default async function RunsPage({
             查看全部生成任务，按状态与创建时间筛选、清理本地磁盘产物或批量删除历史任务。
           </p>
         </div>
-        <StartRunModalButton bgmFiles={bgmFiles} label="新建一期任务" />
+        <StartRunModalButton previousHostId={previousHostId} label="新建一期任务" />
       </div>
 
       <RunsManager

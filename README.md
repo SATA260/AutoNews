@@ -136,6 +136,14 @@ npm run aidaily -- schedule create --time 08:30 -n 5 --name "早间 AI 每日报
 npm run aidaily -- schedule update <id> --disable
 npm run aidaily -- schedule remove <id>
 npm run aidaily -- schedule sync
+
+# 7. 全局注册、低占用后台守护与一键启动网页
+npm run global:install             # 将 aidaily 注册到 ~/.local/bin（任意目录可直接运行）
+aidaily daemon install             # 安装 macOS 登录自启低占用守护服务并立即启动
+aidaily daemon status              # 查看守护进程、按需网页状态与下次定时触发时间
+aidaily web --open                 # 自动唤醒托管网页后台并在浏览器打开（闲置 15 分钟自动休眠）
+aidaily web sleep                  # 立即让空闲网页子进程休眠回收内存
+aidaily daemon stop                # 停止守护进程（如需移除开机自启请执行 aidaily daemon uninstall）
 ```
 
 ---

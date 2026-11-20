@@ -17,8 +17,25 @@ export const Live2dPackSchema = z.enum(['fullbody', 'expression']);
 /** 看板娘 Live2D 模型套组类型 */
 export type Live2dPack = z.infer<typeof Live2dPackSchema>;
 
+/** 单个 AI 调用渠道配置与重试策略 */
+export const AiChannelSchema = z.object({
+  cli: z.string().min(1),
+  model: z.string().min(1),
+  retries: z.number().int().min(0).max(10).default(2),
+  timeoutSec: z.number().int().positive().optional(),
+  enabled: z.boolean().default(true),
+});
+/** 单个 AI 调用渠道配置类型 */
+export type AiChannel = z.infer<typeof AiChannelSchema>;
+
+/** 单个 AI 处理环节的渠道选择模式 */
+export const AiStageModeSchema = z.enum(['pool', 'custom']);
+/** 单个 AI 处理环节的渠道选择模式类型 */
+export type AiStageMode = z.infer<typeof AiStageModeSchema>;
+
 /** 单个 AI 处理环节使用的调用名称、模型名与超时重试配置 */
 export const StageAiConfigSchema = z.object({
+  mode: AiStageModeSchema.optional(),
   cli: z.string().min(1),
   model: z.string().min(1),
   timeoutSec: z.number().int().positive(),
@@ -215,6 +232,7 @@ const SettingsFieldsSchema = z.object({
   ai: z.object({
     maxConcurrentCalls: z.number().int().min(1).max(20),
     providers: z.record(z.string().min(1), ModelApiProviderSchema).optional(),
+    channels: z.array(AiChannelSchema).default([]),
     stages: z.object({
       select: StageAiConfigSchema,
       summarize: StageAiConfigSchema,

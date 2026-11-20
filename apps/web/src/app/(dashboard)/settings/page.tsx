@@ -31,6 +31,9 @@ export default async function SettingsPage() {
   const cachedDoctor = core.system.getCachedDoctor();
 
   const selectedRoutes = new Set(Object.values(settings.ai.stages).map(({ cli }) => cli));
+  for (const ch of settings.ai.channels ?? []) {
+    selectedRoutes.add(ch.cli);
+  }
   const connections = Object.entries(settings.ai.providers ?? {}).map(([name, provider]) => ({
     name,
     baseUrl: provider.baseUrl,
