@@ -811,6 +811,17 @@ export function precheckPolishedItem(opts: {
     ) {
       errors.push('口播结尾严禁使用“值得持续关注”等拔高套话，说完事实与限制即可收尾');
     }
+    if (
+      item.narration.some((sentence) =>
+        /(?:原帖|原文|该帖|原推)(?:里|中)?(?:没写|未写|没提|未提|光放了|没给|没公布|未公布|没透露|未透露)/.test(
+          sentence,
+        ),
+      )
+    ) {
+      errors.push(
+        '口播不要提及“原帖没写/原文未透露”等打破播报感的话，未公开细节直接略过或说“暂未公布”',
+      );
+    }
     const vagueRefCount = item.narration.filter((sentence) => /该公司|后者/.test(sentence)).length;
     if (vagueRefCount >= 2)
       errors.push('口播多次使用“该公司”或“后者”等模糊指代，请改为具体主语并优化衔接');
@@ -962,15 +973,10 @@ export function precheckIssuePackage(opts: {
 
     const publishTitle = pkg.publish.title.trim();
     if (/^(?:【?\s*)?(?:AI\s*(?:每日报|早报|晚报|日报)|今日\s*AI\s*资讯)/i.test(publishTitle)) {
-      errors.push(
-        '视频标题严禁以“AI每日报/AI早报”等死板栏目名开头，请改用高张力冲突钩子直切硬核看点',
-      );
+      errors.push('视频标题严禁以“AI每日报/AI早报”等死板栏目名开头，请直接切入本期最核心新闻看点');
     }
-    if (charLength(publishTitle) < 32) {
-      errors.push('视频标题过于简短平淡（须至少三十二字并写入具体模型名、关键数字或反差冲突）');
-    }
-    if (!/[!！?？]/.test(publishTitle)) {
-      errors.push('视频标题缺少感叹号或问号情绪张力钩子，请参考爆款标题风格强化冲击力');
+    if (charLength(publishTitle) < 18) {
+      errors.push('视频标题过于简短（须至少十八字并写入具体产品/模型名、关键数字或核心事件）');
     }
     if (/(?<=[\u4e00-\u9fff])_|_(?=[\u4e00-\u9fff])/.test(publishTitle)) {
       errors.push('视频标题请使用正常标点或空格，不要混入文件名下划线“_”');

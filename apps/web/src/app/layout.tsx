@@ -10,8 +10,11 @@ export const metadata: Metadata = {
 /** 网页后台全局根布局组件 */
 export default function RootLayout({ children }: { children: ReactNode }) {
   return (
-    <html lang="zh-CN">
-      <body className="min-h-screen antialiased">{children}</body>
+    // 浏览器扩展（如沉浸式翻译）可能在前端水合前向 html/body 注入自定义属性，仅对根节点属性跳过水合告警
+    <html lang="zh-CN" suppressHydrationWarning>
+      <body className="min-h-screen antialiased" suppressHydrationWarning>
+        {children}
+      </body>
     </html>
   );
 }

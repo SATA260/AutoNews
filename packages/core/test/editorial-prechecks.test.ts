@@ -155,6 +155,8 @@ describe('editorial foundation: prompts, similarity, and deterministic prechecks
     expect(selectPrompt).toContain('GLM');
     expect(selectPrompt).toContain('Qwen');
     expect(selectPrompt).toContain('业内顶尖');
+    expect(selectPrompt).toContain('订阅额度');
+    expect(selectPrompt).toContain('招聘启事');
     expect(selectPrompt).toContain('能力一般或受众面窄的新模型降低优先级');
     expect(selectPrompt).toContain('Gemini 4 Neon');
     expect(selectPrompt).toContain('同一具体事件');
@@ -165,6 +167,7 @@ describe('editorial foundation: prompts, similarity, and deterministic prechecks
       dateDisplay: '11月19日周四',
       issueNumber: 'VOL.2026.11.19',
       passedItemsJson: '[]',
+      recentTitles: '- AI圈大地震！上期示例标题',
       contentLimitsJson: '{}',
       publishLimitsJson: '{}',
       coverTitleMax: '14',
@@ -172,6 +175,8 @@ describe('editorial foundation: prompts, similarity, and deterministic prechecks
     });
     expect(packagePrompt).toContain('重磅主流模型、顶尖突破或全局大事优先头条');
     expect(packagePrompt).toContain('能力比较一般');
+    expect(packagePrompt).toContain('AI圈大地震！上期示例标题');
+    expect(packagePrompt).toContain('干脆双拼直给型');
   });
 
   it('passes precheck for valid quotes (including 90% LCS) and normalized comma/full-width numbers', () => {
@@ -372,8 +377,7 @@ describe('editorial foundation: prompts, similarity, and deterministic prechecks
         cta: '你平时最常用哪款模型？评论区聊聊。',
       },
       publish: {
-        title:
-          'AI圈大地震！OpenAI发布新推理模型，速度翻倍定价每百万15美元，付费会员现已可直接体验！',
+        title: 'OpenAI 12月起ChatGPT与Codex共享额度；新推理模型速度翻倍',
         descriptionIntro: '本期聚焦推理加速与新开放方案。',
         tags: ['大模型', '开源工具'],
       },
@@ -442,8 +446,7 @@ describe('editorial foundation: prompts, similarity, and deterministic prechecks
       hostSelfName: '哈基米',
     });
     expect(badUnderscoreAndShortTitle.passed).toBe(false);
-    expect(badUnderscoreAndShortTitle.errors.some((e) => e.includes('三十二字'))).toBe(true);
-    expect(badUnderscoreAndShortTitle.errors.some((e) => e.includes('情绪张力钩子'))).toBe(true);
+    expect(badUnderscoreAndShortTitle.errors.some((e) => e.includes('十八字'))).toBe(true);
     expect(badUnderscoreAndShortTitle.errors.some((e) => e.includes('下划线'))).toBe(true);
   });
 
@@ -675,6 +678,22 @@ describe('editorial foundation: prompts, similarity, and deterministic prechecks
     });
     expect(clicheClosingRejected.passed).toBe(false);
     expect(clicheClosingRejected.errors.some((e) => e.includes('拔高套话'))).toBe(true);
+
+    const fourthWallPostRejected = precheckPolishedItem({
+      item: {
+        ...baseItem,
+        narration: [
+          '官方正式推出全新推理模型，速度比前代快了两倍。',
+          '只是原帖没写免费额度，每百万词元接口定价十五美元。',
+        ],
+      },
+      articlesById,
+      limits: DEFAULT_LIMITS,
+      metaTextBlacklist: BLACKLIST,
+      compact: true,
+    });
+    expect(fourthWallPostRejected.passed).toBe(false);
+    expect(fourthWallPostRejected.errors.some((e) => e.includes('原帖没写'))).toBe(true);
 
     const vagueRefRejected = precheckPolishedItem({
       item: {

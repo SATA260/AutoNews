@@ -114,12 +114,18 @@ export async function runPackageStage(
   };
 
   const persona = await getRunPersona(ctx, runId);
+  const recentTitles = ctx.repos.publish.listRecentTitles(runId, 10);
+  const recentTitlesText =
+    recentTitles.length > 0
+      ? recentTitles.map((title) => `- ${title}`).join('\n')
+      : '（近期暂无历史标题记录）';
   const basePrompt = await renderPromptTemplate('s6-package.md', {
     personaJson: formatPersonaForPrompt(persona, '无特定角色', { includeReactions: false }),
     date: dateStr,
     dateDisplay,
     issueNumber,
     passedItemsJson: JSON.stringify(itemsPayload, null, 2),
+    recentTitles: recentTitlesText,
     contentLimitsJson: JSON.stringify(limits, null, 2),
     publishLimitsJson: JSON.stringify(publishLimits, null, 2),
     coverTitleMax: String(COVER_TEXT_LIMITS.titleMax),

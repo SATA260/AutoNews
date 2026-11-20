@@ -272,7 +272,7 @@ describe('主播配置、情绪推导、口型包络提取与帧时间轴量化'
       '第三方动画测试中也被 Gemini 比下去',
     );
     expect(rivalWithMention).toContain('其他模型阵营动态');
-    expect(rivalWithMention).toContain('严禁照抄示例与重复口头禅');
+    expect(rivalWithMention).toContain('严禁照抄示例与 AI 味语癖');
 
     const ownControversy = await describePersonaRelation(
       mockCtx,

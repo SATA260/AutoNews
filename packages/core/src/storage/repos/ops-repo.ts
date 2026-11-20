@@ -283,6 +283,20 @@ export function createPublishRepo(db: DatabaseSync) {
       return row ? mapPublishRecord(row) : null;
     },
 
+    /** 查询近期其他期次已生成的投稿标题列表，供整期编排避免标题句式和用词雷同 */
+    listRecentTitles(excludeRunId: string, limit = 10): string[] {
+      const safeLimit = Math.max(1, Math.min(Math.trunc(limit), 30));
+      const rows = db
+        .prepare(`
+          SELECT title FROM publish_records
+          WHERE run_id != ? AND title IS NOT NULL AND trim(title) != ''
+          ORDER BY updated_at DESC
+          LIMIT ?
+        `)
+        .all(excludeRunId, safeLimit) as Array<{ title: string }>;
+      return rows.map((row) => row.title.trim()).filter((title) => title.length > 0);
+    },
+
     /** 局部更新人工修改后的投稿标题、简介或标签列表（仅允许在草稿或失败状态下编辑） */
     updateDraftFields(
       runId: string,
