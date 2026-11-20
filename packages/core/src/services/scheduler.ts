@@ -20,8 +20,6 @@ import { writeFileAtomic } from '../storage/files.js';
 import { validateTemplateItemCount } from '../templates/registry.js';
 import { isDaemonServiceInstalledForRoot } from './daemon.js';
 
-export { computeNextScheduleRunAt };
-
 const SAFE_SCHEDULE_ID_PATTERN = /^[a-zA-Z0-9._-]+$/;
 
 /** 创建定时任务请求参数（每日执行时间和每期新闻条数均为必填，不设默认值） */

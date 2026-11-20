@@ -18,13 +18,7 @@ import {
   type Trigger,
   TriggerSchema,
 } from '@aidaily/contracts';
-import {
-  assertWebBuildPresent,
-  type Core,
-  createCore,
-  LockBusyError,
-  resolveNextBinPath,
-} from '@aidaily/core';
+import { type Core, createCore, DAEMON_DEFAULTS, LockBusyError } from '@aidaily/core';
 import { Command, CommanderError } from 'commander';
 import {
   buildPatchFromDotPath,
@@ -490,6 +484,9 @@ export function buildProgram(io: CliIo = DEFAULT_IO, onExitCode?: (code: number)
         const gOpts = getGlobals(cmd);
         const jsonMode = Boolean(gOpts.json);
         const print = createPrinter(io, jsonMode);
+        if (opts.latestConfig && opts.keepSnapshot) {
+          throw new CliUsageError('不能同时传入 --latest-config 和 --keep-snapshot');
+        }
         const useLatestConfig = !opts.keepSnapshot;
 
         let fromStage: Stage | undefined;
@@ -564,6 +561,9 @@ export function buildProgram(io: CliIo = DEFAULT_IO, onExitCode?: (code: number)
         const gOpts = getGlobals(cmd);
         const jsonMode = Boolean(gOpts.json);
         const print = createPrinter(io, jsonMode);
+        if (opts.latestConfig && opts.keepSnapshot) {
+          throw new CliUsageError('不能同时传入 --latest-config 和 --keep-snapshot');
+        }
         const useLatestConfig = !opts.keepSnapshot;
 
         const itemIds = Array.from(
@@ -1519,9 +1519,12 @@ export function buildProgram(io: CliIo = DEFAULT_IO, onExitCode?: (code: number)
         const parsed = parseDaemonOpts(opts);
         const code = await withCore(gOpts, async (core) => {
           const status = await core.daemon.install(parsed);
+          const headline = status.running
+            ? '已安装开机自启守护服务并启动运行。'
+            : '已写入开机自启配置（系统后台服务尚未就绪，可执行 aidaily daemon logs 排查）。';
           print(
             status,
-            `已安装并启动开机自启守护服务。\n${formatDaemonStatusText(status, core.config.getSettings().timezone)}`,
+            `${headline}\n${formatDaemonStatusText(status, core.config.getSettings().timezone)}`,
           );
           return 0;
         });
@@ -1591,18 +1594,18 @@ export function buildProgram(io: CliIo = DEFAULT_IO, onExitCode?: (code: number)
           throw new CliUsageError(`端口号 --port 必须在 1..65535 范围内，当前传入: ${opts.port}`);
         }
 
-        let fgRunSpec: {
-          rootDir: string;
-          url: string;
-          nextBin: string;
-          mode: 'dev' | 'start';
-        } | null = null;
+        let fgHost: string | null = null;
         let resolvedDaemonStatus: DaemonStatus | null = null;
 
         const code = await withCore(gOpts, async (core) => {
           if (!opts.dev && !opts.foreground) {
             const daemonStatus = await core.daemon.getStatus();
             if (daemonStatus.running && daemonStatus.webEnabled) {
+              if (opts.host !== DAEMON_DEFAULTS.webHost || port !== DAEMON_DEFAULTS.webPort) {
+                io.stderr(
+                  `提示：当前网页控制台已由守护进程托管在 ${daemonStatus.webUrl}，本次传入的 --host/--port 参数未生效（如需修改请重启守护进程）。\n`,
+                );
+              }
               resolvedDaemonStatus = await core.daemon.wakeWeb();
               if (opts.open) {
                 await spawnInheritProcess('open', [resolvedDaemonStatus.webUrl]);
@@ -1615,48 +1618,32 @@ export function buildProgram(io: CliIo = DEFAULT_IO, onExitCode?: (code: number)
             }
           }
 
-          const rootDir = core.context.paths.rootDir;
-          if (!opts.dev) {
-            assertWebBuildPresent(rootDir);
-          }
-          fgRunSpec = {
-            rootDir,
-            url: `http://${opts.host}:${port}`,
-            nextBin: resolveNextBinPath(rootDir),
-            mode: opts.dev ? 'dev' : 'start',
-          };
+          fgHost = opts.host;
           return 0;
         });
 
-        if (!fgRunSpec) {
+        if (fgHost === null) {
           setExit(code);
           return;
         }
 
-        const spec: { rootDir: string; url: string; nextBin: string; mode: 'dev' | 'start' } =
-          fgRunSpec;
-        if (opts.open) {
-          void spawnInheritProcess('open', [spec.url]).catch(() => undefined);
-        }
-        io.stdout(`正在前台启动网页控制台：${spec.url}（项目目录：${spec.rootDir}）\n`);
-        const exitCode = await new Promise<number>((resolve, reject) => {
-          const child = spawn(
-            process.execPath,
-            [spec.nextBin, spec.mode, '-H', opts.host, '-p', String(port)],
-            {
-              cwd: path.join(spec.rootDir, 'apps', 'web'),
-              stdio: 'inherit',
-              env: {
-                ...process.env,
-                AIDAILY_ROOT: spec.rootDir,
-                ...(spec.mode === 'start' ? { NODE_ENV: 'production' } : {}),
-              },
+        const foregroundExit = await withCore(gOpts, async (core) => {
+          const { exitCode } = await core.daemon.startForegroundWeb({
+            host: fgHost ?? DAEMON_DEFAULTS.webHost,
+            port,
+            dev: opts.dev,
+            onReadyUrl: (url) => {
+              io.stdout(
+                `正在前台启动网页控制台：${url}（项目目录：${core.context.paths.rootDir}）\n`,
+              );
+              if (opts.open) {
+                void spawnInheritProcess('open', [url]).catch(() => undefined);
+              }
             },
-          );
-          child.on('error', reject);
-          child.on('close', (c) => resolve(c ?? 0));
+          });
+          return exitCode;
         });
-        setExit(exitCode);
+        setExit(foregroundExit);
       },
     );
 

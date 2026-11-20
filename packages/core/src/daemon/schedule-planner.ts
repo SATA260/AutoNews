@@ -32,9 +32,22 @@ export interface SchedulePlanResult {
   prunedTriggeredSlots: Record<string, string>;
 }
 
-/** 将时间戳格式化为指定时区下的 `YYYY-MM-DD` 日期键 */
-export function formatDateKeyInTimezone(ms: number, timezone: string): string {
-  const zoned = new TZDate(ms, timezone);
+/** 将时间戳格式化为指定时区下的 `YYYY-MM-DD` 日期键，可选按本地日历天偏移 */
+export function formatDateKeyInTimezone(ms: number, timezone: string, dayOffset = 0): string {
+  const base = new TZDate(ms, timezone);
+  const zoned =
+    dayOffset === 0
+      ? base
+      : new TZDate(
+          base.getFullYear(),
+          base.getMonth(),
+          base.getDate() + dayOffset,
+          12,
+          0,
+          0,
+          0,
+          timezone,
+        );
   const y = String(zoned.getFullYear()).padStart(4, '0');
   const m = String(zoned.getMonth() + 1).padStart(2, '0');
   const d = String(zoned.getDate()).padStart(2, '0');
@@ -118,7 +131,8 @@ export function evaluateDueSchedules(opts: {
   catchUpGraceMs?: number;
 }): SchedulePlanResult {
   const catchUpGraceMs = opts.catchUpGraceMs ?? DEFAULT_CATCHUP_GRACE_MS;
-  const todayKey = formatDateKeyInTimezone(opts.nowMs, opts.timezone);
+  const todayKey = formatDateKeyInTimezone(opts.nowMs, opts.timezone, 0);
+  const yesterdayKey = formatDateKeyInTimezone(opts.nowMs, opts.timezone, -1);
   const nowDate = new Date(opts.nowMs);
 
   const dueJobs: DueScheduleTrigger[] = [];
@@ -126,6 +140,18 @@ export function evaluateDueSchedules(opts: {
   for (const [jobId, slot] of Object.entries(opts.triggeredSlots)) {
     if (slot.startsWith(`${todayKey}@`)) {
       prunedTriggeredSlots[jobId] = slot;
+      continue;
+    }
+    if (slot.startsWith(`${yesterdayKey}@`)) {
+      const timePart = slot.slice(yesterdayKey.length + 1);
+      try {
+        const slotMs = computeScheduledSlotMs(yesterdayKey, timePart, opts.timezone);
+        if (opts.nowMs - slotMs <= catchUpGraceMs) {
+          prunedTriggeredSlots[jobId] = slot;
+        }
+      } catch {
+        // 忽略格式异常的历史槽位键并顺便清理
+      }
     }
   }
 
@@ -148,38 +174,40 @@ export function evaluateDueSchedules(opts: {
       }
     }
 
-    const todaySlotMs = computeScheduledSlotMs(todayKey, job.time, opts.timezone);
-    const slotKey = `${todayKey}@${job.time}`;
-    if (opts.nowMs < todaySlotMs || opts.nowMs - todaySlotMs > catchUpGraceMs) {
-      continue;
-    }
-    if (prunedTriggeredSlots[job.id] === slotKey) {
-      continue;
-    }
-
     const createdMs = Date.parse(job.createdAt);
     const updatedMs = Date.parse(job.updatedAt);
     const baselineMs = Math.max(
       Number.isFinite(createdMs) ? createdMs : 0,
       Number.isFinite(updatedMs) ? updatedMs : 0,
     );
-    if (todaySlotMs < baselineMs) {
-      continue;
-    }
 
-    if (job.lastTriggeredAt) {
-      const lastTriggeredMs = Date.parse(job.lastTriggeredAt);
-      if (Number.isFinite(lastTriggeredMs) && lastTriggeredMs >= todaySlotMs - 60_000) {
-        prunedTriggeredSlots[job.id] = slotKey;
+    for (const dateKey of [todayKey, yesterdayKey]) {
+      const slotMs = computeScheduledSlotMs(dateKey, job.time, opts.timezone);
+      const slotKey = `${dateKey}@${job.time}`;
+      if (opts.nowMs < slotMs || opts.nowMs - slotMs > catchUpGraceMs) {
         continue;
       }
-    }
+      if (prunedTriggeredSlots[job.id] === slotKey) {
+        break;
+      }
+      if (slotMs < baselineMs) {
+        continue;
+      }
+      if (job.lastTriggeredAt) {
+        const lastTriggeredMs = Date.parse(job.lastTriggeredAt);
+        if (Number.isFinite(lastTriggeredMs) && lastTriggeredMs >= slotMs - 60_000) {
+          prunedTriggeredSlots[job.id] = slotKey;
+          break;
+        }
+      }
 
-    dueJobs.push({
-      job,
-      slotKey,
-      scheduledAtMs: todaySlotMs,
-    });
+      dueJobs.push({
+        job,
+        slotKey,
+        scheduledAtMs: slotMs,
+      });
+      break;
+    }
   }
 
   return {

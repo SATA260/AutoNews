@@ -3,13 +3,14 @@ import fsSync from 'node:fs';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { DatabaseSync } from 'node:sqlite';
 import type { Settings } from '@aidaily/contracts';
 import { loadSettings } from '../config/loader.js';
 import { resolveStageChannelPlan } from '../editorial/llm.js';
 import { type RepoPaths, resolveDefaultRepoRoot, resolveRepoPaths } from '../paths.js';
 import { ensureDir } from '../storage/files.js';
+import { listSchedulesReadOnlyFromDb } from '../storage/repos/ops-repo.js';
 import { resolveWorkerScriptPath } from '../worker/spawn.js';
+import { DAEMON_DEFAULTS } from './constants.js';
 import {
   type DaemonRuntimeState,
   getDaemonLogFile,
@@ -26,9 +27,6 @@ import {
   evaluateDueSchedules,
 } from './schedule-planner.js';
 import { type WebBackendLauncher, WebOnDemandProxy } from './web-proxy.js';
-
-const DEFAULT_MAX_SLEEP_SLICE_MS = 30_000;
-const DEFAULT_EMPTY_SCHEDULE_SLICE_MS = 60_000;
 
 /** 启动后台守护宿主进程的选项 */
 export interface DaemonHostOptions {
@@ -59,50 +57,17 @@ export interface DaemonHostHandle {
 
 /** 轻量只读查询数据库里的定时任务列表，无表或未初始化时安全返回空数组 */
 export function loadSchedulesReadOnly(dbFile: string): DaemonScheduleEntry[] {
-  if (!fsSync.existsSync(dbFile)) {
-    return [];
-  }
-  const db = new DatabaseSync(dbFile, { readOnly: true });
-  try {
-    db.exec('PRAGMA busy_timeout = 2000;');
-    const tableRow = db
-      .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'schedules'")
-      .get() as { name?: string } | undefined;
-    if (!tableRow?.name) {
-      return [];
-    }
-    const rows = db
-      .prepare(
-        `SELECT id, name, time_expr, item_count, bgm_file, enabled, last_triggered_at, created_at, updated_at
-         FROM schedules
-         ORDER BY time_expr ASC, created_at ASC`,
-      )
-      .all() as Array<{
-      id: string;
-      name: string;
-      time_expr: string;
-      item_count: number;
-      bgm_file: string | null;
-      enabled: number;
-      last_triggered_at: string | null;
-      created_at: string;
-      updated_at: string;
-    }>;
-
-    return rows.map((row) => ({
-      id: row.id,
-      name: row.name,
-      time: row.time_expr,
-      itemCount: row.item_count,
-      bgmFile: row.bgm_file,
-      enabled: row.enabled === 1,
-      lastTriggeredAt: row.last_triggered_at,
-      createdAt: row.created_at,
-      updatedAt: row.updated_at,
-    }));
-  } finally {
-    db.close();
-  }
+  return listSchedulesReadOnlyFromDb(dbFile).map((job) => ({
+    id: job.id,
+    name: job.name,
+    time: job.time,
+    itemCount: job.itemCount,
+    bgmFile: job.bgmFile ?? null,
+    enabled: job.enabled,
+    lastTriggeredAt: job.lastTriggeredAt,
+    createdAt: job.createdAt,
+    updatedAt: job.updatedAt,
+  }));
 }
 
 /** 为后台派生任务拼装包含本地工具链路径和配置的时区环境变量 */
@@ -157,11 +122,24 @@ export function buildDaemonChildEnv(settings: Settings, rootDir: string): NodeJS
   };
 }
 
-/** 写入简明单行守护进程运行日志 */
-function appendDaemonLog(logFile: string, level: 'INFO' | 'WARN' | 'ERROR', message: string): void {
-  const line = `[${new Date().toISOString()}] [${level}] ${message}\n`;
+/** 写入简明单行守护进程运行日志；超出单文件体积上限时自动轮转为 `.1` 备份 */
+function appendDaemonLog(
+  logFile: string,
+  level: 'INFO' | 'WARN' | 'ERROR',
+  message: string,
+  nowMs: number = Date.now(),
+): void {
+  const line = `[${new Date(nowMs).toISOString()}] [${level}] ${message}\n`;
   try {
     fsSync.mkdirSync(path.dirname(logFile), { recursive: true });
+    try {
+      const stat = fsSync.statSync(logFile);
+      if (stat.size >= DAEMON_DEFAULTS.maxLogBytes) {
+        fsSync.renameSync(logFile, `${logFile}.1`);
+      }
+    } catch {
+      // 文件尚未创建或轮转失败时继续追加写入
+    }
     fsSync.appendFileSync(logFile, line, 'utf8');
   } catch {
     // 日志文件不可写时回退到标准输出，避免影响调度执行
@@ -250,19 +228,23 @@ export async function startDaemonHost(opts: DaemonHostOptions = {}): Promise<Dae
   const daemonLogFile = getDaemonLogFile(paths);
   const webLogFile = getDaemonWebLogFile(paths);
   const webEnabled = opts.webEnabled ?? true;
-  const webHost = opts.webHost ?? '127.0.0.1';
-  const requestedWebPort = opts.webPort ?? 3000;
-  const webIdleTimeoutSec = Math.max(10, opts.webIdleTimeoutSec ?? 900);
-  const maxSleepSliceMs = Math.max(200, opts.maxSleepSliceMs ?? DEFAULT_MAX_SLEEP_SLICE_MS);
+  const webHost = opts.webHost ?? DAEMON_DEFAULTS.webHost;
+  const requestedWebPort = opts.webPort ?? DAEMON_DEFAULTS.webPort;
+  const webIdleTimeoutSec = Math.max(
+    10,
+    opts.webIdleTimeoutSec ?? DAEMON_DEFAULTS.webIdleTimeoutSec,
+  );
+  const maxSleepSliceMs = Math.max(200, opts.maxSleepSliceMs ?? DAEMON_DEFAULTS.maxSleepSliceMs);
   const maxEmptySliceMs = Math.max(
     500,
-    opts.maxEmptyScheduleSliceMs ?? DEFAULT_EMPTY_SCHEDULE_SLICE_MS,
+    opts.maxEmptyScheduleSliceMs ?? DAEMON_DEFAULTS.maxEmptyScheduleSliceMs,
   );
 
   const startedAtIso = new Date(now()).toISOString();
   let triggeredSlots: Record<string, string> = existingState?.triggeredSlots
     ? { ...existingState.triggeredSlots }
     : {};
+  const failedDispatchCooldownUntil = new Map<string, number>();
   let nextScheduleRunAt: string | null = null;
   let nextScheduleName: string | null = null;
   let lastCheckAt: string | null = null;
@@ -331,8 +313,12 @@ export async function startDaemonHost(opts: DaemonHostOptions = {}): Promise<Dae
             daemonLogFile,
             'INFO',
             `网页控制台状态变更：${snapshot.state}${snapshot.pid ? ` (PID: ${snapshot.pid})` : ''}`,
+            now(),
           );
-          void enqueueWriteState(snapshot);
+          void enqueueWriteState(snapshot).catch((err) => {
+            const msg = err instanceof Error ? err.message : String(err);
+            appendDaemonLog(daemonLogFile, 'ERROR', `写入守护状态失败：${msg}`, now());
+          });
         }
       },
     });
@@ -363,6 +349,16 @@ export async function startDaemonHost(opts: DaemonHostOptions = {}): Promise<Dae
     }
   };
 
+  const runCheckCycleSafe = (forceReload: boolean): void => {
+    void runCheckCycle(forceReload).catch((err) => {
+      const msg = err instanceof Error ? err.message : String(err);
+      appendDaemonLog(daemonLogFile, 'ERROR', `后台调度循环异常：${msg}`, now());
+      if (!stopped) {
+        scheduleNextWakeup(now());
+      }
+    });
+  };
+
   const scheduleNextWakeup = (nowMs: number) => {
     clearWakeTimer();
     if (stopped) {
@@ -377,7 +373,7 @@ export async function startDaemonHost(opts: DaemonHostOptions = {}): Promise<Dae
     }
     wakeTimer = setTimeout(() => {
       wakeTimer = null;
-      void runCheckCycle(false);
+      runCheckCycleSafe(false);
     }, delayMs);
     wakeTimer.unref?.();
   };
@@ -397,6 +393,9 @@ export async function startDaemonHost(opts: DaemonHostOptions = {}): Promise<Dae
 
     checkRunning = (async () => {
       try {
+        if (forceReload) {
+          failedDispatchCooldownUntil.clear();
+        }
         await refreshDiskCacheIfNeeded(forceReload);
         const nowMs = now();
         lastCheckAt = new Date(nowMs).toISOString();
@@ -413,17 +412,17 @@ export async function startDaemonHost(opts: DaemonHostOptions = {}): Promise<Dae
         nextScheduleRunAt = plan.nextRunAt;
         nextScheduleName = plan.nextScheduleName;
 
-        for (const due of plan.dueJobs) {
-          triggeredSlots[due.job.id] = due.slotKey;
-        }
-        await enqueueWriteState();
+        const jobsToDispatch = plan.dueJobs.filter((due) => {
+          const retryAfter = failedDispatchCooldownUntil.get(due.job.id);
+          return retryAfter === undefined || nowMs >= retryAfter;
+        });
 
-        if (plan.dueJobs.length > 0) {
+        if (jobsToDispatch.length > 0) {
           cachedSettings = await loadSettings(paths.settingsFile).catch(() => cachedSettings);
           lastSettingsSig = readFileSignatureSync(paths.settingsFile);
         }
 
-        for (const due of plan.dueJobs) {
+        for (const due of jobsToDispatch) {
           const childEnv = buildDaemonChildEnv(cachedSettings, paths.rootDir);
           const primaryChannel = resolveStageChannelPlan(cachedSettings, 'select')[0];
           const routeDesc = primaryChannel
@@ -433,6 +432,7 @@ export async function startDaemonHost(opts: DaemonHostOptions = {}): Promise<Dae
             daemonLogFile,
             'INFO',
             `定时任务到点触发：${due.job.name} (${due.job.id}, ${due.job.time}, ${due.job.itemCount} 条, 当前主 AI 渠道: ${routeDesc})`,
+            nowMs,
           );
           try {
             if (opts.triggerScheduleRunner) {
@@ -440,17 +440,27 @@ export async function startDaemonHost(opts: DaemonHostOptions = {}): Promise<Dae
             } else {
               await spawnScheduledWorkerTask(paths, due, childEnv);
             }
+            // 仅在工作进程确认派生成功后再写入当日已触发槽位，派发失败时保留待补跑状态
+            triggeredSlots[due.job.id] = due.slotKey;
+            failedDispatchCooldownUntil.delete(due.job.id);
           } catch (err) {
             const msg = err instanceof Error ? err.message : String(err);
+            failedDispatchCooldownUntil.set(due.job.id, nowMs + 30_000);
             appendDaemonLog(
               daemonLogFile,
               'ERROR',
               `拉起定时任务工作进程失败 (${due.job.id})：${msg}`,
+              nowMs,
             );
           }
         }
 
+        await enqueueWriteState();
         scheduleNextWakeup(nowMs);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        appendDaemonLog(daemonLogFile, 'ERROR', `定时调度周期执行失败：${msg}`, now());
+        scheduleNextWakeup(now());
       } finally {
         checkRunning = null;
       }
@@ -463,46 +473,45 @@ export async function startDaemonHost(opts: DaemonHostOptions = {}): Promise<Dae
     }
   };
 
-  // 监听信号文件所在目录变更，Web 或 CLI 修改定时任务时无需等待长定时器即可重算计划
-  try {
-    signalWatcher = fsSync.watch(getDaemonStorageDir(paths), (_eventType, fileName) => {
-      if (fileName === 'reload.signal' && !stopped) {
-        void runCheckCycle(true);
-      }
-    });
-    signalWatcher.unref?.();
-  } catch {
-    signalWatcher = null;
-  }
-
+  let stop = async (): Promise<void> => {
+    await waitUntilStopped;
+  };
   const onSighup = () => {
     if (!stopped) {
-      appendDaemonLog(daemonLogFile, 'INFO', '收到重载信号，立即刷新定时任务计划');
-      void runCheckCycle(true);
+      appendDaemonLog(daemonLogFile, 'INFO', '收到重载信号，立即刷新定时任务计划', now());
+      runCheckCycleSafe(true);
     }
   };
   const onSigusr2 = () => {
     if (!stopped && webProxy) {
-      void webProxy.sleepIfIdle(false).then((slept) => {
-        if (slept) {
-          appendDaemonLog(daemonLogFile, 'INFO', '收到休眠指令，已暂停空闲网页子进程并回收内存');
-        }
-      });
+      void webProxy
+        .sleepIfIdle(false)
+        .then((slept) => {
+          if (slept) {
+            appendDaemonLog(
+              daemonLogFile,
+              'INFO',
+              '收到休眠指令，已暂停空闲网页子进程并回收内存',
+              now(),
+            );
+          }
+        })
+        .catch((err) => {
+          const msg = err instanceof Error ? err.message : String(err);
+          appendDaemonLog(daemonLogFile, 'ERROR', `网页子进程休眠失败：${msg}`, now());
+        });
     }
   };
   const onStopSignal = () => {
-    void stop();
+    void stop().catch((err) => {
+      const msg = err instanceof Error ? err.message : String(err);
+      appendDaemonLog(daemonLogFile, 'ERROR', `守护进程停止流程异常：${msg}`, now());
+      resolveStopPromise();
+    });
   };
 
   const useProcessSignals = opts.registerSignals ?? true;
-  if (useProcessSignals) {
-    process.on('SIGHUP', onSighup);
-    process.on('SIGUSR2', onSigusr2);
-    process.on('SIGTERM', onStopSignal);
-    process.on('SIGINT', onStopSignal);
-  }
-
-  const stop = async (): Promise<void> => {
+  stop = async (): Promise<void> => {
     if (stopped) {
       await waitUntilStopped;
       return;
@@ -527,14 +536,34 @@ export async function startDaemonHost(opts: DaemonHostOptions = {}): Promise<Dae
     await fs
       .rm(path.join(getDaemonStorageDir(paths), 'state.json'), { force: true })
       .catch(() => undefined);
-    appendDaemonLog(daemonLogFile, 'INFO', `守护进程已安全停止（PID: ${process.pid}）`);
+    appendDaemonLog(daemonLogFile, 'INFO', `守护进程已安全停止（PID: ${process.pid}）`, now());
     resolveStopPromise();
   };
+
+  // 先完成 stop 句柄赋值再注册目录监听与进程信号，消除竞态异常窗口
+  try {
+    signalWatcher = fsSync.watch(getDaemonStorageDir(paths), (_eventType, fileName) => {
+      if (fileName === 'reload.signal' && !stopped) {
+        runCheckCycleSafe(true);
+      }
+    });
+    signalWatcher.unref?.();
+  } catch {
+    signalWatcher = null;
+  }
+
+  if (useProcessSignals) {
+    process.on('SIGHUP', onSighup);
+    process.on('SIGUSR2', onSigusr2);
+    process.on('SIGTERM', onStopSignal);
+    process.on('SIGINT', onStopSignal);
+  }
 
   appendDaemonLog(
     daemonLogFile,
     'INFO',
     `守护进程已启动（PID: ${process.pid}${webEnabled ? `, 网页按需网关 http://${webHost}:${actualWebPort}, 闲置 ${webIdleTimeoutSec}s 自动休眠` : ', 仅调度模式'}）`,
+    now(),
   );
 
   await runCheckCycle(true);

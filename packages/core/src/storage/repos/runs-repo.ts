@@ -400,6 +400,37 @@ export function createRunsRepo(db: DatabaseSync) {
       db.prepare('UPDATE runs SET heartbeat_at = ? WHERE id = ?').run(ts, id);
     },
 
+    /** 仅更新任务保存的配置快照，不改变任务状态 */
+    updateConfigSnapshot(id: string, configSnapshotJson: string): void {
+      db.prepare('UPDATE runs SET config_snapshot = ? WHERE id = ?').run(configSnapshotJson, id);
+    },
+
+    /** 统一更新任务的主播形象、专属配乐与人工锁定标志 */
+    updateHostAndBgm(
+      id: string,
+      fields: { hostId?: string | null; bgmFile?: string | null; hostManual?: boolean },
+    ): void {
+      const sets: string[] = [];
+      const params: Array<string | number | null> = [];
+      if (fields.hostId !== undefined) {
+        sets.push('host_id = ?');
+        params.push(fields.hostId);
+      }
+      if (fields.bgmFile !== undefined) {
+        sets.push('bgm_file = ?');
+        params.push(fields.bgmFile);
+      }
+      if (fields.hostManual !== undefined) {
+        sets.push('host_manual = ?');
+        params.push(fields.hostManual ? 1 : 0);
+      }
+      if (sets.length === 0) {
+        return;
+      }
+      params.push(id);
+      db.prepare(`UPDATE runs SET ${sets.join(', ')} WHERE id = ?`).run(...params);
+    },
+
     /** 标记用户请求取消该任务，供运行中的执行器安全停止 */
     requestCancel(id: string): void {
       db.prepare('UPDATE runs SET cancel_requested = 1 WHERE id = ?').run(id);

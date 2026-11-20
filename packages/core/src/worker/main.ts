@@ -243,10 +243,15 @@ async function executeWorkerAction(
         if (!parsed.itemCount) {
           throw new RangeError('start 操作必须显式传入正整数条数 -n');
         }
+        if (parsed.bgmFile) {
+          core.context.logger.warn(
+            { bgmFile: parsed.bgmFile, scheduleId: parsed.scheduleId, trigger: parsed.trigger },
+            '忽略已废弃的独立 --bgm 参数，背景音乐将随自动选定的主播形象专属绑定',
+          );
+        }
         await core.tasks.start({
           itemCount: parsed.itemCount,
           notBeforeAt: parsed.notBeforeAt,
-          bgmFile: parsed.bgmFile,
           trigger: parsed.trigger,
           scheduleId: parsed.scheduleId,
           detach: false,

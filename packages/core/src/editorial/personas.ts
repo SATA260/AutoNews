@@ -1,3 +1,4 @@
+import fsSync from 'node:fs';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import {
@@ -27,6 +28,19 @@ export interface FormatPersonaPromptOptions {
   includeReactions?: boolean;
 }
 
+/** 同步加载并校验主播人设配置；当配置文件不存在时返回空列表 */
+export function loadPersonasSync(rootDir: string): PersonaProfile[] {
+  try {
+    const text = fsSync.readFileSync(path.join(rootDir, 'config', 'personas.yaml'), 'utf8');
+    return PersonasFileSchema.parse(parse(text)).personas;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      return [];
+    }
+    throw error;
+  }
+}
+
 /** 加载并校验主播人设配置；当配置文件不存在时返回空列表 */
 export async function loadPersonas(ctx: CoreContext): Promise<PersonaProfile[]> {
   try {
@@ -40,23 +54,50 @@ export async function loadPersonas(ctx: CoreContext): Promise<PersonaProfile[]> 
   }
 }
 
-/** 查询当前任务之前最近一次有效任务所使用的主播标识，已放弃或跳过的任务不参与避重 */
+/** 根据事件关联的文章标题与摘要构建额外的文本线索，供主播形象规则匹配复用 */
+export function buildExtraTextByEventId(
+  ctx: CoreContext,
+  events: readonly EventRecord[],
+): Map<string, string> {
+  const extraTextByEventId = new Map<string, string>();
+  const allArticleIds = Array.from(new Set(events.flatMap((event) => event.articleIds)));
+  if (allArticleIds.length === 0) {
+    return extraTextByEventId;
+  }
+  const articles = ctx.repos.articles.getByIds(allArticleIds);
+  const articleMap = new Map(articles.map((article) => [article.id, article]));
+  for (const event of events) {
+    const joined = event.articleIds
+      .map((id) => articleMap.get(id))
+      .filter((article): article is NonNullable<typeof article> => Boolean(article))
+      .map((article) => `${article.title} ${article.excerpt ?? ''}`)
+      .join(' ');
+    if (joined) {
+      extraTextByEventId.set(event.id, joined);
+    }
+  }
+  return extraTextByEventId;
+}
+
+/** 查询最近一次有效任务所使用的主播标识，可按任务编号排除且已放弃或跳过的任务不参与避重 */
 export function findPreviousHostId(
   ctx: CoreContext,
-  excludeRunId: string,
+  excludeRunId?: string,
   notAfterIso?: string,
 ): HostMascotId | null {
   const row = ctx.db
     .prepare(
       `SELECT host_id FROM runs
-       WHERE id != ?
+       WHERE (? IS NULL OR id != ?)
          AND host_id IS NOT NULL
          AND status NOT IN ('abandoned', 'skipped')
          AND (? IS NULL OR created_at <= ?)
        ORDER BY created_at DESC
        LIMIT 1`,
     )
-    .get(excludeRunId, notAfterIso ?? null, notAfterIso ?? null) as { host_id: string } | undefined;
+    .get(excludeRunId ?? null, excludeRunId ?? null, notAfterIso ?? null, notAfterIso ?? null) as
+    | { host_id: string }
+    | undefined;
   const parsed = HostMascotIdSchema.safeParse(row?.host_id);
   return parsed.success ? parsed.data : null;
 }

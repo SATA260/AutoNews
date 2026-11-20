@@ -37,15 +37,23 @@ const TRIGGER_TEXT: Record<Trigger, string> = {
 export default async function DashboardPage() {
   const core = await getCore();
   const settings = core.config.getSettings();
-  const [recentRuns, sourceHealth, schedules, articleOverview, daemonStatus, previousHostId] =
-    await Promise.all([
-      core.tasks.list({ limit: 10 }),
-      core.sources.list(),
-      core.scheduler.list(),
-      core.articles.list({ page: 1, pageSize: 1 }),
-      core.daemon.getStatus(),
-      core.tasks.getLatestHostId(),
-    ]);
+  const [
+    recentRuns,
+    sourceHealth,
+    schedules,
+    articleOverview,
+    daemonStatus,
+    previousHostId,
+    hostPersonas,
+  ] = await Promise.all([
+    core.tasks.list({ limit: 10 }),
+    core.sources.list(),
+    core.scheduler.list(),
+    core.articles.list({ page: 1, pageSize: 1 }),
+    core.daemon.getStatus(),
+    core.tasks.getLatestHostId(),
+    core.tasks.listHostPersonas(),
+  ]);
 
   const activeRunSummary = recentRuns.find(
     (r) => r.status === 'running' || r.status === 'queued' || r.status === 'publishing',
@@ -107,7 +115,11 @@ export default async function DashboardPage() {
             <Newspaper className="h-4 w-4 text-slate-500" aria-hidden="true" />
             <span>浏览爬取新闻</span>
           </Link>
-          <StartRunModalButton previousHostId={previousHostId} label="手动启动一期任务" />
+          <StartRunModalButton
+            hosts={hostPersonas}
+            previousHostId={previousHostId}
+            label="手动启动一期任务"
+          />
         </div>
       </div>
 
@@ -495,7 +507,7 @@ export default async function DashboardPage() {
                       <span className="font-medium text-slate-700">
                         {stageKey}
                         <span className="ml-1.5 text-[10px] font-normal text-slate-400">
-                          {stageCfg.mode === 'custom' ? '单独主渠道' : '渠道池'}
+                          {stageCfg.mode === 'pool' ? '渠道池' : '单独主渠道'}
                         </span>
                       </span>
                       <span

@@ -1,3 +1,5 @@
+import fsSync from 'node:fs';
+import { DatabaseSync } from 'node:sqlite';
 import {
   type PublishRecord,
   type PublishStatus,
@@ -5,7 +7,7 @@ import {
   ScheduleCutoffModeSchema,
   type ScheduleJob,
 } from '@aidaily/contracts';
-import { type DatabaseSync, inTransaction } from '../db.js';
+import { inTransaction } from '../db.js';
 
 /** 数据库 `schedules` 表行结构 */
 interface ScheduleRow {
@@ -196,6 +198,31 @@ export function createSchedulesRepo(db: DatabaseSync) {
       return Number(res.changes) > 0;
     },
   };
+}
+
+/** 以只读连接从数据库读取全部定时任务条目，供低占用后台守护进程使用（数据库未初始化时安全返回空数组） */
+export function listSchedulesReadOnlyFromDb(
+  dbFile: string,
+): Array<Omit<ScheduleJob, 'installed' | 'nextRunAt'>> {
+  if (!fsSync.existsSync(dbFile)) {
+    return [];
+  }
+  const db = new DatabaseSync(dbFile, { readOnly: true });
+  try {
+    db.exec('PRAGMA busy_timeout = 2000;');
+    const tableRow = db
+      .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'schedules'")
+      .get() as { name?: string } | undefined;
+    if (!tableRow?.name) {
+      return [];
+    }
+    const rows = db
+      .prepare('SELECT * FROM schedules ORDER BY time_expr ASC, created_at ASC')
+      .all() as unknown as ScheduleRow[];
+    return rows.map(mapSchedule);
+  } finally {
+    db.close();
+  }
 }
 
 /** 创建 B 站投稿发布记录操作对象，管理草稿保存与发布结果追踪 */

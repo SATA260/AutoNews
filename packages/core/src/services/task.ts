@@ -31,7 +31,7 @@ import {
 import { TZDate } from '@date-fns/tz';
 import type { CoreContext } from '../context.js';
 import type { EditSubStep } from '../editorial/item-pipeline.js';
-import { findPreviousHostId } from '../editorial/personas.js';
+import { findPreviousHostId, loadPersonas } from '../editorial/personas.js';
 import { collectEventMediaPool, loadEventArticles } from '../editorial/s3-summarize.js';
 import { NotFoundError } from '../errors.js';
 import { assertHostBgmMatch, listBgmFiles } from '../media/bgm.js';
@@ -110,6 +110,13 @@ export interface TaskRetryItemOptions {
   detach?: boolean;
 }
 
+/** 供任务创建页面选择的主播形象及专属背景音乐摘要信息 */
+export interface HostPersonaOption {
+  id: HostMascotId;
+  displayName: string;
+  bgmFile: string | null;
+}
+
 /** 监听任务事件流的可选控制参数 */
 export interface TaskWatchOptions {
   afterId?: number;
@@ -120,6 +127,8 @@ export interface TaskWatchOptions {
 export interface TaskService {
   /** 列出可用于新任务的背景音乐。 */
   listBgm(): Promise<string[]>;
+  /** 读取配置文件中可选的虚拟主播形象与专属配乐列表 */
+  listHostPersonas(): Promise<HostPersonaOption[]>;
   /** 查询最近一次有效任务所选定的主播形象标识（无历史记录时返回 null） */
   getLatestHostId(): Promise<HostMascotId | null>;
   /** 查询最近一次成功投稿或本地完结发版的时间戳（无历史记录时返回 null） */
@@ -522,9 +531,18 @@ export function createTaskService(ctx: CoreContext): TaskService {
     async listBgm() {
       return listBgmFiles(ctx);
     },
+    /** 读取配置文件中可选的虚拟主播形象及其专属背景音乐名称 */
+    async listHostPersonas() {
+      const personas = await loadPersonas(ctx);
+      return personas.map((persona) => ({
+        id: persona.id,
+        displayName: persona.displayName,
+        bgmFile: persona.bgmFile ?? `${persona.id}-bgm.mp3`,
+      }));
+    },
     /** 查询最近一次有效任务所选定的主播形象标识 */
     async getLatestHostId() {
-      return findPreviousHostId(ctx, '');
+      return findPreviousHostId(ctx);
     },
     /** 查询最近一次成功发版或投稿的时间戳 */
     async getLatestPublishedAt() {

@@ -538,7 +538,6 @@ export function StageRoutingForm({
     event.preventDefault();
     setFeedback(null);
     const fd = new FormData(event.currentTarget);
-    fd.set('channelsJson', JSON.stringify(channelsState));
     startTransition(async () => {
       const res = await updateStageRoutingAction(fd);
       setFeedback({

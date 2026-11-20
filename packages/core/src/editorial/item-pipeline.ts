@@ -14,7 +14,13 @@ import { PipelineError } from '../errors.js';
 import { resolvePersonaBgmFile } from '../media/bgm.js';
 import { readJsonOrNull, writeJsonAtomic } from '../storage/files.js';
 import { normalizeStoredPolishedItem } from '../storage/repos/editorial-repo.js';
-import { chooseHost, findPreviousHostId, getRunPersona, loadPersonas } from './personas.js';
+import {
+  buildExtraTextByEventId,
+  chooseHost,
+  findPreviousHostId,
+  getRunPersona,
+  loadPersonas,
+} from './personas.js';
 import { type PrecheckResult, precheckPolishedItem } from './prechecks.js';
 import { runRefillRound } from './refill.js';
 import { loadEventArticles, summarizeEventItem } from './s3-summarize.js';
@@ -692,21 +698,23 @@ async function ensureRunHostAndBgmBeforeEdit(
   const previousHostId = findPreviousHostId(ctx, runId, runCreatedAt);
   const hasStartedAnyItem = allItems.some((item) => item.status !== 'queued');
   let nextHostId = hostRow?.host_id ?? null;
-  if (
+  const needsHostFallback =
     !hostRow?.host_manual &&
-    (!nextHostId || (personas.length > 1 && nextHostId === previousHostId && !hasStartedAnyItem))
-  ) {
+    (!nextHostId || (personas.length > 1 && nextHostId === previousHostId && !hasStartedAnyItem));
+  if (needsHostFallback) {
     const primary = events.filter((ev) => ev.role === 'primary');
-    const reselected = chooseHost(primary.length > 0 ? primary : events, personas, previousHostId);
+    const scoringEvents = primary.length > 0 ? primary : events;
+    const extraTextByEventId = buildExtraTextByEventId(ctx, scoringEvents);
+    const reselected = chooseHost(scoringEvents, personas, previousHostId, extraTextByEventId);
     if (reselected) {
       nextHostId = reselected;
-      ctx.db.prepare('UPDATE runs SET host_id = ? WHERE id = ?').run(nextHostId, runId);
+      ctx.repos.runs.updateHostAndBgm(runId, { hostId: nextHostId });
     }
   }
   if (nextHostId) {
     const boundBgm = await resolvePersonaBgmFile(ctx, nextHostId, personas);
     if (boundBgm && hostRow?.bgm_file !== boundBgm) {
-      ctx.db.prepare('UPDATE runs SET bgm_file = ? WHERE id = ?').run(boundBgm, runId);
+      ctx.repos.runs.updateHostAndBgm(runId, { bgmFile: boundBgm });
     }
   }
 }

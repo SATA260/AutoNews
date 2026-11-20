@@ -33,8 +33,24 @@ const tempDirs: string[] = [];
 const activeServers: http.Server[] = [];
 const envSnapshot = { ...process.env };
 
+/** 按初始环境快照逐项恢复 process.env，避免整体替换全局环境对象引用 */
+function restoreProcessEnv(snapshot: NodeJS.ProcessEnv): void {
+  for (const key of Object.keys(process.env)) {
+    if (!(key in snapshot)) {
+      delete process.env[key];
+    }
+  }
+  for (const [key, value] of Object.entries(snapshot)) {
+    if (value === undefined) {
+      delete process.env[key];
+    } else {
+      process.env[key] = value;
+    }
+  }
+}
+
 afterEach(async () => {
-  process.env = { ...envSnapshot };
+  restoreProcessEnv(envSnapshot);
   await Promise.all(
     activeServers.splice(0).map(
       (srv) =>
@@ -215,6 +231,19 @@ describe('aidaily CLI commands, JSON output, streaming logs, and exit codes', ()
       await runCli(
         ['publish-confirm', '20261116-0001-aaaa', '--not-published', '--bvid', 'BV1XY4y1a7bC'],
         c7.io,
+      ),
+    ).toBe(2);
+
+    // --latest-config 与 --keep-snapshot 互斥返回退出码 2
+    const c8 = createBufferedIo();
+    expect(
+      await runCli(['resume', '20261116-0001-aaaa', '--latest-config', '--keep-snapshot'], c8.io),
+    ).toBe(2);
+    const c9 = createBufferedIo();
+    expect(
+      await runCli(
+        ['retry-item', '20261116-0001-aaaa', 'item-1', '--latest-config', '--keep-snapshot'],
+        c9.io,
       ),
     ).toBe(2);
   });

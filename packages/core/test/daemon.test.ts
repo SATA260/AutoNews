@@ -29,8 +29,24 @@ const tempDirs: string[] = [];
 const cleanupCallbacks: Array<() => Promise<void>> = [];
 const envSnapshot = { ...process.env };
 
+/** 按初始环境快照逐项恢复 process.env，避免整体替换全局环境对象引用 */
+function restoreProcessEnv(snapshot: NodeJS.ProcessEnv): void {
+  for (const key of Object.keys(process.env)) {
+    if (!(key in snapshot)) {
+      delete process.env[key];
+    }
+  }
+  for (const [key, value] of Object.entries(snapshot)) {
+    if (value === undefined) {
+      delete process.env[key];
+    } else {
+      process.env[key] = value;
+    }
+  }
+}
+
 afterEach(async () => {
-  process.env = { ...envSnapshot };
+  restoreProcessEnv(envSnapshot);
   for (const fn of cleanupCallbacks.splice(0).reverse()) {
     await fn().catch(() => undefined);
   }
@@ -132,7 +148,7 @@ describe('root resolution, global CLI launcher, scheduler planning, lazy web pro
     await expect(
       installGlobalCli({ rootDir, binDir: globalBinDir, cliScriptPath: CLI_DIST_BIN }),
     ).rejects.toThrow(/非本项目创建/);
-  });
+  }, 20_000);
 
   it('plans due schedule triggers with missed catch-up window, creation baseline, and same-day dedup', () => {
     const timezone = 'Asia/Shanghai';
@@ -466,5 +482,140 @@ describe('root resolution, global CLI launcher, scheduler planning, lazy web pro
 
     expect(envs).toHaveLength(1);
     expect(envs[0]?.PATH).toContain('/custom/live-bin');
+  });
+
+  it('supports cross-midnight schedule catch-up, dispatch failure recovery, shell special chars, and non-loopback proxy guard', async () => {
+    const timezone = 'Asia/Shanghai';
+    // 1. 跨零点补触发：昨晚 23:30 定时计划在次日 00:10 唤醒（在 2 小时宽限内）应能正确补跑，若已跑过则不再重复
+    const overnightJob = {
+      id: 'sched-night',
+      name: '深夜AI晚报',
+      time: '23:30',
+      itemCount: 3,
+      bgmFile: null,
+      enabled: true,
+      lastTriggeredAt: null as string | null,
+      createdAt: '2026-11-18T00:00:00.000Z',
+      updatedAt: '2026-11-18T00:00:00.000Z',
+    };
+    // 2026-11-20 00:10:00 CST = 2026-11-19T16:10:00.000Z
+    const afterMidnightMs = Date.parse('2026-11-19T16:10:00.000Z');
+    const overnightPlan = evaluateDueSchedules({
+      schedules: [overnightJob],
+      timezone,
+      nowMs: afterMidnightMs,
+      triggeredSlots: {},
+    });
+    expect(overnightPlan.dueJobs.map((d) => d.slotKey)).toEqual(['2026-11-19@23:30']);
+
+    const dedupOvernightSlot = evaluateDueSchedules({
+      schedules: [overnightJob],
+      timezone,
+      nowMs: afterMidnightMs,
+      triggeredSlots: { 'sched-night': '2026-11-19@23:30' },
+    });
+    expect(dedupOvernightSlot.dueJobs).toHaveLength(0);
+    expect(dedupOvernightSlot.prunedTriggeredSlots).toEqual({ 'sched-night': '2026-11-19@23:30' });
+
+    const dedupOvernight = evaluateDueSchedules({
+      schedules: [
+        {
+          ...overnightJob,
+          lastTriggeredAt: '2026-11-19T15:30:05.000Z',
+        },
+      ],
+      timezone,
+      nowMs: afterMidnightMs,
+      triggeredSlots: {},
+    });
+    expect(dedupOvernight.dueJobs).toHaveLength(0);
+
+    // 2. 派发失败不锁定当日槽位，手动重载或下轮检查可成功补发
+    const fixedNow = new Date('2026-11-20T00:30:05.000Z');
+    const { rootDir, launchAgentsDir, globalBinDir } = await createIsolatedWorkspace();
+    const core = await createCore({
+      rootDir,
+      launchAgentsDir,
+      launchctlExec: async () => ({ exitCode: 0, stderr: '' }),
+      now: () => fixedNow,
+    });
+    const retryJob = await core.scheduler.create({
+      name: '派发失败重放测试',
+      time: '08:30',
+      itemCount: 2,
+      enabled: true,
+    });
+    core.context.db
+      .prepare('UPDATE schedules SET created_at = ?, updated_at = ? WHERE id = ?')
+      .run('2026-11-19T00:00:00.000Z', '2026-11-19T00:00:00.000Z', retryJob.id);
+    await core.close();
+
+    let attempts = 0;
+    const dispatchedIds: string[] = [];
+    const daemon = await startDaemonHost({
+      rootDir,
+      webEnabled: false,
+      registerSignals: false,
+      now: () => fixedNow.getTime(),
+      maxSleepSliceMs: 1_000,
+      triggerScheduleRunner: async (due) => {
+        attempts += 1;
+        if (attempts === 1) {
+          throw new Error('模拟工作进程暂时拉起失败');
+        }
+        dispatchedIds.push(due.job.id);
+      },
+    });
+    cleanupCallbacks.push(() => daemon.stop());
+    expect(attempts).toBe(1);
+    expect(dispatchedIds).toEqual([]);
+    await daemon.triggerCheckNow(true);
+    expect(attempts).toBe(2);
+    expect(dispatchedIds).toEqual([retryJob.id]);
+
+    // 3. 全局命令行脚本保留单引号转义，路径中含 $ 符号也不会被 shell 展开
+    const specialRoot = path.join(rootDir, "dir-with-$KEEP-and quote's");
+    await fs.mkdir(specialRoot, { recursive: true });
+    await fs.writeFile(
+      path.join(specialRoot, 'echo-root.mjs'),
+      "console.log(process.env.AIDAILY_ROOT ?? '');\n",
+      'utf8',
+    );
+    const installedSpecial = await installGlobalCli({
+      rootDir: specialRoot,
+      binDir: globalBinDir,
+      cliScriptPath: path.join(specialRoot, 'echo-root.mjs'),
+      pathEnv: `/usr/bin:${globalBinDir}`,
+    });
+    const { stdout: specialOut } = await execFileAsync(installedSpecial.binPath, []);
+    expect(specialOut.trim()).toBe(path.resolve(specialRoot));
+
+    // 4. 非回环地址未设 AIDAILY_WEB_TOKEN 拒绝监听，/api/* 后端故障返回 JSON 错误
+    delete process.env.AIDAILY_WEB_TOKEN;
+    const exposedProxy = new WebOnDemandProxy({
+      rootDir,
+      host: '0.0.0.0',
+      port: 0,
+      logFile: path.join(rootDir, 'storage', 'logs', 'web.log'),
+    });
+    await expect(exposedProxy.listen()).rejects.toThrow(/AIDAILY_WEB_TOKEN/);
+
+    const failingProxy = new WebOnDemandProxy({
+      rootDir,
+      host: '127.0.0.1',
+      port: 0,
+      logFile: path.join(rootDir, 'storage', 'logs', 'web-fail.log'),
+      backendLauncher: async () => {
+        throw new Error('后端测试不可用');
+      },
+    });
+    cleanupCallbacks.push(() => failingProxy.close());
+    const boundFail = await failingProxy.listen();
+    const apiErrRes = await fetch(`http://127.0.0.1:${boundFail.port}/api/runs/test/events`, {
+      headers: { Accept: 'application/json' },
+    });
+    expect(apiErrRes.status).toBe(503);
+    expect(apiErrRes.headers.get('content-type')).toContain('application/json');
+    expect(await apiErrRes.json()).toMatchObject({ ok: false, error: '后端测试不可用' });
   });
 });

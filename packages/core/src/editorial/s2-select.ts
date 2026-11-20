@@ -13,6 +13,7 @@ import { resolvePersonaBgmFile } from '../media/bgm.js';
 import { inTransaction } from '../storage/db.js';
 import { emitRunEvent } from '../workflow/events.js';
 import {
+  buildExtraTextByEventId,
   chooseHost,
   findPreviousHostId,
   formatEligibleHostCandidatesForPrompt,
@@ -46,23 +47,7 @@ async function finalizeRunHostAndBgm(opts: {
   } = opts;
   const primary = events.filter((event) => event.role === 'primary');
   const scoringEvents = primary.length > 0 ? primary : events;
-
-  const extraTextByEventId = new Map<string, string>();
-  const allArticleIds = Array.from(new Set(scoringEvents.flatMap((event) => event.articleIds)));
-  if (allArticleIds.length > 0) {
-    const articles = ctx.repos.articles.getByIds(allArticleIds);
-    const articleMap = new Map(articles.map((article) => [article.id, article]));
-    for (const event of scoringEvents) {
-      const joined = event.articleIds
-        .map((id) => articleMap.get(id))
-        .filter((article): article is NonNullable<typeof article> => Boolean(article))
-        .map((article) => `${article.title} ${article.excerpt ?? ''}`)
-        .join(' ');
-      if (joined) {
-        extraTextByEventId.set(event.id, joined);
-      }
-    }
-  }
+  const extraTextByEventId = buildExtraTextByEventId(ctx, scoringEvents);
 
   let host: string | null = null;
   let source: 'manual' | 'ai_select' | 'rule_fallback' | 'none' = 'none';
@@ -72,7 +57,7 @@ async function finalizeRunHostAndBgm(opts: {
     host = manualHostId;
     source = 'manual';
     reason = '沿用人工指定主播形象';
-  } else if (personas.length > 0) {
+  } else if (personas.length > 0 && scoringEvents.length > 0) {
     const aiValid =
       allowAiRecommendation &&
       aiRecommendedHostId !== undefined &&
@@ -93,15 +78,11 @@ async function finalizeRunHostAndBgm(opts: {
   }
 
   const boundBgm = host ? await resolvePersonaBgmFile(ctx, host, personas) : null;
-  if (boundBgm) {
-    ctx.db
-      .prepare('UPDATE runs SET host_id = ?, bgm_file = ? WHERE id = ?')
-      .run(host, boundBgm, runId);
-  } else {
-    ctx.db.prepare('UPDATE runs SET host_id = ? WHERE id = ?').run(host, runId);
-  }
-
   if (host) {
+    ctx.repos.runs.updateHostAndBgm(runId, {
+      hostId: host,
+      ...(boundBgm ? { bgmFile: boundBgm } : {}),
+    });
     emitRunEvent(ctx, {
       runId,
       level: 'info',

@@ -260,6 +260,15 @@ describe('single-section narration edits and published-run bookkeeping', () => {
         core.context.repos.runStages.listByRun(runId).find((stage) => stage.stage === 'render')
           ?.status,
       ).toBe('stale');
+
+      // 只读获取口播段落列表时绝不篡改任务历史配置快照
+      const snapshotBeforeView = core.context.repos.runs.getById(runId)?.configSnapshotJson;
+      await updateSettingsFile(path.join(core.context.paths.rootDir, 'config', 'settings.yaml'), {
+        render: { pagePaddingSec: 1.5 },
+      });
+      const sectionsView = await core.tasks.getNarrationSections(runId);
+      expect(sectionsView.length).toBeGreaterThan(0);
+      expect(core.context.repos.runs.getById(runId)?.configSnapshotJson).toBe(snapshotBeforeView);
     } finally {
       await core.close();
     }

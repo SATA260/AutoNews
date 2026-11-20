@@ -138,7 +138,7 @@ async function syncRunWithLatestConfig(
   const prevJson = opts?.currentSnapshotJson ?? ctx.repos.runs.getById(runId)?.configSnapshotJson;
   const changed = nextJson !== prevJson;
   if (changed) {
-    ctx.db.prepare('UPDATE runs SET config_snapshot = ? WHERE id = ?').run(nextJson, runId);
+    ctx.repos.runs.updateConfigSnapshot(runId, nextJson);
   }
   if (opts?.forceNotifyEvent || (opts?.notifyEvent && changed)) {
     emitRunEvent(ctx, {
@@ -201,10 +201,13 @@ export function createRun(
       configSnapshotJson,
       createdAt: nowIso,
     });
-    if (opts.hostId || initialBgmFile)
-      ctx.db
-        .prepare('UPDATE runs SET host_id = ?, bgm_file = ?, host_manual = ? WHERE id = ?')
-        .run(opts.hostId ?? null, initialBgmFile, opts.hostId ? 1 : 0, runId);
+    if (opts.hostId || initialBgmFile) {
+      ctx.repos.runs.updateHostAndBgm(runId, {
+        hostId: opts.hostId ?? null,
+        bgmFile: initialBgmFile,
+        hostManual: Boolean(opts.hostId),
+      });
+    }
     ctx.repos.runStages.initStages(runId);
     emitRunEvent(ctx, {
       runId,

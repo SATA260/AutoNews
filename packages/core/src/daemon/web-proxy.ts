@@ -5,6 +5,7 @@ import http from 'node:http';
 import net from 'node:net';
 import path from 'node:path';
 import type { DaemonWebState } from '@aidaily/contracts';
+import { DAEMON_DEFAULTS, isLoopbackWebHost } from './constants.js';
 
 /** 网页按需网关的即时运行状态快照 */
 export interface WebProxySnapshot {
@@ -245,8 +246,8 @@ export class WebOnDemandProxy {
 
   constructor(opts: WebOnDemandProxyOptions) {
     this.rootDir = path.resolve(opts.rootDir);
-    this.host = opts.host ?? '127.0.0.1';
-    this.requestedPort = opts.port ?? 3000;
+    this.host = opts.host ?? DAEMON_DEFAULTS.webHost;
+    this.requestedPort = opts.port ?? DAEMON_DEFAULTS.webPort;
     this.idleTimeoutMs = Math.max(1_000, opts.idleTimeoutMs ?? DEFAULT_IDLE_TIMEOUT_MS);
     this.startupTimeoutMs = Math.max(1_000, opts.startupTimeoutMs ?? DEFAULT_STARTUP_TIMEOUT_MS);
     this.logFile = opts.logFile;
@@ -260,8 +261,19 @@ export class WebOnDemandProxy {
     if (this.server) {
       return { host: this.host, port: this.listeningPort };
     }
+    if (!isLoopbackWebHost(this.host) && !process.env.AIDAILY_WEB_TOKEN?.trim()) {
+      throw new Error(
+        `禁止在未配置访问令牌 AIDAILY_WEB_TOKEN 时将按需网页代理监听到非本机回环地址 (${this.host})`,
+      );
+    }
     const server = http.createServer((req, res) => {
-      void this.handleRequest(req, res);
+      void this.handleRequest(req, res).catch((err) => {
+        if (!res.headersSent && !res.writableEnded) {
+          const msg = err instanceof Error ? err.message : String(err);
+          res.writeHead(500, { 'Content-Type': 'text/plain; charset=utf-8' });
+          res.end(`网页代理处理请求失败：${msg}`);
+        }
+      });
     });
     server.requestTimeout = 0;
     await new Promise<void>((resolve, reject) => {
@@ -484,14 +496,23 @@ export class WebOnDemandProxy {
     res.once('finish', finishRequest);
     res.once('close', finishRequest);
 
+    const expectsJson =
+      Boolean(req.url?.startsWith('/api/')) ||
+      Boolean(req.headers.accept?.toLowerCase().includes('application/json'));
+
     let backend: WebBackendHandle;
     try {
       backend = await this.ensureBackendReady();
     } catch (err) {
       if (!res.headersSent && !res.writableEnded) {
         const msg = err instanceof Error ? err.message : String(err);
-        res.writeHead(503, { 'Content-Type': 'text/html; charset=utf-8' });
-        res.end(renderUnavailableHtml(msg, this.logFile));
+        if (expectsJson) {
+          res.writeHead(503, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(JSON.stringify({ ok: false, error: msg }));
+        } else {
+          res.writeHead(503, { 'Content-Type': 'text/html; charset=utf-8' });
+          res.end(renderUnavailableHtml(msg, this.logFile));
+        }
       }
       return;
     }
@@ -538,8 +559,13 @@ export class WebOnDemandProxy {
 
       proxyReq.once('error', (err) => {
         if (!res.headersSent && !res.writableEnded) {
-          res.writeHead(502, { 'Content-Type': 'text/html; charset=utf-8' });
-          res.end(renderUnavailableHtml(`连接内部网页服务失败：${err.message}`, this.logFile));
+          if (expectsJson) {
+            res.writeHead(502, { 'Content-Type': 'application/json; charset=utf-8' });
+            res.end(JSON.stringify({ ok: false, error: `连接内部网页服务失败：${err.message}` }));
+          } else {
+            res.writeHead(502, { 'Content-Type': 'text/html; charset=utf-8' });
+            res.end(renderUnavailableHtml(`连接内部网页服务失败：${err.message}`, this.logFile));
+          }
         } else {
           res.destroy();
         }

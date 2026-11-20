@@ -1,4 +1,4 @@
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import fsSync from 'node:fs';
 import fs from 'node:fs/promises';
 import os from 'node:os';
@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url';
 import type { DaemonStatus, GlobalCliStatus } from '@aidaily/contracts';
 import { execa } from 'execa';
 import type { CoreContext } from '../context.js';
+import { DAEMON_DEFAULTS, normalizeBrowserWebHost } from '../daemon/constants.js';
 import { getGlobalCliStatus, installGlobalCli, uninstallGlobalCli } from '../daemon/global-cli.js';
 import { buildDaemonChildEnv } from '../daemon/runner.js';
 import {
@@ -18,7 +19,7 @@ import {
   readDaemonRuntimeState,
 } from '../daemon/runtime-state.js';
 import { computeNextScheduleRunAt } from '../daemon/schedule-planner.js';
-import { assertWebBuildPresent } from '../daemon/web-proxy.js';
+import { assertWebBuildPresent, resolveNextBinPath } from '../daemon/web-proxy.js';
 import { writeFileAtomic } from '../storage/files.js';
 import type { LaunchctlExecutor } from './scheduler.js';
 
@@ -31,6 +32,14 @@ export interface StartDaemonOptions {
   webHost?: string;
   webPort?: number;
   webIdleTimeoutSec?: number;
+}
+
+/** 在前台直接运行网页控制台的启动参数 */
+export interface StartForegroundWebOptions {
+  host?: string;
+  port?: number;
+  dev?: boolean;
+  onReadyUrl?: (url: string) => void;
 }
 
 /** 守护进程与全局命令行管理服务接口 */
@@ -59,6 +68,8 @@ export interface DaemonService {
   wakeWeb(): Promise<DaemonStatus>;
   /** 主动让空闲的网页后台子进程立即休眠回收内存 */
   sleepWeb(): Promise<DaemonStatus>;
+  /** 在前台直接运行网页控制台进程，并等待其退出返回退出码 */
+  startForegroundWeb(opts?: StartForegroundWebOptions): Promise<{ exitCode: number; url: string }>;
   /** 读取守护进程或网页子进程日志尾部行内容 */
   readLogs(opts?: { web?: boolean; lines?: number }): Promise<{ file: string; lines: string[] }>;
 }
@@ -215,18 +226,61 @@ function createDefaultLaunchctlExec(): LaunchctlExecutor {
   };
 }
 
-/** 读取文本日志文件末尾 N 行，文件不存在时返回空数组 */
+/** 读取文本日志文件末尾 N 行（仅读取文件末尾最多 64 KB，避免大日志全量读入内存） */
 async function readTailLines(filePath: string, limit: number): Promise<string[]> {
   try {
-    const content = await fs.readFile(filePath, 'utf8');
-    const lines = content.split(/\r?\n/).filter((line) => line.length > 0);
-    return lines.slice(-Math.max(1, limit));
+    const handle = await fs.open(filePath, 'r');
+    try {
+      const stat = await handle.stat();
+      if (stat.size === 0) {
+        return [];
+      }
+      const chunkBytes = Math.min(stat.size, 64 * 1024);
+      const offset = stat.size - chunkBytes;
+      const buf = Buffer.allocUnsafe(chunkBytes);
+      const { bytesRead } = await handle.read(buf, 0, chunkBytes, offset);
+      let text = buf.subarray(0, bytesRead).toString('utf8');
+      if (offset > 0) {
+        const firstNewline = text.indexOf('\n');
+        text = firstNewline >= 0 ? text.slice(firstNewline + 1) : '';
+      }
+      const lines = text.split(/\r?\n/).filter((line) => line.length > 0);
+      return lines.slice(-Math.max(1, limit));
+    } finally {
+      await handle.close();
+    }
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
       return [];
     }
     throw err;
   }
+}
+
+/** 尽量校验待终止的进程确属本项目守护或运行时进程，降低 PID 复用导致的误杀风险 */
+function isExpectedDaemonPid(pid: number, rootDir: string): boolean {
+  if (process.platform === 'win32') {
+    return true;
+  }
+  const probe = spawnSync('ps', ['-p', String(pid), '-o', 'command='], {
+    encoding: 'utf8',
+    timeout: 1_000,
+  });
+  if (probe.error) {
+    // 系统缺少 ps 命令时回退允许按记录停止
+    return true;
+  }
+  if (probe.status !== 0 || !probe.stdout.trim()) {
+    return false;
+  }
+  const cmdLine = probe.stdout.trim();
+  const exeName = path.basename(cmdLine.split(/\s+/)[0] ?? '');
+  return (
+    cmdLine.includes('daemon.mjs') ||
+    cmdLine.includes('aidaily') ||
+    cmdLine.includes(path.resolve(rootDir)) ||
+    exeName === path.basename(process.execPath)
+  );
 }
 
 /** 默认分离拉起守护进程 */
@@ -332,9 +386,11 @@ export function createDaemonService(ctx: CoreContext, deps?: DaemonServiceDeps):
 
     const activeState = pidAlive ? rawState : null;
     const webEnabled = activeState ? activeState.webEnabled : true;
-    const webHost = activeState ? activeState.webHost : '127.0.0.1';
-    const webPort = activeState ? activeState.webPort : 3000;
-    const webIdleTimeoutSec = activeState ? activeState.webIdleTimeoutSec : 900;
+    const webHost = activeState ? activeState.webHost : DAEMON_DEFAULTS.webHost;
+    const webPort = activeState ? activeState.webPort : DAEMON_DEFAULTS.webPort;
+    const webIdleTimeoutSec = activeState
+      ? activeState.webIdleTimeoutSec
+      : DAEMON_DEFAULTS.webIdleTimeoutSec;
     const webPidAlive = Boolean(activeState?.webPid && isPidAlive(activeState.webPid));
     const webState = activeState
       ? activeState.webState === 'running' && !webPidAlive && activeState.webPid !== null
@@ -355,7 +411,7 @@ export function createDaemonService(ctx: CoreContext, deps?: DaemonServiceDeps):
       webEnabled,
       webHost,
       webPort,
-      webUrl: `http://${webHost}:${webPort}`,
+      webUrl: `http://${normalizeBrowserWebHost(webHost)}:${webPort}`,
       webState,
       webPid: webPidAlive ? (activeState?.webPid ?? null) : null,
       webLastActiveAt: activeState?.webLastActiveAt ?? null,
@@ -377,6 +433,14 @@ export function createDaemonService(ctx: CoreContext, deps?: DaemonServiceDeps):
     }
 
     const targetPid = state.pid;
+    if (!isExpectedDaemonPid(targetPid, ctx.paths.rootDir)) {
+      ctx.logger.warn(
+        { pid: targetPid },
+        '状态文件中的守护进程编号对应非本项目进程，已忽略终止并清理过期状态',
+      );
+      await clearStaleDaemonState(ctx.paths);
+      return { stopped: false, pid: null };
+    }
     try {
       process.kill(targetPid, 'SIGTERM');
     } catch {
@@ -402,6 +466,41 @@ export function createDaemonService(ctx: CoreContext, deps?: DaemonServiceDeps):
     return { stopped: true, pid: targetPid };
   };
 
+  const removeLegacyRepoSchedulePlists = async (): Promise<void> => {
+    let entries: string[] = [];
+    try {
+      entries = await fs.readdir(launchAgentsDir);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+        return;
+      }
+      throw err;
+    }
+    const expectedRootTag = `<string>${escapeXml(path.resolve(ctx.paths.rootDir))}</string>`;
+    const matchedPaths: string[] = [];
+    for (const fileName of entries) {
+      if (!/^com\.aidaily\.schedule\.(.+)\.plist$/.test(fileName)) {
+        continue;
+      }
+      const fullPath = path.join(launchAgentsDir, fileName);
+      const xml = await fs.readFile(fullPath, 'utf8').catch(() => '');
+      if (xml.includes(expectedRootTag)) {
+        matchedPaths.push(fullPath);
+      }
+    }
+    if (matchedPaths.length === 0) {
+      return;
+    }
+    const domain = domainTarget();
+    for (const fullPath of matchedPaths) {
+      await launchctlExec(['bootout', domain, fullPath]).catch(() => ({
+        exitCode: 0,
+        stderr: '',
+      }));
+      await fs.rm(fullPath, { force: true });
+    }
+  };
+
   const start = async (opts?: StartDaemonOptions): Promise<DaemonStatus> => {
     const current = await getStatus();
     if (current.running) {
@@ -409,12 +508,15 @@ export function createDaemonService(ctx: CoreContext, deps?: DaemonServiceDeps):
     }
 
     const webEnabled = opts?.webEnabled ?? true;
-    const webHost = opts?.webHost ?? '127.0.0.1';
-    const webPort = opts?.webPort ?? 3000;
-    const webIdleTimeoutSec = opts?.webIdleTimeoutSec ?? 900;
+    const webHost = opts?.webHost ?? DAEMON_DEFAULTS.webHost;
+    const webPort = opts?.webPort ?? DAEMON_DEFAULTS.webPort;
+    const webIdleTimeoutSec = opts?.webIdleTimeoutSec ?? DAEMON_DEFAULTS.webIdleTimeoutSec;
     if (webEnabled) {
       assertWebBuildPresent(ctx.paths.rootDir);
     }
+
+    // 手动启动守护进程时同步清理历史独立定时配置，防止双路重复触发
+    await removeLegacyRepoSchedulePlists().catch(() => undefined);
 
     const scriptPath = resolveDaemonScriptPath(ctx.paths.rootDir, deps?.daemonScriptPath);
     const daemonLog = getDaemonLogFile(ctx.paths);
@@ -451,35 +553,6 @@ export function createDaemonService(ctx: CoreContext, deps?: DaemonServiceDeps):
     );
   };
 
-  const removeLegacyRepoSchedulePlists = async (): Promise<void> => {
-    let entries: string[] = [];
-    try {
-      entries = await fs.readdir(launchAgentsDir);
-    } catch (err) {
-      if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
-        return;
-      }
-      throw err;
-    }
-    const domain = domainTarget();
-    const expectedRootTag = `<string>${escapeXml(path.resolve(ctx.paths.rootDir))}</string>`;
-    for (const fileName of entries) {
-      if (!/^com\.aidaily\.schedule\.(.+)\.plist$/.test(fileName)) {
-        continue;
-      }
-      const fullPath = path.join(launchAgentsDir, fileName);
-      const xml = await fs.readFile(fullPath, 'utf8').catch(() => '');
-      if (!xml.includes(expectedRootTag)) {
-        continue;
-      }
-      await launchctlExec(['bootout', domain, fullPath]).catch(() => ({
-        exitCode: 0,
-        stderr: '',
-      }));
-      await fs.rm(fullPath, { force: true });
-    }
-  };
-
   return {
     getGlobalCliStatus: () => getGlobalCliStatus(globalCliOpts),
     installGlobalCli: () => installGlobalCli(globalCliOpts),
@@ -495,9 +568,9 @@ export function createDaemonService(ctx: CoreContext, deps?: DaemonServiceDeps):
 
     async install(opts?: StartDaemonOptions): Promise<DaemonStatus> {
       const webEnabled = opts?.webEnabled ?? true;
-      const webHost = opts?.webHost ?? '127.0.0.1';
-      const webPort = opts?.webPort ?? 3000;
-      const webIdleTimeoutSec = opts?.webIdleTimeoutSec ?? 900;
+      const webHost = opts?.webHost ?? DAEMON_DEFAULTS.webHost;
+      const webPort = opts?.webPort ?? DAEMON_DEFAULTS.webPort;
+      const webIdleTimeoutSec = opts?.webIdleTimeoutSec ?? DAEMON_DEFAULTS.webIdleTimeoutSec;
 
       if (webEnabled) {
         assertWebBuildPresent(ctx.paths.rootDir);
@@ -624,6 +697,35 @@ export function createDaemonService(ctx: CoreContext, deps?: DaemonServiceDeps):
       const file = opts?.web ? getDaemonWebLogFile(ctx.paths) : getDaemonLogFile(ctx.paths);
       const lines = await readTailLines(file, opts?.lines ?? 50);
       return { file, lines };
+    },
+
+    async startForegroundWeb(
+      opts?: StartForegroundWebOptions,
+    ): Promise<{ exitCode: number; url: string }> {
+      const host = opts?.host?.trim() || DAEMON_DEFAULTS.webHost;
+      const port = opts?.port ?? DAEMON_DEFAULTS.webPort;
+      const mode: 'dev' | 'start' = opts?.dev ? 'dev' : 'start';
+      if (mode === 'start') {
+        assertWebBuildPresent(ctx.paths.rootDir);
+      }
+      const nextBin = resolveNextBinPath(ctx.paths.rootDir);
+      const url = `http://${normalizeBrowserWebHost(host)}:${port}`;
+      opts?.onReadyUrl?.(url);
+
+      const exitCode = await new Promise<number>((resolve, reject) => {
+        const child = spawn(process.execPath, [nextBin, mode, '-H', host, '-p', String(port)], {
+          cwd: path.join(ctx.paths.rootDir, 'apps', 'web'),
+          stdio: 'inherit',
+          env: {
+            ...process.env,
+            AIDAILY_ROOT: ctx.paths.rootDir,
+            ...(mode === 'start' ? { NODE_ENV: 'production' } : {}),
+          },
+        });
+        child.on('error', reject);
+        child.on('close', (code) => resolve(code ?? 0));
+      });
+      return { exitCode, url };
     },
   };
 }

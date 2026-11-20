@@ -44,7 +44,6 @@ export function MediaAdjustments({
   runId: string;
   items: MediaAdjustmentsItemView[];
   candidatesByItemId?: Record<string, MediaCandidateView[]>;
-  bgmFiles?: string[];
   bgmFile?: string | null;
 }) {
   const router = useRouter();

@@ -968,20 +968,6 @@ export async function resetSectionNarrationAction(formData: FormData): Promise<A
   }
 }
 
-/** 保存待审核任务选择的背景音乐。 */
-export async function setRunBgmAction(formData: FormData): Promise<ActionResult> {
-  try {
-    const runId = RunIdSchema.parse(formData.get('runId'));
-    const bgmFile = z.string().min(1).parse(formData.get('bgmFile'));
-    const core = await getCore();
-    await core.tasks.setBgm(runId, bgmFile);
-    safeRevalidate(`/runs/${runId}`);
-    return { ok: true, message: '背景音乐已保存，请重新合成视频' };
-  } catch (error) {
-    return { ok: false, error: error instanceof Error ? error.message : String(error) };
-  }
-}
-
 const ArticleIdSchema = z.string().trim().min(1, '文章 ID 不能为空');
 
 /** 读取单篇已抓取新闻文章的正文全文与候选配图明细 */

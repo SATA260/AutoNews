@@ -1,5 +1,6 @@
 'use client';
 
+import type { HostPersonaOption } from '@aidaily/core';
 import { useRouter } from 'next/navigation';
 import { useState, useTransition } from 'react';
 import { startRunAction } from '@/app/actions';
@@ -14,20 +15,14 @@ const CUTOFF_PRESETS: Array<{ value: string; label: string }> = [
   { value: 'custom', label: '自定义时间' },
 ];
 
-const HOST_LABELS: Record<string, string> = {
-  deepseek: 'DeepSeek 娘（对应 deepseek-bgm.mp3）',
-  gpt: 'GPT 娘（对应 gpt-bgm.mp3）',
-  gemini: 'Gemini 娘（对应 gemini-bgm.mp3）',
-  claude: 'Claude 娘（对应 claude-bgm.mp3）',
-};
-
 /** 打开「立即运行」弹窗的按钮与表单组件（必须由用户显式填写正整数条数，不预填任何默认值） */
 export function StartRunModalButton({
   label = '立即运行',
+  hosts = [],
   previousHostId = null,
 }: {
   label?: string;
-  bgmFiles?: string[];
+  hosts?: HostPersonaOption[];
   previousHostId?: string | null;
 }) {
   const router = useRouter();
@@ -165,10 +160,11 @@ export function StartRunModalButton({
                   className="mt-1.5 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm"
                 >
                   <option value="">自动选择（按新闻内容选定且不连任）</option>
-                  {(['deepseek', 'gpt', 'gemini', 'claude'] as const).map((id) => (
-                    <option key={id} value={id}>
-                      {HOST_LABELS[id]}
-                      {previousHostId === id ? '（上一期已使用，可人工破例）' : ''}
+                  {hosts.map((host) => (
+                    <option key={host.id} value={host.id}>
+                      {host.displayName}
+                      {host.bgmFile ? `（对应 ${host.bgmFile}）` : ''}
+                      {previousHostId === host.id ? '（上一期已使用，可人工破例）' : ''}
                     </option>
                   ))}
                 </select>

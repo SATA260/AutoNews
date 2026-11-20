@@ -31,7 +31,6 @@ export function ScheduleManager({
 }: {
   jobs: ScheduleJob[];
   timezone: string;
-  bgmFiles?: string[];
   daemonStatus?: DaemonStatus;
 }) {
   const router = useRouter();

@@ -1,5 +1,6 @@
 import fsSync from 'node:fs';
 import { fileURLToPath } from 'node:url';
+import { DAEMON_DEFAULTS } from './constants.js';
 import { startDaemonHost } from './runner.js';
 
 /** 解析守护进程独立启动脚本支持的命令行参数 */
@@ -24,9 +25,9 @@ function requireFlagValue(argv: readonly string[], idx: number, flag: string): s
 export function parseDaemonArgs(argv: readonly string[]): ParsedDaemonArgs {
   let rootDir: string | undefined;
   let webEnabled = true;
-  let webHost = '127.0.0.1';
-  let webPort = 3000;
-  let webIdleTimeoutSec = 900;
+  let webHost: string = DAEMON_DEFAULTS.webHost;
+  let webPort: number = DAEMON_DEFAULTS.webPort;
+  let webIdleTimeoutSec: number = DAEMON_DEFAULTS.webIdleTimeoutSec;
 
   for (let i = 0; i < argv.length; i++) {
     const token = argv[i];
@@ -105,6 +106,14 @@ function isMainModule(metaUrl: string): boolean {
 }
 
 if (isMainModule(import.meta.url)) {
+  process.on('unhandledRejection', (reason) => {
+    const msg = reason instanceof Error ? (reason.stack ?? reason.message) : String(reason);
+    console.error(`[daemon] 未处理的异步异常：${msg}`);
+  });
+  process.on('uncaughtException', (err) => {
+    console.error(`[daemon] 未捕获的严重异常：${err.stack ?? err.message}`);
+    process.exit(1);
+  });
   try {
     await runDaemonMain();
   } catch (err) {

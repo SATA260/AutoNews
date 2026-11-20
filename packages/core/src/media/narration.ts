@@ -223,8 +223,14 @@ async function settingsForNarrationProviders(
   };
 }
 
-/** 读取磁盘最新全局配置并同步任务记录快照，确保配音与字幕调整按当前界面配置生效 */
-async function readRunSettings(ctx: CoreContext, runId: string): Promise<Settings> {
+/** 读取磁盘最新全局配置，供只读列表与试听视图展示（不在读取请求中写入数据库快照） */
+async function readLatestSettingsReadOnly(ctx: CoreContext): Promise<Settings> {
+  await ctx.reloadConfig();
+  return ctx.settings;
+}
+
+/** 读取磁盘最新全局配置并在配置发生变化时同步更新任务快照，供写入编辑配音环节使用 */
+async function syncRunSettingsForNarrationEdit(ctx: CoreContext, runId: string): Promise<Settings> {
   const run = ctx.repos.runs.getById(runId);
   if (!run) {
     throw new Error(`未找到任务记录: ${runId}`);
@@ -232,7 +238,7 @@ async function readRunSettings(ctx: CoreContext, runId: string): Promise<Setting
   await ctx.reloadConfig();
   const nextJson = JSON.stringify(ctx.settings);
   if (nextJson !== run.configSnapshotJson) {
-    ctx.db.prepare('UPDATE runs SET config_snapshot = ? WHERE id = ?').run(nextJson, runId);
+    ctx.repos.runs.updateConfigSnapshot(runId, nextJson);
   }
   return ctx.settings;
 }
@@ -543,7 +549,7 @@ export async function listNarrationSectionViews(
   if (!rawPackage?.packageData) {
     return [];
   }
-  const settings = await readRunSettings(ctx, runId);
+  const settings = await readLatestSettingsReadOnly(ctx);
   const items = ctx.repos.runItems.listByRun(runId);
   const itemsById = new Map(items.map((item) => [item.id, item]));
   const overrides = await readNarrationOverrides(runDir);
@@ -591,7 +597,7 @@ export async function updateSingleSectionNarration(
   }
   assertNarrationEditable(ctx, runId);
   const input = UpdateSectionNarrationInputSchema.parse(rawInput);
-  const settings = await readRunSettings(ctx, runId);
+  const settings = await syncRunSettingsForNarrationEdit(ctx, runId);
   const builtinTtsProviders = new Set(['silent', 'indextts', 'qwen-local']);
   const hasProvider =
     !input.provider ||
@@ -722,7 +728,7 @@ export async function resetSingleSectionNarration(
     throw new Error(`非法的口播段落标识: ${sectionKey}`);
   }
   assertNarrationEditable(ctx, runId);
-  const settings = await readRunSettings(ctx, runId);
+  const settings = await syncRunSettingsForNarrationEdit(ctx, runId);
   const runDir = ctx.paths.runDir(runId);
   const packageData = await loadIssuePackage(ctx, runId);
   const itemsById = new Map(ctx.repos.runItems.listByRun(runId).map((item) => [item.id, item]));
