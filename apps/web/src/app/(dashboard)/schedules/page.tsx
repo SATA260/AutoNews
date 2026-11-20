@@ -11,17 +11,5 @@ export default async function SchedulesPage() {
   const jobs = await core.scheduler.list();
   const bgmFiles = await core.tasks.listBgm();
 
-  return (
-    <div className="space-y-5">
-      <div>
-        <h2 className="text-xl font-bold text-slate-900">定时任务管理</h2>
-        <p className="mt-1 text-xs text-slate-600">
-          每个定时计划均需由操作者显式指定每日触发时间（24 小时制
-          HH:mm）与当期制作条数，系统不设置默认值。
-        </p>
-      </div>
-
-      <ScheduleManager jobs={jobs} timezone={settings.timezone} bgmFiles={bgmFiles} />
-    </div>
-  );
+  return <ScheduleManager jobs={jobs} timezone={settings.timezone} bgmFiles={bgmFiles} />;
 }

@@ -26,6 +26,7 @@ import {
 import { GET as getArtifactRoute } from '@/app/api/runs/[id]/artifacts/[...path]/route';
 import { GET as getEventsRoute } from '@/app/api/runs/[id]/events/route';
 import { closeCoreSingleton, getCore } from '@/lib/core';
+import { AI_STAGE_KEYS, resolveUnifiedStageSwitch } from '@/lib/stage-routing';
 import { proxy } from '@/proxy';
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..', '..');
@@ -1023,5 +1024,77 @@ describe('apps/web routes and Server Actions', () => {
     expect(core.context.repos.runs.getById(activeRunId)).toBeNull();
     expect(core.context.repos.articles.getById('art-web-reserved')?.status).toBe('new');
     expect((await deleteRunsAction({ mode: 'full' })).ok).toBe(false);
+  });
+
+  it('switches all AI stages to a unified channel with explicit or auto-resolved model IDs and saves cleanly', async () => {
+    await setupWebTestWorkspace();
+    expect(await saveModelApiConnectionAction(apiConnectionForm('统一网关'))).toMatchObject({
+      ok: true,
+    });
+
+    const core = await getCore();
+    const initialSettings = core.config.getSettings();
+    const routes = core.system.getModelRoutes();
+
+    // 1. 留空统一模型 ID 且目标渠道已返回模型清单时，保留超时与重试参数并将所有阶段切至目标渠道首位候选模型
+    const mixedCurrent = {
+      ...initialSettings.ai.stages,
+      polish: { ...initialSettings.ai.stages.polish, timeoutSec: 210, retries: 2 },
+    };
+    const autoFilled = resolveUnifiedStageSwitch({
+      currentStages: mixedCurrent,
+      savedStages: initialSettings.ai.stages,
+      modelRoutes: routes,
+      readyModelsByCli: { 统一网关: ['gateway-pro', 'gateway-flash'] },
+      targetCli: '统一网关',
+    });
+    expect(autoFilled.missingModelStages).toEqual([]);
+    for (const key of AI_STAGE_KEYS) {
+      expect(autoFilled.nextStages[key].cli).toBe('统一网关');
+      expect(autoFilled.nextStages[key].model).toBe('gateway-pro');
+    }
+    expect(autoFilled.nextStages.polish.timeoutSec).toBe(210);
+    expect(autoFilled.nextStages.polish.retries).toBe(2);
+
+    // 2. 留空统一模型 ID 且目标渠道未返回模型列表时，不误拷贝其他渠道的旧模型名，并标出需补填的环节
+    const unreadySwitch = resolveUnifiedStageSwitch({
+      currentStages: mixedCurrent,
+      savedStages: initialSettings.ai.stages,
+      modelRoutes: routes,
+      readyModelsByCli: {},
+      targetCli: '统一网关',
+    });
+    expect(unreadySwitch.missingModelStages).toEqual([...AI_STAGE_KEYS]);
+    expect(unreadySwitch.nextStages.select.model).toBe('');
+
+    // 3. 显式指定统一模型 ID 后，全部 5 个阶段统一切换并持久化写入配置
+    const explicitSwitch = resolveUnifiedStageSwitch({
+      currentStages: mixedCurrent,
+      savedStages: initialSettings.ai.stages,
+      modelRoutes: routes,
+      readyModelsByCli: {},
+      targetCli: '统一网关',
+      unifiedModel: 'deepseek-v3.2',
+    });
+    expect(explicitSwitch.missingModelStages).toEqual([]);
+
+    const fd = new FormData();
+    fd.set('maxConcurrentCalls', String(initialSettings.ai.maxConcurrentCalls));
+    for (const key of AI_STAGE_KEYS) {
+      const cfg = explicitSwitch.nextStages[key];
+      fd.set(`stage_${key}_cli`, cfg.cli);
+      fd.set(`stage_${key}_model`, cfg.model);
+      fd.set(`stage_${key}_timeoutSec`, String(cfg.timeoutSec));
+      fd.set(`stage_${key}_retries`, String(cfg.retries));
+    }
+    expect(await updateStageRoutingAction(fd)).toMatchObject({ ok: true });
+
+    const savedStages = core.config.getSettings().ai.stages;
+    for (const key of AI_STAGE_KEYS) {
+      expect(savedStages[key].cli).toBe('统一网关');
+      expect(savedStages[key].model).toBe('deepseek-v3.2');
+    }
+    expect(savedStages.polish.timeoutSec).toBe(210);
+    expect(savedStages.polish.retries).toBe(2);
   });
 });

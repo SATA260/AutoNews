@@ -50,8 +50,8 @@ export function RunProgressTab({
   const currentArtifacts = detail.artifacts.filter((rel) => !rel.startsWith('archive/'));
 
   return (
-    <div className="space-y-6">
-      <section className="rounded-xl border border-slate-200 bg-white p-5 shadow-xs">
+    <div className="space-y-5">
+      <section className="rounded-2xl border border-slate-200/90 bg-white p-5 shadow-xs">
         <h3 className="text-sm font-semibold text-slate-900">流程步骤状态</h3>
         <div className="mt-3 grid gap-2.5 sm:grid-cols-2 lg:grid-cols-3">
           {PIPELINE_STAGES.map((stage, index) => {
@@ -93,7 +93,7 @@ export function RunProgressTab({
       <RunLiveLogPanel runId={detail.id} initialEvents={runEvents} isActive={isActive} />
 
       <div className="grid gap-4 lg:grid-cols-2">
-        <section className="rounded-xl border border-slate-200 bg-white p-5 shadow-xs">
+        <section className="rounded-2xl border border-slate-200/90 bg-white p-5 shadow-xs">
           <h3 className="text-sm font-semibold text-slate-900">中断与重跑历史</h3>
           {auditEvents.length === 0 ? (
             <p className="mt-2 text-xs text-slate-500">本期任务暂未发生中断或重跑记录。</p>
@@ -119,7 +119,7 @@ export function RunProgressTab({
           )}
         </section>
 
-        <section className="rounded-xl border border-slate-200 bg-white p-5 shadow-xs">
+        <section className="rounded-2xl border border-slate-200/90 bg-white p-5 shadow-xs">
           <h3 className="text-sm font-semibold text-slate-900">产物文件与重跑归档快照</h3>
           <div className="mt-3 space-y-3 text-xs">
             <div>

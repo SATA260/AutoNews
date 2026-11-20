@@ -17,11 +17,15 @@ import { NarrationSectionEditor } from '@/components/run-detail/NarrationSection
 import { RunDeleteButtons } from '@/components/run-detail/RunDeleteButtons';
 import { RunItemsTab } from '@/components/run-detail/RunItemsTab';
 import { RunLlmTab } from '@/components/run-detail/RunLlmTab';
-import { RunMediaTab } from '@/components/run-detail/RunMediaTab';
+import {
+  RunQaAndTimelineSection,
+  RunVideoAndCoverSection,
+} from '@/components/run-detail/RunMediaTab';
 import { RunProgressTab } from '@/components/run-detail/RunProgressTab';
 import { RunReviewQuickBar } from '@/components/run-detail/RunReviewQuickBar';
 import { getCore } from '@/lib/core';
 import {
+  formatBytes,
   formatDuration,
   formatTimestamp,
   RUN_STATUS_TEXT,
@@ -63,7 +67,9 @@ export default async function RunDetailPage({
   const core = await getCore();
   let detail: Awaited<ReturnType<typeof core.tasks.get>>;
   try {
-    detail = await core.tasks.get(id, { includeArtifacts: activeTab === 'media' });
+    detail = await core.tasks.get(id, {
+      includeArtifacts: activeTab === 'media' || activeTab === 'progress',
+    });
   } catch (err) {
     if (err instanceof NotFoundError) {
       notFound();
@@ -85,14 +91,23 @@ export default async function RunDetailPage({
   const selectDone = detail.stages.some((s) => s.stage === 'select' && s.status === 'done');
   const canRetryItems = RETRYABLE_RUN_STATUSES.includes(detail.status) && selectDone;
 
+  const tabCountLabel = (key: DetailTab, baseLabel: string): string => {
+    if (key === 'items') return `${baseLabel} (${detail.items.length})`;
+    if (key === 'candidates') return `${baseLabel} (${detail.events.length})`;
+    return baseLabel;
+  };
+
   return (
     <div className="space-y-5">
-      <div className="rounded-xl border border-slate-200 bg-white p-5 shadow-xs">
+      <div className="rounded-2xl border border-slate-200/90 bg-white p-5 shadow-xs">
         <div className="flex flex-wrap items-start justify-between gap-4">
-          <div className="space-y-1.5">
+          <div className="space-y-2">
             <div className="flex flex-wrap items-center gap-2.5">
-              <Link href="/runs" className="text-xs text-slate-500 hover:text-slate-800">
-                ← 返回任务列表
+              <Link
+                href="/runs"
+                className="inline-flex items-center gap-1 rounded-lg border border-slate-200 bg-slate-50 px-2.5 py-1 text-xs font-medium text-slate-600 transition hover:bg-slate-100 hover:text-slate-900"
+              >
+                ← 任务列表
               </Link>
               <span
                 className={`rounded-full border px-2.5 py-0.5 text-xs font-medium ${runStatusBadgeClass(detail.status)}`}
@@ -104,25 +119,15 @@ export default async function RunDetailPage({
                   已收到取消请求
                 </span>
               ) : null}
-            </div>
-            <h2 className="font-mono text-xl font-bold text-slate-900">{detail.id}</h2>
-            <div className="flex flex-wrap gap-x-5 gap-y-1 text-xs text-slate-600">
-              <span>最多播报：{detail.itemCount} 条</span>
               {detail.notBeforeAt ? (
-                <span className="rounded bg-amber-50 px-1.5 py-0.5 font-medium text-amber-800">
+                <span className="rounded-full bg-amber-50 px-2.5 py-0.5 text-xs font-medium text-amber-800 ring-1 ring-amber-200/80">
                   最早新闻下限：{formatTimestamp(detail.notBeforeAt, settings.timezone)}
                 </span>
               ) : null}
-              {detail.hostId ? <span>主播：{detail.hostId}</span> : null}
-              {detail.bgmFile ? <span>背景音乐：{detail.bgmFile}</span> : null}
-              <span>执行轮次：第 {detail.attempt} 轮</span>
-              <span>
-                当前步骤：{detail.currentStage ? STAGE_LABELS[detail.currentStage] : '未开始'}
-              </span>
-              <span>创建：{formatTimestamp(detail.createdAt, settings.timezone)}</span>
-              <span>耗时：{formatDuration(detail.startedAt, detail.finishedAt)}</span>
-              {detail.pid ? <span className="font-mono">进程 PID：{detail.pid}</span> : null}
             </div>
+            <h1 className="font-mono text-2xl font-bold tracking-tight text-slate-900">
+              {detail.id}
+            </h1>
           </div>
 
           <div className="flex flex-wrap items-center gap-2">
@@ -131,8 +136,49 @@ export default async function RunDetailPage({
           </div>
         </div>
 
+        <div className="mt-4 grid grid-cols-2 gap-2.5 text-xs sm:grid-cols-3 lg:grid-cols-6">
+          <div className="rounded-xl border border-slate-100 bg-slate-50/80 px-3 py-2">
+            <span className="block text-[11px] text-slate-500">当前步骤 / 轮次</span>
+            <span className="mt-0.5 block font-medium text-slate-900">
+              {detail.currentStage ? STAGE_LABELS[detail.currentStage] : '未开始'} · 第{' '}
+              {detail.attempt} 轮
+            </span>
+          </div>
+          <div className="rounded-xl border border-slate-100 bg-slate-50/80 px-3 py-2">
+            <span className="block text-[11px] text-slate-500">目标条数 / 实际</span>
+            <span className="tabular-nums mt-0.5 block font-medium text-slate-900">
+              {detail.itemCount} 条（{detail.items.length} 条稿件）
+            </span>
+          </div>
+          <div className="rounded-xl border border-slate-100 bg-slate-50/80 px-3 py-2">
+            <span className="block text-[11px] text-slate-500">创建时间</span>
+            <span className="tabular-nums mt-0.5 block font-medium text-slate-900">
+              {formatTimestamp(detail.createdAt, settings.timezone)}
+            </span>
+          </div>
+          <div className="rounded-xl border border-slate-100 bg-slate-50/80 px-3 py-2">
+            <span className="block text-[11px] text-slate-500">执行耗时</span>
+            <span className="tabular-nums mt-0.5 block font-medium text-slate-900">
+              {formatDuration(detail.startedAt, detail.finishedAt)}
+            </span>
+          </div>
+          <div className="rounded-xl border border-slate-100 bg-slate-50/80 px-3 py-2">
+            <span className="block text-[11px] text-slate-500">主播 / 背景音乐</span>
+            <span className="mt-0.5 block truncate font-medium text-slate-900">
+              {detail.hostId ?? '自动'} · {detail.bgmFile ?? '自动'}
+            </span>
+          </div>
+          <div className="rounded-xl border border-slate-100 bg-slate-50/80 px-3 py-2">
+            <span className="block text-[11px] text-slate-500">本地产物占用</span>
+            <span className="tabular-nums mt-0.5 block font-mono font-medium text-slate-900">
+              {formatBytes(diskBytes)}
+              {detail.pid ? ` · PID ${detail.pid}` : ''}
+            </span>
+          </div>
+        </div>
+
         {detail.error || detail.errorCode ? (
-          <div className="mt-4 rounded-lg border border-rose-200 bg-rose-50 px-3.5 py-2.5 text-xs text-rose-800">
+          <div className="mt-4 rounded-xl border border-rose-200 bg-rose-50 px-3.5 py-2.5 text-xs text-rose-800">
             <span className="font-semibold">
               {detail.errorCode ? `[${detail.errorCode}] ` : ''}
             </span>
@@ -142,7 +188,7 @@ export default async function RunDetailPage({
 
         <nav
           aria-label="任务详情页签"
-          className="mt-4 flex flex-wrap gap-2 border-t border-slate-100 pt-3"
+          className="mt-4 flex flex-wrap gap-1.5 border-t border-slate-100 pt-3.5"
         >
           {TAB_ITEMS.map((tab) => {
             const active = activeTab === tab.key;
@@ -150,13 +196,13 @@ export default async function RunDetailPage({
               <Link
                 key={tab.key}
                 href={`/runs/${encodeURIComponent(detail.id)}?tab=${tab.key}`}
-                className={`rounded-lg px-3 py-1.5 text-xs font-medium transition-colors ${
+                className={`rounded-xl px-3.5 py-2 text-xs font-medium transition-colors ${
                   active
-                    ? 'bg-sky-600 text-white'
-                    : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
+                    ? 'bg-slate-900 text-white shadow-xs'
+                    : 'bg-slate-100/80 text-slate-700 hover:bg-slate-200/80'
                 }`}
               >
-                {tab.label}
+                {tabCountLabel(tab.key, tab.label)}
               </Link>
             );
           })}
@@ -319,7 +365,7 @@ export default async function RunDetailPage({
             const renderStale = renderStage?.status === 'stale';
 
             return (
-              <div className="space-y-4">
+              <div className="space-y-5">
                 {mediaWarnings.length > 0 ? (
                   <div className="rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-xs text-rose-800">
                     {mediaWarnings.map((w) => (
@@ -327,6 +373,14 @@ export default async function RunDetailPage({
                     ))}
                   </div>
                 ) : null}
+
+                <RunVideoAndCoverSection
+                  runId={detail.id}
+                  artifacts={detail.artifacts}
+                  qaReport={qaReport}
+                  timezone={settings.timezone}
+                />
+
                 {canAdjustMedia && narrationSections.length > 0 ? (
                   <NarrationSectionEditor
                     runId={detail.id}
@@ -337,6 +391,7 @@ export default async function RunDetailPage({
                     renderStale={renderStale}
                   />
                 ) : null}
+
                 {canAdjustMedia ? (
                   <MediaAdjustments
                     runId={detail.id}
@@ -358,10 +413,13 @@ export default async function RunDetailPage({
                     bgmFile={detail.bgmFile}
                   />
                 ) : null}
+
                 {timeline ? (
-                  <section className="rounded-xl border border-slate-200 bg-white p-5">
-                    <h3 className="font-semibold">本期口播稿</h3>
-                    <p className="mt-2 whitespace-pre-line text-sm">
+                  <details className="rounded-2xl border border-slate-200/90 bg-white p-5 shadow-xs">
+                    <summary className="cursor-pointer text-sm font-semibold text-slate-900">
+                      展开查看本期完整口播文字总稿
+                    </summary>
+                    <p className="mt-3 whitespace-pre-line rounded-xl border border-slate-100 bg-slate-50 p-4 text-sm leading-relaxed text-slate-800">
                       {timeline.sections
                         .map((section) =>
                           section.sentences
@@ -372,11 +430,11 @@ export default async function RunDetailPage({
                         .filter((text) => text.length > 0)
                         .join('\n\n')}
                     </p>
-                  </section>
+                  </details>
                 ) : null}
-                <RunMediaTab
+
+                <RunQaAndTimelineSection
                   runId={detail.id}
-                  artifacts={detail.artifacts}
                   qaReport={qaReport}
                   timeline={timeline}
                   timezone={settings.timezone}
@@ -391,38 +449,42 @@ export default async function RunDetailPage({
             const draft = await core.publish.getDraft(detail.id).catch(() => null);
             const cover = await core.publish.getCover(detail.id).catch(() => null);
             return (
-              <div className="space-y-6">
-                <CoverEditor
-                  runId={detail.id}
-                  editable={
-                    detail.status === 'awaiting_review' ||
-                    detail.status === 'publish_failed' ||
-                    detail.status === 'published'
-                  }
-                  cover={
-                    cover
-                      ? {
-                          title: cover.text.title,
-                          subtitle: cover.text.subtitle,
-                          source: cover.source,
-                          limits: cover.limits,
-                          coverUpdatedAt: cover.coverUpdatedAt,
-                        }
-                      : null
-                  }
-                />
-                <PublishControls
-                  runId={detail.id}
-                  runStatus={detail.status}
-                  mediaDirty={detail.mediaDirty}
-                  draft={draft}
-                  publishRecord={detail.publishRecord}
-                  limits={{
-                    titleMax: settings.publish.bilibili.titleMax,
-                    descMax: settings.publish.bilibili.descMax,
-                    tagsMax: settings.publish.bilibili.tagsMax,
-                  }}
-                />
+              <div className="grid gap-6 xl:grid-cols-12">
+                <div className="xl:col-span-7">
+                  <PublishControls
+                    runId={detail.id}
+                    runStatus={detail.status}
+                    mediaDirty={detail.mediaDirty}
+                    draft={draft}
+                    publishRecord={detail.publishRecord}
+                    limits={{
+                      titleMax: settings.publish.bilibili.titleMax,
+                      descMax: settings.publish.bilibili.descMax,
+                      tagsMax: settings.publish.bilibili.tagsMax,
+                    }}
+                  />
+                </div>
+                <div className="xl:sticky xl:top-6 xl:col-span-5 xl:self-start">
+                  <CoverEditor
+                    runId={detail.id}
+                    editable={
+                      detail.status === 'awaiting_review' ||
+                      detail.status === 'publish_failed' ||
+                      detail.status === 'published'
+                    }
+                    cover={
+                      cover
+                        ? {
+                            title: cover.text.title,
+                            subtitle: cover.text.subtitle,
+                            source: cover.source,
+                            limits: cover.limits,
+                            coverUpdatedAt: cover.coverUpdatedAt,
+                          }
+                        : null
+                    }
+                  />
+                </div>
               </div>
             );
           })()

@@ -63,6 +63,13 @@ ai:
           baseUrl: https://api.deepseek.com,
           protocol: responses,
           apiKeyFile: model-api-0d3230b9-e8ac-496f-9e2c-2f0383eb227b
+        },
+      icomp:
+        {
+          adapter: openai-compatible,
+          baseUrl: https://api.icompify.com/v1,
+          protocol: chat-completions,
+          apiKeyFile: model-api-e2957f9b-3ddb-4572-a5c5-9335b889783f
         }
     }
   stages:

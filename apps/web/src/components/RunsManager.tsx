@@ -261,7 +261,7 @@ export function RunsManager({
                 href={buildRunsHref(preset.key, initialFrom, initialTo)}
                 className={`rounded-full border px-3 py-1 text-xs font-medium transition-colors ${
                   active
-                    ? 'border-sky-600 bg-sky-600 text-white'
+                    ? 'border-slate-900 bg-slate-900 text-white'
                     : 'border-slate-200 bg-white text-slate-700 hover:bg-slate-100'
                 }`}
               >
@@ -301,7 +301,7 @@ export function RunsManager({
 
       <form
         onSubmit={handleTimeFilterSubmit}
-        className="flex flex-wrap items-end gap-3 rounded-xl border border-slate-200 bg-white px-4 py-3 text-xs shadow-xs"
+        className="flex flex-wrap items-end gap-3 rounded-2xl border border-slate-200/90 bg-white px-4 py-3.5 text-xs shadow-xs"
       >
         <div>
           <label htmlFor="runs-from" className="block text-[11px] font-medium text-slate-600">
@@ -365,7 +365,7 @@ export function RunsManager({
         </div>
       )}
 
-      <section className="rounded-xl border border-slate-200 bg-white shadow-xs">
+      <section className="overflow-hidden rounded-2xl border border-slate-200/90 bg-white shadow-xs">
         {runs.length === 0 ? (
           <div className="p-10 text-center text-sm text-slate-500">
             当前筛选条件下暂无任务记录。

@@ -38,8 +38,8 @@ export function TtsAndNotifyMetaGrid({ settings }: { settings: Settings }) {
 /** 首次无缓存进入设置页时的异步环境自检占位卡片，不阻塞表单渲染与编辑 */
 export function SystemDoctorSkeleton({ settings }: { settings: Settings }) {
   return (
-    <section className="space-y-4 rounded-xl border border-slate-200 bg-white p-5 shadow-xs">
-      <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-100 pb-3">
+    <section className="space-y-4 rounded-2xl border border-slate-200/90 bg-white p-5 shadow-xs">
+      <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-100 pb-3.5">
         <div>
           <h3 className="text-base font-semibold text-slate-900">
             语音合成、通知接口与环境自检状态
@@ -100,8 +100,8 @@ export function SystemDoctorPanel({
   };
 
   return (
-    <section className="space-y-4 rounded-xl border border-slate-200 bg-white p-5 shadow-xs">
-      <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-100 pb-3">
+    <section className="space-y-4 rounded-2xl border border-slate-200/90 bg-white p-5 shadow-xs">
+      <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-100 pb-3.5">
         <div>
           <h3 className="text-base font-semibold text-slate-900">
             语音合成、通知接口与环境自检状态

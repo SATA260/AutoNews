@@ -29,7 +29,7 @@ export function RunLlmTab({
 }: RunLlmTabProps) {
   return (
     <div className="space-y-5">
-      <section className="rounded-xl border border-slate-200 bg-white shadow-xs">
+      <section className="overflow-hidden rounded-2xl border border-slate-200/90 bg-white shadow-xs">
         <div className="border-b border-slate-100 px-5 py-3.5">
           <h3 className="text-sm font-semibold text-slate-900">
             大模型调用记录（共 {calls.length} 次）
@@ -109,7 +109,7 @@ export function RunLlmTab({
       </section>
 
       {selectedCallId !== null ? (
-        <section className="rounded-xl border border-slate-200 bg-white p-5 shadow-xs">
+        <section className="rounded-2xl border border-slate-200/90 bg-white p-5 shadow-xs">
           <div className="flex items-center justify-between border-b border-slate-100 pb-3">
             <h4 className="text-sm font-semibold text-slate-900">
               调用 #{selectedCallId} 完整请求与输出快照
