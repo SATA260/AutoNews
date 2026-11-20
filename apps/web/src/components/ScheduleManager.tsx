@@ -90,22 +90,22 @@ export function ScheduleManager({
   };
 
   return (
-    <div className="space-y-4">
-      <div className="flex flex-wrap items-center justify-between gap-3">
+    <div className="space-y-5">
+      <div className="flex flex-wrap items-center justify-between gap-4 border-b border-slate-200/80 pb-5">
         <div>
-          <h1 className="text-xl font-semibold text-slate-900">定时任务管理</h1>
+          <h1 className="text-2xl font-bold tracking-tight text-slate-900">定时任务管理</h1>
           <p className="mt-1 text-sm text-slate-600">
             通过 macOS launchd
-            每日按指定时间自动运行一期生产流程。新建任务时执行时间与每期条数均为必填项。
+            每日按指定时间自动运行一期生产流程；每个计划需显式指定每日触发时间（HH:mm）与新闻条数，不设默认值。
           </p>
         </div>
 
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
           <button
             type="button"
             disabled={isPending}
             onClick={() => handleAction(() => syncSchedulesAction())}
-            className="rounded-lg border border-slate-300 bg-white px-3.5 py-2 text-xs font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-50"
+            className="rounded-lg border border-slate-300 bg-white px-3.5 py-2 text-xs font-medium text-slate-700 shadow-xs transition hover:bg-slate-50 disabled:opacity-50"
           >
             全量重同步 launchd
           </button>
@@ -119,7 +119,7 @@ export function ScheduleManager({
               setCreateMaxAgeHours('24');
               setModalOpen(true);
             }}
-            className="rounded-lg bg-slate-900 px-4 py-2 text-xs font-medium text-white hover:bg-slate-800"
+            className="rounded-lg bg-slate-900 px-4 py-2 text-xs font-medium text-white shadow-xs transition hover:bg-slate-800"
           >
             新建定时任务
           </button>
@@ -128,7 +128,7 @@ export function ScheduleManager({
 
       {feedback && (
         <div
-          className={`rounded-lg border px-4 py-2.5 text-xs ${
+          className={`rounded-xl border px-4 py-2.5 text-xs ${
             feedback.ok
               ? 'border-emerald-200 bg-emerald-50 text-emerald-800'
               : 'border-rose-200 bg-rose-50 text-rose-700'
@@ -138,7 +138,7 @@ export function ScheduleManager({
         </div>
       )}
 
-      <div className="overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm">
+      <div className="overflow-x-auto rounded-2xl border border-slate-200/90 bg-white shadow-xs">
         <table className="min-w-full divide-y divide-slate-200 text-left text-sm">
           <thead className="bg-slate-50 text-xs font-medium text-slate-500">
             <tr>

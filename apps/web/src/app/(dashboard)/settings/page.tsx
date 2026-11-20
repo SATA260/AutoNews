@@ -42,31 +42,69 @@ export default async function SettingsPage() {
 
   return (
     <div className="space-y-6">
-      <div>
-        <h2 className="text-xl font-bold text-slate-900">系统配置与模型路由</h2>
-        <p className="mt-1 text-xs text-slate-600">
-          所有配置变更均以安全覆盖方式写入配置文件；B 站 AI 生成内容声明在流程内强制保留为开启状态。
-        </p>
+      <div className="flex flex-wrap items-center justify-between gap-4 border-b border-slate-200/80 pb-5">
+        <div>
+          <h1 className="text-2xl font-bold tracking-tight text-slate-900">系统配置与模型路由</h1>
+          <p className="mt-1 text-sm text-slate-600">
+            所有配置变更均以安全覆盖方式写入配置文件；B 站 AI
+            生成内容声明在流程内强制保留为开启状态。
+          </p>
+        </div>
+
+        <nav aria-label="设置快捷导航" className="flex flex-wrap gap-1.5 text-xs">
+          <a
+            href="#api-connections"
+            className="rounded-lg border border-slate-200 bg-white px-3 py-1.5 font-medium text-slate-700 hover:bg-slate-50"
+          >
+            模型 API 连接
+          </a>
+          <a
+            href="#stage-routing"
+            className="rounded-lg border border-slate-200 bg-white px-3 py-1.5 font-medium text-slate-700 hover:bg-slate-50"
+          >
+            分阶段模型
+          </a>
+          <a
+            href="#system-doctor"
+            className="rounded-lg border border-slate-200 bg-white px-3 py-1.5 font-medium text-slate-700 hover:bg-slate-50"
+          >
+            环境自检
+          </a>
+          <a
+            href="#workflow-settings"
+            className="rounded-lg border border-slate-200 bg-white px-3 py-1.5 font-medium text-slate-700 hover:bg-slate-50"
+          >
+            工作流与发布
+          </a>
+        </nav>
       </div>
 
-      <ModelApiConnections connections={connections} />
-      <StageRoutingForm
-        settings={settings}
-        modelRoutes={modelRoutes}
-        modelsByCli={modelsSnapshot.modelsByCli}
-        routeCacheKeys={modelsSnapshot.routeCacheKeys}
-        modelsRevision={modelsSnapshot.revision}
-      />
+      <div id="api-connections" className="scroll-mt-6">
+        <ModelApiConnections connections={connections} />
+      </div>
+      <div id="stage-routing" className="scroll-mt-6">
+        <StageRoutingForm
+          settings={settings}
+          modelRoutes={modelRoutes}
+          modelsByCli={modelsSnapshot.modelsByCli}
+          routeCacheKeys={modelsSnapshot.routeCacheKeys}
+          modelsRevision={modelsSnapshot.revision}
+        />
+      </div>
 
-      {cachedDoctor ? (
-        <SystemDoctorPanel settings={settings} initialReport={cachedDoctor} />
-      ) : (
-        <Suspense fallback={<SystemDoctorSkeleton settings={settings} />}>
-          <AsyncDoctorSection settings={settings} />
-        </Suspense>
-      )}
+      <div id="system-doctor" className="scroll-mt-6">
+        {cachedDoctor ? (
+          <SystemDoctorPanel settings={settings} initialReport={cachedDoctor} />
+        ) : (
+          <Suspense fallback={<SystemDoctorSkeleton settings={settings} />}>
+            <AsyncDoctorSection settings={settings} />
+          </Suspense>
+        )}
+      </div>
 
-      <WorkflowSettingsForm settings={settings} />
+      <div id="workflow-settings" className="scroll-mt-6">
+        <WorkflowSettingsForm settings={settings} />
+      </div>
     </div>
   );
 }

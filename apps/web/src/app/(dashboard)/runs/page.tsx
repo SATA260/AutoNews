@@ -88,10 +88,10 @@ export default async function RunsPage({
 
   return (
     <div className="space-y-5">
-      <div className="flex flex-wrap items-center justify-between gap-3">
+      <div className="flex flex-wrap items-center justify-between gap-4 border-b border-slate-200/80 pb-5">
         <div>
-          <h2 className="text-xl font-bold text-slate-900">任务列表</h2>
-          <p className="mt-1 text-xs text-slate-600">
+          <h1 className="text-2xl font-bold tracking-tight text-slate-900">任务列表</h1>
+          <p className="mt-1 text-sm text-slate-600">
             查看全部生成任务，按状态与创建时间筛选、清理本地磁盘产物或批量删除历史任务。
           </p>
         </div>

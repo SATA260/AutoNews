@@ -237,12 +237,12 @@ export function NarrationSectionEditor({
   };
 
   return (
-    <section className="space-y-4 rounded-xl border border-slate-200 bg-white p-5 shadow-xs">
-      <div className="flex flex-wrap items-start justify-between gap-3">
+    <section className="space-y-4 rounded-2xl border border-slate-200/90 bg-white p-5 shadow-xs">
+      <div className="flex flex-wrap items-start justify-between gap-3 border-b border-slate-100 pb-3">
         <div>
-          <h3 className="text-sm font-semibold text-slate-900">分段配音与字幕</h3>
+          <h3 className="text-sm font-semibold text-slate-900">分段配音与字幕调整</h3>
           <p className="mt-1 text-xs leading-5 text-slate-600">
-            左边改读音，右边改画面字幕。每一行是一句。只改字幕不会重做配音；换引擎或改语音文本后，再重新生成这一段。
+            左边改读音，右边改画面字幕（每行一句）。只改字幕不重做配音；修改读音或切换引擎后再重新生成本段。
           </p>
         </div>
       </div>

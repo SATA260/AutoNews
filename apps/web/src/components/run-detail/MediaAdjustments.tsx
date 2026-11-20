@@ -70,12 +70,14 @@ export function MediaAdjustments({
   };
 
   return (
-    <section className="space-y-4 rounded-xl border border-slate-200 bg-white p-5">
-      <h3 className="font-semibold text-slate-900">调整画面与音乐</h3>
-      <p className="text-xs text-slate-600">
-        每条新闻最多展示 1
-        张配图：可从已抓取的高分图表、表格截图、推文原帖截图中一键选作配图，或手动上传截图；保存修改后点击「重新合成视频」即可。
-      </p>
+    <section className="space-y-4 rounded-2xl border border-slate-200/90 bg-white p-5 shadow-xs">
+      <div className="border-b border-slate-100 pb-3">
+        <h3 className="text-sm font-semibold text-slate-900">调整新闻配图与背景音乐</h3>
+        <p className="mt-1 text-xs text-slate-600">
+          每条新闻最多展示 1
+          张配图：可从已抓取的高分图表、表格截图或推文原帖截图中一键选用，或上传/粘贴本地截图；调整后点击底部「重新合成视频」。
+        </p>
+      </div>
       {items.map((item) => {
         const candidates = candidatesByItemId[item.id] ?? [];
         return (
@@ -232,47 +234,56 @@ export function MediaAdjustments({
           </div>
         );
       })}
-      <form
-        onSubmit={(event) => {
-          event.preventDefault();
-          const form = new FormData(event.currentTarget);
-          form.set('runId', runId);
-          submit(setRunBgmAction, form);
-        }}
-        className="flex gap-2"
-      >
-        <select
-          name="bgmFile"
-          defaultValue={bgmFile ?? ''}
-          className="rounded border px-2 py-1 text-sm"
-          required
+      <div className="flex flex-wrap items-center justify-between gap-3 border-t border-slate-100 pt-3">
+        <form
+          onSubmit={(event) => {
+            event.preventDefault();
+            const form = new FormData(event.currentTarget);
+            form.set('runId', runId);
+            submit(setRunBgmAction, form);
+          }}
+          className="flex flex-wrap items-center gap-2"
         >
-          <option value="">选择背景音乐</option>
-          {bgmFiles.map((file) => (
-            <option key={file} value={file}>
-              {file}
-            </option>
-          ))}
-        </select>
-        <button disabled={pending} className="rounded border px-3 py-1 text-sm" type="submit">
-          保存音乐
+          <select
+            name="bgmFile"
+            defaultValue={bgmFile ?? ''}
+            className="rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-xs text-slate-900"
+            required
+          >
+            <option value="">选择背景音乐</option>
+            {bgmFiles.map((file) => (
+              <option key={file} value={file}>
+                {file}
+              </option>
+            ))}
+          </select>
+          <button
+            disabled={pending}
+            className="rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-50"
+            type="submit"
+          >
+            保存音乐
+          </button>
+        </form>
+        <button
+          disabled={pending}
+          type="button"
+          className="rounded-lg bg-slate-900 px-4 py-2 text-xs font-medium text-white shadow-xs transition hover:bg-slate-800 disabled:opacity-50"
+          onClick={() => {
+            const form = new FormData();
+            form.set('runId', runId);
+            form.set('fromStage', 'render');
+            submit(resumeRunAction, form);
+          }}
+        >
+          重新合成视频
         </button>
-      </form>
-      <button
-        disabled={pending}
-        type="button"
-        className="rounded bg-slate-900 px-3 py-2 text-sm text-white"
-        onClick={() => {
-          const form = new FormData();
-          form.set('runId', runId);
-          form.set('fromStage', 'render');
-          submit(resumeRunAction, form);
-        }}
-      >
-        重新合成视频
-      </button>
+      </div>
       {message ? (
-        <p role="status" className="text-xs text-slate-600">
+        <p
+          role="status"
+          className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-700"
+        >
           {message}
         </p>
       ) : null}

@@ -340,9 +340,9 @@ export function StageRoutingForm({
   return (
     <form
       onSubmit={handleSubmit}
-      className="space-y-4 rounded-xl border border-slate-200 bg-white p-5 shadow-sm"
+      className="space-y-4 rounded-2xl border border-slate-200/90 bg-white p-5 shadow-xs"
     >
-      <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-100 pb-3">
+      <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-100 pb-3.5">
         <div>
           <h2 className="text-base font-semibold text-slate-900">分阶段模型设置</h2>
           <p className="mt-0.5 text-xs text-slate-600">
@@ -534,330 +534,364 @@ export function WorkflowSettingsForm({ settings }: { settings: Settings }) {
   return (
     <form
       onSubmit={handleSubmit}
-      className="space-y-5 rounded-xl border border-slate-200 bg-white p-5 shadow-sm"
+      className="space-y-6 rounded-2xl border border-slate-200/90 bg-white p-5 shadow-xs"
     >
-      <div className="border-b border-slate-100 pb-3">
+      <div className="border-b border-slate-100 pb-3.5">
         <h2 className="text-base font-semibold text-slate-900">选题补抓、模板渲染与发布设置</h2>
         <p className="mt-0.5 text-xs text-slate-600">
           注意：每期新闻条数与每日定时时间不在全局设置默认值，需在启动任务或创建定时任务时填写。
         </p>
       </div>
 
-      <div key={workflowValuesKey} className="grid gap-4 md:grid-cols-3">
-        <div>
-          <label className="block text-xs font-medium text-slate-700">
-            展示时区
-            <input
-              name="timezone"
-              type="text"
-              defaultValue={settings.timezone}
-              className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-1.5 text-xs font-normal"
-            />
-          </label>
-        </div>
-        <div>
-          <label className="block text-xs font-medium text-slate-700">
-            新闻新鲜度窗口（小时）
-            <input
-              name="freshnessHours"
-              type="number"
-              min={1}
-              defaultValue={settings.issue.freshnessHours}
-              className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-1.5 text-xs font-normal"
-            />
-          </label>
-        </div>
-        <div>
-          <label className="block text-xs font-medium text-slate-700">
-            同时处理新闻并发数
-            <input
-              name="itemConcurrency"
-              type="number"
-              min={1}
-              max={20}
-              defaultValue={settings.issue.itemConcurrency}
-              className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-1.5 text-xs font-normal"
-            />
-          </label>
-        </div>
+      <div key={workflowValuesKey} className="space-y-6">
+        <section className="rounded-xl border border-slate-200/80 bg-slate-50/60 p-4">
+          <div className="mb-3 border-b border-slate-200/70 pb-2">
+            <h3 className="text-xs font-semibold text-slate-900">
+              1. 新闻抓取、选题并发与重试策略
+            </h3>
+            <p className="mt-0.5 text-[11px] text-slate-500">
+              控制新闻时效窗口、缺条自动补抓上限及单条稿件核查打回规则。
+            </p>
+          </div>
+          <div className="grid gap-4 md:grid-cols-3">
+            <div>
+              <label className="block text-xs font-medium text-slate-700">
+                展示时区
+                <input
+                  name="timezone"
+                  type="text"
+                  defaultValue={settings.timezone}
+                  className="mt-1 w-full rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-xs font-normal"
+                />
+              </label>
+            </div>
+            <div>
+              <label className="block text-xs font-medium text-slate-700">
+                新闻新鲜度窗口（小时）
+                <input
+                  name="freshnessHours"
+                  type="number"
+                  min={1}
+                  defaultValue={settings.issue.freshnessHours}
+                  className="mt-1 w-full rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-xs font-normal"
+                />
+              </label>
+            </div>
+            <div>
+              <label className="block text-xs font-medium text-slate-700">
+                同时处理新闻并发数
+                <input
+                  name="itemConcurrency"
+                  type="number"
+                  min={1}
+                  max={20}
+                  defaultValue={settings.issue.itemConcurrency}
+                  className="mt-1 w-full rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-xs font-normal"
+                />
+              </label>
+            </div>
 
-        <div>
-          <label className="block text-xs font-medium text-slate-700">
-            缺条最大补抓轮次
-            <input
-              name="maxRounds"
-              type="number"
-              min={0}
-              max={10}
-              defaultValue={settings.issue.refill.maxRounds}
-              className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-1.5 text-xs font-normal"
-            />
-          </label>
-        </div>
-        <div>
-          <label className="block text-xs font-medium text-slate-700">
-            每轮放宽时效（小时）
-            <input
-              name="lookbackStepHours"
-              type="number"
-              min={1}
-              defaultValue={settings.issue.refill.lookbackStepHours}
-              className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-1.5 text-xs font-normal"
-            />
-          </label>
-        </div>
-        <div>
-          <label className="block text-xs font-medium text-slate-700">
-            最大回溯时长上限（小时）
-            <input
-              name="maxLookbackHours"
-              type="number"
-              min={1}
-              defaultValue={settings.issue.refill.maxLookbackHours}
-              className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-1.5 text-xs font-normal"
-            />
-          </label>
-        </div>
+            <div>
+              <label className="block text-xs font-medium text-slate-700">
+                缺条最大补抓轮次
+                <input
+                  name="maxRounds"
+                  type="number"
+                  min={0}
+                  max={10}
+                  defaultValue={settings.issue.refill.maxRounds}
+                  className="mt-1 w-full rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-xs font-normal"
+                />
+              </label>
+            </div>
+            <div>
+              <label className="block text-xs font-medium text-slate-700">
+                每轮放宽时效（小时）
+                <input
+                  name="lookbackStepHours"
+                  type="number"
+                  min={1}
+                  defaultValue={settings.issue.refill.lookbackStepHours}
+                  className="mt-1 w-full rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-xs font-normal"
+                />
+              </label>
+            </div>
+            <div>
+              <label className="block text-xs font-medium text-slate-700">
+                最大回溯时长上限（小时）
+                <input
+                  name="maxLookbackHours"
+                  type="number"
+                  min={1}
+                  defaultValue={settings.issue.refill.maxLookbackHours}
+                  className="mt-1 w-full rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-xs font-normal"
+                />
+              </label>
+            </div>
 
-        <div>
-          <label className="block text-xs font-medium text-slate-700">
-            中断保留重试时长（小时）
-            <input
-              name="reservationHoldHours"
-              type="number"
-              min={1}
-              defaultValue={settings.retry.reservationHoldHours}
-              className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-1.5 text-xs font-normal"
-            />
-          </label>
-        </div>
-        <div>
-          <label className="block text-xs font-medium text-slate-700">
-            单条核查打回微调上限
-            <input
-              name="maxRevisions"
-              type="number"
-              min={0}
-              max={5}
-              defaultValue={settings.editorial.maxRevisions}
-              className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-1.5 text-xs font-normal"
-            />
-          </label>
-        </div>
-        <div className="flex items-end pb-1.5">
-          <label className="inline-flex items-center gap-2 text-xs font-medium text-slate-700">
-            <input
-              name="useBackupSources"
-              type="checkbox"
-              defaultChecked={settings.issue.refill.useBackupSources}
-              value="true"
-              className="h-4 w-4 rounded border-slate-300"
-            />
-            缺条时启用备用新闻信源池
-          </label>
-        </div>
+            <div>
+              <label className="block text-xs font-medium text-slate-700">
+                中断保留重试时长（小时）
+                <input
+                  name="reservationHoldHours"
+                  type="number"
+                  min={1}
+                  defaultValue={settings.retry.reservationHoldHours}
+                  className="mt-1 w-full rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-xs font-normal"
+                />
+              </label>
+            </div>
+            <div>
+              <label className="block text-xs font-medium text-slate-700">
+                单条核查打回微调上限
+                <input
+                  name="maxRevisions"
+                  type="number"
+                  min={0}
+                  max={5}
+                  defaultValue={settings.editorial.maxRevisions}
+                  className="mt-1 w-full rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-xs font-normal"
+                />
+              </label>
+            </div>
+            <div className="flex items-end pb-1.5">
+              <label className="inline-flex items-center gap-2 text-xs font-medium text-slate-700">
+                <input
+                  name="useBackupSources"
+                  type="checkbox"
+                  defaultChecked={settings.issue.refill.useBackupSources}
+                  value="true"
+                  className="h-4 w-4 rounded border-slate-300"
+                />
+                缺条时启用备用新闻信源池
+              </label>
+            </div>
+          </div>
+        </section>
 
-        <div className="flex items-end pb-1.5">
-          <label className="inline-flex items-center gap-2 text-xs font-medium text-slate-700">
-            <input
-              name="pauseAfterNarrate"
-              type="checkbox"
-              defaultChecked={settings.tts.pauseAfterNarrate}
-              value="true"
-              className="h-4 w-4 rounded border-slate-300"
-            />
-            配音完成后先停下来试听，确认后再合成视频
-          </label>
-        </div>
-        <div>
-          <label className="block text-xs font-medium text-slate-700">
-            语音合成引擎
-            <select
-              name="ttsProvider"
-              defaultValue={settings.tts.provider}
-              className="mt-1 w-full rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-xs font-normal"
-            >
-              {ttsProviders.map((name) => (
-                <option key={name} value={name}>
-                  {name === 'indextts'
-                    ? 'indextts（本地 IndexTTS2.5）'
-                    : name === 'qwen-local'
-                      ? 'qwen-local（本地 Qwen3-TTS）'
-                      : name}
-                </option>
-              ))}
-            </select>
-          </label>
-        </div>
-        <div>
-          <label className="block text-xs font-medium text-slate-700">
-            背景音乐基准音量（dB）
-            <input
-              name="bgmVolumeDb"
-              type="number"
-              step="1"
-              min={-30}
-              max={0}
-              defaultValue={settings.render.bgm.volumeDb}
-              className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-1.5 text-xs font-normal"
-            />
-          </label>
-        </div>
-        <div>
-          <label className="block text-xs font-medium text-slate-700">
-            视频合成前端模板
-            <select
-              name="activeTemplate"
-              defaultValue={settings.template.active}
-              className="mt-1 w-full rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-xs font-normal"
-            >
-              {templateNames.map((name) => (
-                <option key={name} value={name}>
-                  {name}
-                </option>
-              ))}
-            </select>
-          </label>
-        </div>
-        <div>
-          <label className="block text-xs font-medium text-slate-700">
-            视频模板外观主题
-            <select
-              name="renderTheme"
-              defaultValue={settings.render.theme ?? 'dark'}
-              className="mt-1 w-full rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-xs font-normal"
-            >
-              <option value="dark">深色模式（dark）</option>
-              <option value="light">浅色模式（light）</option>
-            </select>
-          </label>
-        </div>
-        <div>
-          <label className="block text-xs font-medium text-slate-700">
-            看板娘 Live2D 模型套组
-            <select
-              name="renderLive2dPack"
-              defaultValue={settings.render.live2dPack ?? 'fullbody'}
-              className="mt-1 w-full rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-xs font-normal"
-            >
-              <option value="fullbody">全身动作版（fullbody）</option>
-              <option value="expression">仅表情版（expression）</option>
-            </select>
-          </label>
-        </div>
-        <div>
-          <label className="block text-xs font-medium text-slate-700">
-            每页画面停顿缓冲（秒）
-            <input
-              name="pagePaddingSec"
-              type="number"
-              step="0.1"
-              min={0}
-              defaultValue={settings.render.pagePaddingSec}
-              className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-1.5 text-xs font-normal"
-            />
-          </label>
-        </div>
-        <div>
-          <label className="block text-xs font-medium text-slate-700">
-            发布审批模式
-            <select
-              name="publishMode"
-              defaultValue={settings.publish.mode}
-              className="mt-1 w-full rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-xs font-normal"
-            >
-              <option value="manual-review">人工审核后发布（推荐）</option>
-              <option value="auto">质检通过后自动投稿</option>
-            </select>
-          </label>
-        </div>
+        <section className="rounded-xl border border-slate-200/80 bg-slate-50/60 p-4">
+          <div className="mb-3 border-b border-slate-200/70 pb-2">
+            <h3 className="text-xs font-semibold text-slate-900">2. 语音合成与视频模板渲染</h3>
+            <p className="mt-0.5 text-[11px] text-slate-500">
+              设置配音引擎、试听暂停开关、背景音乐音量以及前端视频模板参数。
+            </p>
+          </div>
+          <div className="grid gap-4 md:grid-cols-3">
+            <div>
+              <label className="block text-xs font-medium text-slate-700">
+                语音合成引擎
+                <select
+                  name="ttsProvider"
+                  defaultValue={settings.tts.provider}
+                  className="mt-1 w-full rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-xs font-normal"
+                >
+                  {ttsProviders.map((name) => (
+                    <option key={name} value={name}>
+                      {name === 'indextts'
+                        ? 'indextts（本地 IndexTTS2.5）'
+                        : name === 'qwen-local'
+                          ? 'qwen-local（本地 Qwen3-TTS）'
+                          : name}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            </div>
+            <div>
+              <label className="block text-xs font-medium text-slate-700">
+                背景音乐基准音量（dB）
+                <input
+                  name="bgmVolumeDb"
+                  type="number"
+                  step="1"
+                  min={-30}
+                  max={0}
+                  defaultValue={settings.render.bgm.volumeDb}
+                  className="mt-1 w-full rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-xs font-normal"
+                />
+              </label>
+            </div>
+            <div>
+              <label className="block text-xs font-medium text-slate-700">
+                每页画面停顿缓冲（秒）
+                <input
+                  name="pagePaddingSec"
+                  type="number"
+                  step="0.1"
+                  min={0}
+                  defaultValue={settings.render.pagePaddingSec}
+                  className="mt-1 w-full rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-xs font-normal"
+                />
+              </label>
+            </div>
 
-        <div>
-          <label className="block text-xs font-medium text-slate-700">
-            B 站投稿分区 ID
-            <input
-              name="bilibiliTid"
-              type="number"
-              min={0}
-              defaultValue={settings.publish.bilibili.tid}
-              className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-1.5 text-xs font-normal"
-            />
-          </label>
-        </div>
-        <div>
-          <label className="block text-xs font-medium text-slate-700">
-            标题字数上限
-            <input
-              name="titleMax"
-              type="number"
-              min={1}
-              defaultValue={settings.publish.bilibili.titleMax}
-              className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-1.5 text-xs font-normal"
-            />
-          </label>
-        </div>
-        <div>
-          <label className="block text-xs font-medium text-slate-700">
-            简介字数上限
-            <input
-              name="descMax"
-              type="number"
-              min={1}
-              defaultValue={settings.publish.bilibili.descMax}
-              className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-1.5 text-xs font-normal"
-            />
-          </label>
-        </div>
+            <div>
+              <label className="block text-xs font-medium text-slate-700">
+                视频合成前端模板
+                <select
+                  name="activeTemplate"
+                  defaultValue={settings.template.active}
+                  className="mt-1 w-full rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-xs font-normal"
+                >
+                  {templateNames.map((name) => (
+                    <option key={name} value={name}>
+                      {name}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            </div>
+            <div>
+              <label className="block text-xs font-medium text-slate-700">
+                视频模板外观主题
+                <select
+                  name="renderTheme"
+                  defaultValue={settings.render.theme ?? 'dark'}
+                  className="mt-1 w-full rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-xs font-normal"
+                >
+                  <option value="dark">深色模式（dark）</option>
+                  <option value="light">浅色模式（light）</option>
+                </select>
+              </label>
+            </div>
+            <div>
+              <label className="block text-xs font-medium text-slate-700">
+                看板娘 Live2D 模型套组
+                <select
+                  name="renderLive2dPack"
+                  defaultValue={settings.render.live2dPack ?? 'fullbody'}
+                  className="mt-1 w-full rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-xs font-normal"
+                >
+                  <option value="fullbody">全身动作版（fullbody）</option>
+                  <option value="expression">仅表情版（expression）</option>
+                </select>
+              </label>
+            </div>
 
-        <div>
-          <label className="block text-xs font-medium text-slate-700">
-            标签数量上限
-            <input
-              name="tagsMax"
-              type="number"
-              min={1}
-              defaultValue={settings.publish.bilibili.tagsMax}
-              className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-1.5 text-xs font-normal"
-            />
-          </label>
-        </div>
-        <div className="md:col-span-2">
-          <label className="block text-xs font-medium text-slate-700">
-            默认固定标签（逗号分隔）
-            <input
-              name="defaultTags"
-              type="text"
-              defaultValue={settings.publish.bilibili.defaultTags.join(', ')}
-              className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-1.5 text-xs font-normal"
-            />
-          </label>
-        </div>
+            <div className="md:col-span-3">
+              <label className="inline-flex items-center gap-2 text-xs font-medium text-slate-700">
+                <input
+                  name="pauseAfterNarrate"
+                  type="checkbox"
+                  defaultChecked={settings.tts.pauseAfterNarrate}
+                  value="true"
+                  className="h-4 w-4 rounded border-slate-300"
+                />
+                配音完成后先停下来试听，确认后再合成视频
+              </label>
+            </div>
+          </div>
+        </section>
 
-        <div className="md:col-span-3">
-          <div className="flex items-center justify-between">
-            <label
-              htmlFor="workflow-ai-disclaimer-input"
-              className="block text-xs font-medium text-slate-700"
-            >
-              AI 生成内容声明尾部文案
-            </label>
-            <span className="rounded bg-indigo-50 px-2 py-0.5 text-[11px] font-medium text-indigo-700">
+        <section className="rounded-xl border border-slate-200/80 bg-slate-50/60 p-4">
+          <div className="mb-3 flex flex-wrap items-center justify-between gap-2 border-b border-slate-200/70 pb-2">
+            <div>
+              <h3 className="text-xs font-semibold text-slate-900">3. B 站投稿与 AI 内容声明</h3>
+              <p className="mt-0.5 text-[11px] text-slate-500">
+                配置发布审批方式、B 站分区、文案限制与固定默认标签。
+              </p>
+            </div>
+            <span className="rounded-full bg-indigo-50 px-2.5 py-0.5 text-[11px] font-medium text-indigo-700 ring-1 ring-indigo-200/80">
               平台 AI 声明开关已强制锁定开启
             </span>
           </div>
-          <input
-            id="workflow-ai-disclaimer-input"
-            name="aiDisclaimerText"
-            type="text"
-            defaultValue={settings.publish.bilibili.aiDisclaimerText}
-            className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-1.5 text-xs"
-          />
-        </div>
+          <div className="grid gap-4 md:grid-cols-3">
+            <div>
+              <label className="block text-xs font-medium text-slate-700">
+                发布审批模式
+                <select
+                  name="publishMode"
+                  defaultValue={settings.publish.mode}
+                  className="mt-1 w-full rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-xs font-normal"
+                >
+                  <option value="manual-review">人工审核后发布（推荐）</option>
+                  <option value="auto">质检通过后自动投稿</option>
+                </select>
+              </label>
+            </div>
+            <div>
+              <label className="block text-xs font-medium text-slate-700">
+                B 站投稿分区 ID
+                <input
+                  name="bilibiliTid"
+                  type="number"
+                  min={0}
+                  defaultValue={settings.publish.bilibili.tid}
+                  className="mt-1 w-full rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-xs font-normal"
+                />
+              </label>
+            </div>
+            <div>
+              <label className="block text-xs font-medium text-slate-700">
+                标题字数上限
+                <input
+                  name="titleMax"
+                  type="number"
+                  min={1}
+                  defaultValue={settings.publish.bilibili.titleMax}
+                  className="mt-1 w-full rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-xs font-normal"
+                />
+              </label>
+            </div>
+
+            <div>
+              <label className="block text-xs font-medium text-slate-700">
+                简介字数上限
+                <input
+                  name="descMax"
+                  type="number"
+                  min={1}
+                  defaultValue={settings.publish.bilibili.descMax}
+                  className="mt-1 w-full rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-xs font-normal"
+                />
+              </label>
+            </div>
+            <div>
+              <label className="block text-xs font-medium text-slate-700">
+                标签数量上限
+                <input
+                  name="tagsMax"
+                  type="number"
+                  min={1}
+                  defaultValue={settings.publish.bilibili.tagsMax}
+                  className="mt-1 w-full rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-xs font-normal"
+                />
+              </label>
+            </div>
+            <div>
+              <label className="block text-xs font-medium text-slate-700">
+                默认固定标签（逗号分隔）
+                <input
+                  name="defaultTags"
+                  type="text"
+                  defaultValue={settings.publish.bilibili.defaultTags.join(', ')}
+                  className="mt-1 w-full rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-xs font-normal"
+                />
+              </label>
+            </div>
+
+            <div className="md:col-span-3">
+              <label
+                htmlFor="workflow-ai-disclaimer-input"
+                className="block text-xs font-medium text-slate-700"
+              >
+                AI 生成内容声明尾部文案
+              </label>
+              <input
+                id="workflow-ai-disclaimer-input"
+                name="aiDisclaimerText"
+                type="text"
+                defaultValue={settings.publish.bilibili.aiDisclaimerText}
+                className="mt-1 w-full rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-xs"
+              />
+            </div>
+          </div>
+        </section>
       </div>
 
       {feedback && (
         <div
-          className={`rounded-lg border px-3 py-2 text-xs ${
+          className={`rounded-xl border px-3.5 py-2.5 text-xs ${
             feedback.ok
               ? 'border-emerald-200 bg-emerald-50 text-emerald-800'
               : 'border-rose-200 bg-rose-50 text-rose-700'
@@ -867,11 +901,11 @@ export function WorkflowSettingsForm({ settings }: { settings: Settings }) {
         </div>
       )}
 
-      <div className="flex justify-end">
+      <div className="flex justify-end border-t border-slate-100 pt-3">
         <button
           type="submit"
           disabled={isPending}
-          className="rounded-lg bg-slate-900 px-4 py-2 text-xs font-medium text-white hover:bg-slate-800 disabled:opacity-50"
+          className="rounded-lg bg-slate-900 px-5 py-2 text-xs font-medium text-white shadow-xs transition hover:bg-slate-800 disabled:opacity-50"
         >
           {isPending ? '保存中…' : '保存工作流与发布设置'}
         </button>

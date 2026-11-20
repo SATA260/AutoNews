@@ -97,8 +97,8 @@ export function PublishControls({
   };
 
   return (
-    <div className="space-y-6">
-      <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
+    <div className="space-y-5">
+      <div className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-slate-200/90 bg-white p-4.5 shadow-xs">
         <div className="space-y-1">
           <div className="flex items-center gap-2">
             <span className="text-sm font-semibold text-slate-900">投稿状态</span>
@@ -196,7 +196,7 @@ export function PublishControls({
       {draft || publishRecord ? (
         <form
           onSubmit={handleSaveDraft}
-          className="space-y-4 rounded-xl border border-slate-200 bg-white p-5 shadow-sm"
+          className="space-y-4 rounded-2xl border border-slate-200/90 bg-white p-5 shadow-xs"
         >
           <div>
             <div className="flex items-center justify-between">
@@ -348,7 +348,7 @@ export function PublishControls({
       )}
 
       {canEdit && (
-        <div className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
+        <div className="rounded-2xl border border-slate-200/90 bg-white p-4.5 shadow-xs">
           <div className="flex flex-wrap items-center gap-2">
             <input
               type="text"
