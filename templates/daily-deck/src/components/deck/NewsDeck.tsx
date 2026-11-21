@@ -333,6 +333,7 @@ export const NewsDeck: React.FC<NewsDeckProps> = ({ initialData }) => {
   const [globalTimeMs, setGlobalTimeMs] = useState<number>(
     () => sectionTimings[clampPageIndex(startup.initialPage, totalPages)]?.startMs ?? 0,
   );
+  const [isSeekActive, setIsSeekActive] = useState<boolean>(false);
   const [mouthOpen, setMouthOpen] = useState<number>(0);
   const [live2dReady, setLive2dReady] = useState<boolean>(false);
   const [audioUnlockTick, setAudioUnlockTick] = useState<number>(0);
@@ -475,6 +476,7 @@ export const NewsDeck: React.FC<NewsDeckProps> = ({ initialData }) => {
           virtualProgress: null,
         };
       });
+      setIsSeekActive(false);
       setSectionProgress(0);
       setMouthOpen(0);
       if (targetSec) {
@@ -932,6 +934,7 @@ export const NewsDeck: React.FC<NewsDeckProps> = ({ initialData }) => {
         setRawIssue(check.issue);
       }
       setIssueVersion((v) => v + 1);
+      setIsSeekActive(false);
       setSectionProgress(0);
       setGlobalTimeMs(0);
       setMouthOpen(0);
@@ -949,6 +952,7 @@ export const NewsDeck: React.FC<NewsDeckProps> = ({ initialData }) => {
   const resetSampleIssue = useCallback(() => {
     setRawIssue(SAMPLE_DAILY_ISSUE);
     setIssueVersion((v) => v + 1);
+    setIsSeekActive(false);
     setSectionProgress(0);
     setGlobalTimeMs(0);
     setMouthOpen(0);
@@ -1069,6 +1073,7 @@ export const NewsDeck: React.FC<NewsDeckProps> = ({ initialData }) => {
           turnSeq: secIdx !== prev.currentPage ? prev.turnSeq + 1 : prev.turnSeq,
           virtualProgress: nextVirtualProg,
         }));
+        setIsSeekActive(true);
         setGlobalTimeMs(safeMs);
         setSectionProgress(secRatio);
         setMouthOpen(nextMouth);
@@ -1219,6 +1224,10 @@ export const NewsDeck: React.FC<NewsDeckProps> = ({ initialData }) => {
     startup.motion !== 'static' &&
     (startup.clockMode === 'manual' || isAutoPlaying);
   const currentRevealLocalMs = progressiveRevealActive ? currentLocalSec * 1000 : null;
+  const currentPlaybackLocalMs =
+    startup.clockMode === 'manual' || isAutoPlaying || isSeekActive
+      ? currentLocalSec * 1000
+      : null;
 
   const renderPageByIndex = useCallback(
     (pageIdx: number, isExiting: boolean) => {
@@ -1276,6 +1285,8 @@ export const NewsDeck: React.FC<NewsDeckProps> = ({ initialData }) => {
       // 正在渐出的旧页保持完整画面；只有当前页的卡片按播放进度逐张出现
       const pageRevealLocalMs =
         !isExiting && clampedIdx === currentPage ? currentRevealLocalMs : null;
+      const pagePlaybackLocalMs =
+        !isExiting && clampedIdx === currentPage ? currentPlaybackLocalMs : null;
       return (
         <NewsCardPage
           item={item}
@@ -1284,6 +1295,7 @@ export const NewsDeck: React.FC<NewsDeckProps> = ({ initialData }) => {
           isExiting={isExiting}
           onErrorCaptured={isExiting ? undefined : recordRuntimeError}
           revealLocalMs={pageRevealLocalMs}
+          playbackLocalMs={pagePlaybackLocalMs}
           pageDurationMs={pageSection?.durationMs ?? item.durationSec * 1000}
           subtitles={pageSection?.subtitles ?? item.subtitles}
           speechStartMs={pageSection?.speechStartMs ?? item.speechStartSec * 1000}
@@ -1294,6 +1306,7 @@ export const NewsDeck: React.FC<NewsDeckProps> = ({ initialData }) => {
     [
       currentLocalSec,
       currentPage,
+      currentPlaybackLocalMs,
       currentRevealLocalMs,
       isAutoPlaying,
       navigateTo,

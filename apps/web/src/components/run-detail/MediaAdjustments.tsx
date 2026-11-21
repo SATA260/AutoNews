@@ -9,7 +9,16 @@ import { buildArtifactUrl } from '@/components/run-detail/artifact-url';
 /** 网页端展示的单个候选视觉素材信息 */
 export interface MediaCandidateView {
   id: string;
-  kind: 'cover' | 'chart' | 'table_shot' | 'tweet_shot' | 'tweet_media' | 'screenshot';
+  kind:
+    | 'cover'
+    | 'chart'
+    | 'table_shot'
+    | 'tweet_shot'
+    | 'tweet_media'
+    | 'screenshot'
+    | 'github_card'
+    | 'changelog_shot'
+    | 'article_section';
   score: number;
   captionHint: string;
   contextSnippet: string;
@@ -32,6 +41,9 @@ const KIND_LABELS: Record<MediaCandidateView['kind'], string> = {
   chart: '跑分图表',
   screenshot: '正文配图',
   cover: '网页封面',
+  github_card: 'GitHub 卡片',
+  changelog_shot: '更新日志',
+  article_section: '正文截图',
 };
 
 /** 审核阶段更换配图（每条新闻最多 1 张，支持候选选图与本地上传）、查看专属背景音乐并重新合成画面。 */

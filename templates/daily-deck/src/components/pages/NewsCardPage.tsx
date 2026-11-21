@@ -32,6 +32,8 @@ export interface NewsCardPageProps {
   onErrorCaptured?: (scopeName: string, message: string) => void;
   /** 本页已播放的毫秒数，用来让卡片跟着口播逐张出现；为空时所有卡片直接全部显示 */
   revealLocalMs?: number | null;
+  /** 本页实际播放或 seekTo 定位的本地毫秒数，用于精确同步嘉宾插嘴气泡时间窗 */
+  playbackLocalMs?: number | null;
   /** 本页总停留时长（毫秒），用于规划配图展开和切页前收回的时间窗口 */
   pageDurationMs?: number;
   /** 本页口播的字幕时间表（相对本页开始），用来对齐卡片出现时刻 */
@@ -158,6 +160,7 @@ export const NewsCardPage: React.FC<NewsCardPageProps> = ({
   isExiting = false,
   onErrorCaptured,
   revealLocalMs = null,
+  playbackLocalMs = null,
   pageDurationMs,
   subtitles = [],
   speechStartMs = 0,
@@ -268,6 +271,7 @@ export const NewsCardPage: React.FC<NewsCardPageProps> = ({
 
   const isManualToggleable = hasPrimaryImage && revealLocalMs === null;
   const isSpotlightActive = spotlightState.progress > 0.001;
+  const effectiveGuestLocalMs = playbackLocalMs ?? revealLocalMs;
 
   return (
     <div
@@ -388,9 +392,9 @@ export const NewsCardPage: React.FC<NewsCardPageProps> = ({
       )}
 
       {item.guestReaction &&
-        (revealLocalMs === null ||
-          (revealLocalMs >= item.guestReaction.startSec * 1000 - 120 &&
-            revealLocalMs <= item.guestReaction.endSec * 1000 + 400)) && (
+        (effectiveGuestLocalMs === null ||
+          (effectiveGuestLocalMs >= item.guestReaction.startSec * 1000 - 120 &&
+            effectiveGuestLocalMs <= item.guestReaction.endSec * 1000 + 400)) && (
           <aside
             className="guest-reaction-bubble"
             data-testid="guest-reaction-bubble"
