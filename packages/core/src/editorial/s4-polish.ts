@@ -4,6 +4,7 @@ import {
   createPolishedItemSchema,
   type EventRecord,
   type Evidence,
+  type IssueMode,
   type PolishedItem,
   type Settings,
   type SummaryDraft,
@@ -19,8 +20,22 @@ import {
   serializeLoadedArticlesXml,
 } from './s3-summarize.js';
 
-const COMPACT_NARRATION_RULES =
-  '严格要求：口播narration为2～5句，总字数40～140字，每句4～46字（普通简讯50～95字，适合性格吐槽或信息密集的重点新闻可用95～140字，严禁空洞凑字数）；首句可直接切入主体动作或紧扣本条新闻具体事实现写自然开场，严禁照抄提示词或人设说明里的示例原句，严禁反复套用“又站起来了”“哈哈”“好家伙”“这波”等万金油口头禅，严禁“今天先来看一条…”“接下来关注…”“话不多说”“原因很直接”等AI铺垫套话，结尾说完事实即止，严禁“值得持续关注”“标志新阶段”等拔高套话；标题不超过36字，短标题不超过16字，progressLabel必填且为4～10字顶部进度条极简总结，highlight不超过18字，keyPoints为2～3条且每条不超过15字，cards必填且为2～4张信息卡片（常规3张、简讯2张，一张卡只讲一个事实并按口播先后排列，每张title为2～8字小标题，body为10～28字精炼事实短语且优先写进关键数字、结尾不加句号，icon按卡片事实类型选择，严禁编造原文之外的信息）。口播按单句拆入narration数组，像真人朋友自然口头聊天，有明显付费高门槛、翻车短板、隐私争议或巨大反差时才依据主播性格（roastStyle）用直白人话吐槽一句，普通发布说完事实直接收尾，严禁每条结尾都硬套“但/可/只是+俏皮话”固定模板；绝对禁止在口播里说“原帖没写/原文未透露”，严禁滥用“一边……一边……”“……的恰恰是……”“……倒是挺……”“吃闭门羹”“先打个问号”等AI味语癖；主播仅为玩家根据各模型二创的独立虚拟主持人、不能代表任何公司发言（播报原型关联公司或模型时必须直呼具体公司或产品名，严禁使用“我们”“我们团队”“我司”“自家”等代指公司或代表官方发声的措辞，不用生硬说自己是哪个公司的，且所有事实与吐槽都必须建立在原文已核实内容之上）；百分比和货币写成自然中文读法，不要使用括号或波浪号；单句内严禁在中文字符间加空格或用空格代替标点断句；全文主语、宾语和指代清晰无歧义。';
+/** 按头条/专场/短讯档位生成简洁的口播节奏与格式要求，避免超长禁令墙引发机器腔 */
+export function buildNarrationRules(opts: {
+  isHeadline: boolean;
+  issueMode: IssueMode;
+  settings: Settings;
+}): string {
+  const headlineMax = opts.settings.editorial.headlineNarrationMaxChars ?? 180;
+  const briefMax = opts.settings.editorial.briefNarrationMaxChars ?? 95;
+  const rangeText =
+    opts.isHeadline && opts.issueMode === 'spotlight'
+      ? '4～8 句，总长 140～260 字（重磅专场头条，讲透变化、实测影响与限制）'
+      : opts.isHeadline
+        ? `3～6 句，总长 100～${headlineMax} 字（本期头条，讲清用途、关键数字与限制）`
+        : `2～4 句，总长 45～${briefMax} 字（次要短讯，干脆利落讲完就停）`;
+  return `口播档位要求：narration 为 ${rangeText}，每句 4～46 字；标题 ≤ 36 字，短标题 ≤ 16 字，progressLabel 为 4～10 字，highlight ≤ 18 字，keyPoints 为 2～3 条（每条 ≤ 15 字），cards 为 2～4 张（每张 title 2～8 字、body 10～28 字且不加句号）。保持像真人微信语音聊天一样自然流畅，遇到明显高门槛/翻车/反差再按主播性格自然吐槽一句，普通进展说完即止；单句内不在中文字符间加空格，不含 URL 或 Markdown 符号。`;
+}
 
 /** 解析融合模板覆写上限后的实际文案字数约束 */
 export function resolveContentLimits(
@@ -141,16 +156,40 @@ export async function polishItemDraft(opts: {
   summary: SummaryDraft;
   articlesMap?: ReadonlyMap<string, LoadedEventArticle>;
   round: number;
+  isHeadline?: boolean;
+  issueMode?: IssueMode;
   signal?: AbortSignal;
 }): Promise<PolishedItem> {
-  const { ctx, settings, limits, runId, itemId, event, summary, articlesMap, round, signal } = opts;
+  const {
+    ctx,
+    settings,
+    limits,
+    runId,
+    itemId,
+    event,
+    summary,
+    articlesMap,
+    round,
+    isHeadline = event.rank === 1,
+    issueMode = 'digest',
+    signal,
+  } = opts;
 
   const mediaPool = articlesMap ? collectEventMediaPool(articlesMap) : [];
   const persona = await getRunPersona(ctx, runId);
+  const tierHint =
+    isHeadline && issueMode === 'spotlight'
+      ? '重磅专场头条（可充分展开讲透背景、实测、价格与边界）'
+      : isHeadline
+        ? '本期头条（35～45 秒，重点讲清影响与上手方式）'
+        : '常规/次要短讯（10～15 秒，短平快讲清事实即止）';
   const prompt = await renderPromptTemplate('s4-polish.md', {
-    personaJson: formatPersonaForPrompt(persona, '无特定角色', { includeReactions: false }),
+    personaJson: formatPersonaForPrompt(persona, '无特定角色', { includeReactions: true }),
     personaRelation: await describePersonaRelation(ctx, runId, itemId, summary.facts.join(' ')),
-    narrationRules: settings.editorial.compactStyle ? COMPACT_NARRATION_RULES : '',
+    narrationRules: settings.editorial.compactStyle
+      ? buildNarrationRules({ isHeadline, issueMode, settings })
+      : '',
+    tierHint,
     availableMediaSection: buildAvailableMediaSection(mediaPool),
     eventTitle: event.title,
     category: event.category ?? 'AI 资讯',
@@ -204,6 +243,8 @@ export async function revisePolishedItem(opts: {
   evidence: Evidence[];
   articlesMap: ReadonlyMap<string, LoadedEventArticle>;
   round: number;
+  isHeadline?: boolean;
+  issueMode?: IssueMode;
   signal?: AbortSignal;
 }): Promise<PolishedItem> {
   const {
@@ -217,6 +258,8 @@ export async function revisePolishedItem(opts: {
     evidence,
     articlesMap,
     round,
+    isHeadline = previous.isHeadlineTier === true,
+    issueMode = 'digest',
     signal,
   } = opts;
 
@@ -224,9 +267,11 @@ export async function revisePolishedItem(opts: {
   const articlesXml = serializeLoadedArticlesXml(articlesMap, settings.editorial.sourceMaxChars);
   const persona = await getRunPersona(ctx, runId);
   const prompt = await renderPromptTemplate('s4-revise.md', {
-    personaJson: formatPersonaForPrompt(persona, '无特定角色', { includeReactions: false }),
+    personaJson: formatPersonaForPrompt(persona, '无特定角色', { includeReactions: true }),
     personaRelation: await describePersonaRelation(ctx, runId, itemId, previous.summary),
-    narrationRules: settings.editorial.compactStyle ? COMPACT_NARRATION_RULES : '',
+    narrationRules: settings.editorial.compactStyle
+      ? buildNarrationRules({ isHeadline, issueMode, settings })
+      : '',
     availableMediaSection: buildAvailableMediaSection(mediaPool),
     previousItemJson: JSON.stringify(previous, null, 2),
     revisionNotesJson: JSON.stringify(revisionNotes, null, 2),

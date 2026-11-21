@@ -2,6 +2,7 @@ import path from 'node:path';
 import {
   COVER_TEXT_LIMITS,
   type ContentLimits,
+  type IssueMode,
   type IssuePackage,
   IssuePackageSchema,
   type Settings,
@@ -24,7 +25,7 @@ import { writeFileAtomic } from '../storage/files.js';
 import { invokeStageLlm } from './llm.js';
 import { formatPersonaForPrompt, getRunPersona } from './personas.js';
 import { precheckIssuePackage } from './prechecks.js';
-import { renderPromptTemplate } from './prompts.js';
+import { loadPromptSkill, renderPromptTemplate } from './prompts.js';
 import { resolveContentLimits } from './s4-polish.js';
 
 const MAX_PACKAGE_PRECHECK_RETRIES = 2;
@@ -114,16 +115,26 @@ export async function runPackageStage(
   };
 
   const persona = await getRunPersona(ctx, runId);
+  const topScore = itemsPayload.reduce((max, item) => Math.max(max, item.score), 0);
+  const issueMode: IssueMode =
+    topScore >= (settings.editorial.spotlightScoreThreshold ?? 9.2) && itemsPayload.length <= 3
+      ? 'spotlight'
+      : 'digest';
+  const titleSkillRules = await loadPromptSkill(
+    settings.editorial.titleSkillFile ?? 'skills/heiya-title.md',
+  );
   const recentTitles = ctx.repos.publish.listRecentTitles(runId, 10);
   const recentTitlesText =
     recentTitles.length > 0
       ? recentTitles.map((title) => `- ${title}`).join('\n')
       : '（近期暂无历史标题记录）';
   const basePrompt = await renderPromptTemplate('s6-package.md', {
-    personaJson: formatPersonaForPrompt(persona, '无特定角色', { includeReactions: false }),
+    personaJson: formatPersonaForPrompt(persona, '无特定角色', { includeReactions: true }),
     date: dateStr,
     dateDisplay,
     issueNumber,
+    issueMode,
+    titleSkillRules,
     passedItemsJson: JSON.stringify(itemsPayload, null, 2),
     recentTitles: recentTitlesText,
     contentLimitsJson: JSON.stringify(limits, null, 2),
@@ -182,6 +193,7 @@ export async function runPackageStage(
         ...res.data,
         order: alignedOrder,
         headlineItemId: alignedOrder[0] ?? res.data.headlineItemId,
+        issueMode: res.data.issueMode ?? issueMode,
       };
 
       const nowIso = ctx.now().toISOString();

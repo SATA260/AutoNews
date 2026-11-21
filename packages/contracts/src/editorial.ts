@@ -142,6 +142,11 @@ export const MascotMoodSchema = z.enum(['neutral', 'proud', 'surprised', 'thinki
 /** 看板娘表情状态类型 */
 export type MascotMood = z.infer<typeof MascotMoodSchema>;
 
+/** 本期节目档期模式：常规早晚报拼盘或重磅大事件主推专场 */
+export const IssueModeSchema = z.enum(['digest', 'spotlight']);
+/** 档期模式类型 */
+export type IssueMode = z.infer<typeof IssueModeSchema>;
+
 /** 按指定核心要点数量上限构建单条新闻润色定稿校验规则 */
 export function createPolishedItemSchema(keyPointsMax = 3) {
   return z.object({
@@ -152,6 +157,10 @@ export function createPolishedItemSchema(keyPointsMax = 3) {
     entity: z.string().min(1),
     summary: z.string().min(1),
     highlight: z.string().max(18).optional(),
+    /** 画面内展示的实用检索提示（如开源仓库名/平台入口名，不含 URL） */
+    actionHint: z.string().max(28).optional(),
+    /** 是否按头条重点篇幅润色 */
+    isHeadlineTier: z.boolean().optional(),
     preferArticleImage: z.boolean().optional(),
     primaryMediaId: z.string().optional(),
     secondaryMediaId: z.string().optional(),
@@ -239,11 +248,15 @@ export const IssuePackageSchema = z.object({
   }),
   publish: z.object({
     title: z.string().min(1),
+    /** 供审阅台一键切换的多档候选标题（由黑鸦标题 Skill 生成） */
+    titleCandidates: z.array(z.string().min(1)).max(5).optional(),
     descriptionIntro: z.string().min(1),
     tags: z.array(z.string().min(1)),
   }),
   /** 封面文字；旧数据或模型漏填时为空，届时由头条导语自动生成 */
   cover: CoverTextSchema.optional(),
+  /** 本期档期模式（常规早晚报或大事件主推专场） */
+  issueMode: IssueModeSchema.optional(),
 });
 /** 整期节目编排结果类型 */
 export type IssuePackage = z.infer<typeof IssuePackageSchema>;

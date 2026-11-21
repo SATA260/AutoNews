@@ -22,6 +22,7 @@ import {
   resolveBiliCookieFile,
   resumeRun,
   runNarrateStage,
+  stripExternalUrlsFromDescription,
   updateSettingsFile,
   writeJsonAtomic,
 } from '../src/index.js';
@@ -1195,6 +1196,55 @@ describe('Bilibili publishing, AI declaration, consumption, and uncertain recove
       expect(core.context.repos.runs.getById(runId)?.status).toBe('awaiting_review');
       const recorded = JSON.parse(await fs.readFile(stateFile, 'utf8')) as { calls: string[][] };
       expect(recorded.calls).toHaveLength(0);
+    } finally {
+      await core.close();
+    }
+  });
+
+  it('strips external URLs from Bilibili descriptions and enforces daily maxDailyUploads guardrail', async () => {
+    expect(
+      stripExternalUrlsFromDescription(
+        '本期导览见 https://example.com/demo 或 www.github.com/org/repo，详情见 github.com/foo/bar',
+      ),
+    ).not.toMatch(/https?:\/\/|www\.|github\.com/i);
+
+    const { rootDir } = await setupPublishWorkspace({ mode: 'manual-review' });
+    await updateSettingsFile(path.join(rootDir, 'config', 'settings.yaml'), {
+      publish: {
+        bilibili: {
+          maxDailyUploads: 2,
+        },
+      },
+    });
+    const fixedNow = () => new Date('2026-11-21T10:00:00.000Z');
+    const core = await createCore({ rootDir, now: fixedNow });
+    try {
+      const r1 = createRun(core.context, { itemCount: 1, trigger: 'manual-cli' });
+      await seedCompletedRunReadyForReview(core, r1);
+      await core.publish.approve(r1, { retryDelaysMs: [0] });
+      expect(core.context.repos.runs.getById(r1)?.status).toBe('published');
+
+      const r2 = createRun(core.context, { itemCount: 1, trigger: 'manual-cli' });
+      await seedCompletedRunReadyForReview(core, r2);
+      await core.publish.approve(r2, { retryDelaysMs: [0] });
+      expect(core.context.repos.runs.getById(r2)?.status).toBe('published');
+
+      const r3 = createRun(core.context, { itemCount: 1, trigger: 'manual-cli' });
+      await seedCompletedRunReadyForReview(core, r3);
+      await expect(core.publish.approve(r3, { retryDelaysMs: [0] })).rejects.toThrow(
+        /已发布 2 条/,
+      );
+      expect(core.context.repos.runs.getById(r3)?.status).toBe('awaiting_review');
+
+      await executeBilibiliUpload({
+        ctx: core.context,
+        runId: r3,
+        settings: core.context.settings,
+        allowedRunStatuses: ['awaiting_review'],
+        retryDelaysMs: [0],
+        bypassDailyLimit: true,
+      });
+      expect(core.context.repos.runs.getById(r3)?.status).toBe('published');
     } finally {
       await core.close();
     }

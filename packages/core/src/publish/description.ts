@@ -33,6 +33,18 @@ function codepointLen(text: string): number {
   return Array.from(text).length;
 }
 
+const EXTERNAL_URL_PATTERN =
+  /(?:https?:\/\/|www\.)\S+|\b[a-z0-9-]+(?:\.[a-z0-9-]+)*\.(?:com|cn|org|net|io|ai|dev|gg|co|me|app|tv)(?:\/\S*)?/gi;
+
+/** 剥离简介中意外混入的外部链接与域名，防止触发 B 站外链违规下架 */
+export function stripExternalUrlsFromDescription(text: string): string {
+  return text
+    .replace(EXTERNAL_URL_PATTERN, '')
+    .replace(/[ \t]{2,}/g, ' ')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
 /** 把毫秒时间点格式化为视频平台章节时间轴标签（`mm:ss`） */
 export function formatChapterTimestamp(ms: number): string {
   const totalSec = Math.max(0, Math.round(ms / 1000));
@@ -41,7 +53,7 @@ export function formatChapterTimestamp(ms: number): string {
   return `${mins}:${secs}`;
 }
 
-/** 根据时间轴、编排顺序和平台字数上限生成 B 站视频简介文本（不包含信息来源与原文链接） */
+/** 根据时间轴、编排顺序和平台字数上限生成 B 站视频简介文本（严禁外链，保留清晰免责声明） */
 export function buildBilibiliDescription(opts: {
   packageData: IssuePackage;
   timeline: Timeline;
@@ -68,9 +80,9 @@ export function buildBilibiliDescription(opts: {
     }
   }
 
-  const introBlock = packageData.publish.descriptionIntro.trim();
+  const introBlock = stripExternalUrlsFromDescription(packageData.publish.descriptionIntro);
   const chaptersBlock = `【内容时间轴】\n${chapterLines.join('\n')}`;
-  const disclaimerBlock = publishConfig.aiDisclaimerText.trim();
+  const disclaimerBlock = stripExternalUrlsFromDescription(publishConfig.aiDisclaimerText);
   const maxChars = publishConfig.descMax;
 
   const candidate = [introBlock, chaptersBlock, disclaimerBlock].filter(Boolean).join('\n\n');

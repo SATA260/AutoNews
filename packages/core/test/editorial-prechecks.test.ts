@@ -6,6 +6,7 @@ import {
   extractArabicNumbers,
   isDuplicateOfHistory,
   isExactTitleMatch,
+  loadPromptSkill,
   longestCommonSubstringLength,
   normalizeTitleForExactMatch,
   precheckIssuePackage,
@@ -161,22 +162,26 @@ describe('editorial foundation: prompts, similarity, and deterministic prechecks
     expect(selectPrompt).toContain('Gemini 4 Neon');
     expect(selectPrompt).toContain('同一具体事件');
 
+    const titleSkillRules = await loadPromptSkill('skills/heiya-title.md');
     const packagePrompt = await renderPromptTemplate('s6-package.md', {
       personaJson: '无特定角色',
       date: '2026-11-19',
       dateDisplay: '11月19日周四',
       issueNumber: 'VOL.2026.11.19',
+      issueMode: 'digest',
       passedItemsJson: '[]',
       recentTitles: '- AI圈大地震！上期示例标题',
+      titleSkillRules,
       contentLimitsJson: '{}',
       publishLimitsJson: '{}',
       coverTitleMax: '14',
       coverSubtitleMax: '22',
     });
     expect(packagePrompt).toContain('重磅主流模型、顶尖突破或全局大事优先头条');
-    expect(packagePrompt).toContain('能力比较一般');
+    expect(packagePrompt).toContain('直给干货的钩子开场');
+    expect(packagePrompt).toContain('把“我是谁”放在结尾');
     expect(packagePrompt).toContain('AI圈大地震！上期示例标题');
-    expect(packagePrompt).toContain('干脆双拼直给型');
+    expect(packagePrompt).toContain('黑鸦标题生成 Skill');
   });
 
   it('passes precheck for valid quotes (including 90% LCS) and normalized comma/full-width numbers', () => {
@@ -881,5 +886,146 @@ describe('editorial foundation: prompts, similarity, and deterministic prechecks
       expect(resBody.passed).toBe(false);
       expect(resBody.errors.some((e) => e.includes('> 28 字'))).toBe(true);
     }
+  });
+
+  it('enforces M1 outro selfName, direct hook intro, actionHint safety, dynamic narration caps, and titleCandidates validation', () => {
+    const articlesById = new Map([
+      [
+        'art-1',
+        {
+          text: 'The new model runs 2x faster at $15 per 1,000,000 tokens for paid subscribers.',
+          publishedAt: '2026-11-19T08:00:00.000Z',
+        },
+      ],
+    ]);
+    const publishConfig: Settings['publish']['bilibili'] = {
+      cli: 'biliup',
+      cookieFile: 'storage/secrets/bilibili-cookies.json',
+      tid: 0,
+      copyright: 1,
+      titleMax: 80,
+      descMax: 2000,
+      tagsMax: 6,
+      defaultTags: ['AI', '人工智能', '科技资讯', 'AI每日报'],
+      aiDeclaration: true,
+      aiDisclaimerText: 'AI 生成声明',
+    };
+
+    const hookIntroPkg: IssuePackage = {
+      order: ['item-1'],
+      headlineItemId: 'item-1',
+      headline: '推理速度翻倍，每百万词元十五美元',
+      leadSummary: '今天重点看新款推理模型提速与定价细节。',
+      intro: {
+        narration: ['推理速度直接翻倍，OpenAI刚把新模型放出来，咱们直接看细则。'],
+        hostComment: '今天这条真干货。',
+      },
+      outro: {
+        narration: ['今天的AI账先算到这儿，我是聪明的大肥鱼，咱们下期见。'],
+        hostComment: '欢迎评论区聊聊。',
+        cta: '哪一条最戳中你？欢迎留言。',
+      },
+      publish: {
+        title: '推理速度直接翻倍？OpenAI新模型每百万词元只要十五美元',
+        titleCandidates: [
+          '每百万词元十五美元！OpenAI新推理模型速度翻倍正式开放',
+          '付费会员直接能用，OpenAI新款推理模型速度较前代翻倍',
+          '写代码更快了？OpenAI新推理模型提速两倍细节一览',
+        ],
+        descriptionIntro: '本期聚焦最新推理模型提速与定价细节。',
+        tags: ['OpenAI', '大模型'],
+      },
+    };
+    const hookOk = precheckIssuePackage({
+      pkg: hookIntroPkg,
+      expectedItemIds: ['item-1'],
+      limits: DEFAULT_LIMITS,
+      publishConfig,
+      metaTextBlacklist: BLACKLIST,
+      compact: true,
+      hostSelfName: '聪明的大肥鱼',
+    });
+    expect(hookOk.errors).toEqual([]);
+    expect(hookOk.passed).toBe(true);
+
+    const missingOutroSelfName = precheckIssuePackage({
+      pkg: {
+        ...hookIntroPkg,
+        outro: {
+          ...hookIntroPkg.outro,
+          narration: ['今天的资讯就播到这里，咱们明天见。'],
+        },
+      },
+      expectedItemIds: ['item-1'],
+      limits: DEFAULT_LIMITS,
+      publishConfig,
+      metaTextBlacklist: BLACKLIST,
+      compact: true,
+      hostSelfName: '聪明的大肥鱼',
+    });
+    expect(missingOutroSelfName.passed).toBe(false);
+    expect(missingOutroSelfName.errors.some((e) => e.includes('outro.narration'))).toBe(true);
+
+    const badCandidate = precheckIssuePackage({
+      pkg: {
+        ...hookIntroPkg,
+        publish: {
+          ...hookIntroPkg.publish,
+          titleCandidates: ['AI每日报｜新模型发布速度翻倍并开启体验'],
+        },
+      },
+      expectedItemIds: ['item-1'],
+      limits: DEFAULT_LIMITS,
+      publishConfig,
+      metaTextBlacklist: BLACKLIST,
+      compact: true,
+      hostSelfName: '聪明的大肥鱼',
+    });
+    expect(badCandidate.passed).toBe(false);
+    expect(badCandidate.errors.some((e) => e.includes('titleCandidates[0]'))).toBe(true);
+
+    const itemWithUrlHint: PolishedItem = {
+      ...makeValidPolishedItem(),
+      actionHint: '访问 https://openai.com/models 体验',
+    };
+    const hintUrlRes = precheckPolishedItem({
+      item: itemWithUrlHint,
+      articlesById,
+      limits: DEFAULT_LIMITS,
+      metaTextBlacklist: BLACKLIST,
+    });
+    expect(hintUrlRes.passed).toBe(false);
+    expect(hintUrlRes.errors.some((e) => e.includes('actionHint'))).toBe(true);
+
+    const briefOverCap: PolishedItem = {
+      ...makeValidPolishedItem(),
+      actionHint: '搜 OpenAI Reasoning 体验',
+      narration: [
+        '官方正式推出全新推理模型，编码与复杂问答速度比前代快两倍。',
+        '每百万词元接口定价控制到十五美元，目前已面向付费会员开放。',
+        '这项更新专门面向日常高频开发与长程问答场景大幅降低响应延迟。',
+      ],
+    };
+    const briefRes = precheckPolishedItem({
+      item: briefOverCap,
+      articlesById,
+      limits: DEFAULT_LIMITS,
+      metaTextBlacklist: BLACKLIST,
+      isHeadline: false,
+      briefNarrationMaxChars: 75,
+    });
+    expect(briefRes.passed).toBe(false);
+    expect(briefRes.errors.some((e) => e.includes('次要短讯'))).toBe(true);
+
+    const headlineRes = precheckPolishedItem({
+      item: briefOverCap,
+      articlesById,
+      limits: DEFAULT_LIMITS,
+      metaTextBlacklist: BLACKLIST,
+      isHeadline: true,
+      headlineNarrationMaxChars: 180,
+    });
+    expect(headlineRes.errors).toEqual([]);
+    expect(headlineRes.passed).toBe(true);
   });
 });

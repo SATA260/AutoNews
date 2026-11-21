@@ -1,6 +1,7 @@
 import type {
   ContentLimits,
   Evidence,
+  IssueMode,
   IssuePackage,
   PolishedItem,
   Settings,
@@ -604,6 +605,10 @@ export function precheckPolishedItem(opts: {
   limits: ContentLimits;
   metaTextBlacklist: readonly string[];
   compact?: boolean;
+  isHeadline?: boolean;
+  issueMode?: IssueMode;
+  headlineNarrationMaxChars?: number;
+  briefNarrationMaxChars?: number;
   forbiddenTokens?: readonly string[];
   hostSelfName?: string;
 }): PrecheckResult {
@@ -719,6 +724,12 @@ export function precheckPolishedItem(opts: {
   if (item.imageCaption) {
     lengthChecks.push(['imageCaption', item.imageCaption, 44]);
   }
+  if (item.actionHint) {
+    lengthChecks.push(['actionHint', item.actionHint, 28]);
+    if (URL_PATTERN.test(item.actionHint)) {
+      errors.push('字段「actionHint」仅填平台名或搜索关键词，严禁包含网址链接');
+    }
+  }
   for (const [label, value, maxChars] of lengthChecks) {
     const len = charLength(value);
     if (len > maxChars) {
@@ -785,8 +796,20 @@ export function precheckPolishedItem(opts: {
       errors.push('每张信息卡片小标题须为二到八字，正文须为十到二十八字');
     }
     const total = item.narration.reduce((sum, sentence) => sum + charLength(sentence), 0);
-    if (item.narration.length < 2 || item.narration.length > 5 || total < 40 || total > 140)
-      errors.push('口播应为二到五句，总长四十到一百四十字');
+    const isHeadline = opts.isHeadline ?? item.isHeadlineTier === true;
+    const maxSentences = isHeadline ? (opts.issueMode === 'spotlight' ? 8 : 6) : 5;
+    const maxTotalChars = isHeadline
+      ? opts.issueMode === 'spotlight'
+        ? 265
+        : Math.max(140, opts.headlineNarrationMaxChars ?? 180)
+      : Math.max(95, opts.briefNarrationMaxChars ?? 140);
+    if (
+      item.narration.length < 2 ||
+      item.narration.length > maxSentences ||
+      total < 40 ||
+      total > maxTotalChars
+    )
+      errors.push(`口播应为二到${maxSentences}句，总长四十到${maxTotalChars}字`);
     if (
       item.narration.some(
         (sentence) => charLength(sentence) < 4 || charLength(sentence) > sentenceLimit,
@@ -950,36 +973,48 @@ export function precheckIssuePackage(opts: {
     const introText = pkg.intro.narration.join('');
     const introTotal = charLength(introText);
     if (pkg.intro.narration.length > 2 || introTotal > 65) {
-      errors.push('开场口播应简短高效（一到两句、总长不超过六十五字），不要在开头总结新闻');
+      errors.push('开场口播应直给头条重点（一到两句、总长不超过六十五字），不要冗长寒暄');
     }
-    if (opts.hostSelfName) {
-      const normIntro = introText.normalize('NFKC').toLowerCase();
-      const normSelf = opts.hostSelfName.normalize('NFKC').toLowerCase();
-      if (!normIntro.includes(normSelf)) {
-        errors.push(`开场口播必须简短直接地做自我介绍并包含主播自称「${opts.hostSelfName}」`);
-      }
-    }
-    if (
-      /(?:我是|来自|代表)[^，。！？]{1,15}(?:公司|旗下|出品|团队)的|(?:我是|来自|代表)[^，。！？]{0,10}(?:谷歌|google|deepmind|openai|anthropic|深度求索|deepseek)[^，。！？]{0,8}(?:的|家的)/i.test(
-        introText,
-      )
-    ) {
-      errors.push('开场自我介绍直接报名字即可，不用说自己是哪个公司的，也不能代表任何公司发言');
-    }
+    const outroText = pkg.outro.narration.join('');
     const outroTotal = pkg.outro.narration.reduce((sum, line) => sum + charLength(line), 0);
     if (pkg.outro.narration.length > 2 || outroTotal > 55) {
       errors.push('结尾口播应干净利落（一到两句、总长不超过五十五字），不要做长篇总结');
     }
+    if (opts.hostSelfName) {
+      const normOutro = outroText.normalize('NFKC').toLowerCase();
+      const normSelf = opts.hostSelfName.normalize('NFKC').toLowerCase();
+      if (!normOutro.includes(normSelf)) {
+        errors.push(`结尾口播必须自然自报家门并包含主播自称「${opts.hostSelfName}」`);
+      }
+    }
+    if (
+      /(?:我是|来自|代表)[^，。！？]{1,15}(?:公司|旗下|出品|团队)的|(?:我是|来自|代表)[^，。！？]{0,10}(?:谷歌|google|deepmind|openai|anthropic|深度求索|deepseek)[^，。！？]{0,8}(?:的|家的)/i.test(
+        `${introText} ${outroText}`,
+      )
+    ) {
+      errors.push('主播自报家门直接报名字即可，不用说自己是哪个公司的，也不能代表任何公司发言');
+    }
 
-    const publishTitle = pkg.publish.title.trim();
-    if (/^(?:【?\s*)?(?:AI\s*(?:每日报|早报|晚报|日报)|今日\s*AI\s*资讯)/i.test(publishTitle)) {
-      errors.push('视频标题严禁以“AI每日报/AI早报”等死板栏目名开头，请直接切入本期最核心新闻看点');
-    }
-    if (charLength(publishTitle) < 18) {
-      errors.push('视频标题过于简短（须至少十八字并写入具体产品/模型名、关键数字或核心事件）');
-    }
-    if (/(?<=[\u4e00-\u9fff])_|_(?=[\u4e00-\u9fff])/.test(publishTitle)) {
-      errors.push('视频标题请使用正常标点或空格，不要混入文件名下划线“_”');
+    const validateTitle = (rawTitle: string, label: string) => {
+      const publishTitle = rawTitle.trim();
+      if (/^(?:【?\s*)?(?:AI\s*(?:每日报|早报|晚报|日报)|今日\s*AI\s*资讯)/i.test(publishTitle)) {
+        errors.push(`${label}严禁以“AI每日报/AI早报”等死板栏目名开头，请直接切入本期最核心新闻看点`);
+      }
+      if (charLength(publishTitle) < 18) {
+        errors.push(`${label}过于简短（须至少十八字并写入具体产品/模型名、关键数字或核心事件）`);
+      }
+      if (charLength(publishTitle) > publishConfig.titleMax) {
+        errors.push(`${label}超出平台字数上限（${charLength(publishTitle)} > ${publishConfig.titleMax} 字）`);
+      }
+      if (/(?<=[\u4e00-\u9fff])_|_(?=[\u4e00-\u9fff])/.test(publishTitle)) {
+        errors.push(`${label}请使用正常标点或空格，不要混入文件名下划线“_”`);
+      }
+    };
+    validateTitle(pkg.publish.title, '视频标题');
+    if (pkg.publish.titleCandidates) {
+      pkg.publish.titleCandidates.forEach((cand, idx) => {
+        validateTitle(cand, `候选标题[${idx + 1}]`);
+      });
     }
   }
 

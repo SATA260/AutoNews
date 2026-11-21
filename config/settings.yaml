@@ -35,7 +35,11 @@ editorial:
   historyDedupDays: 14
   compactStyle: true # 启用紧凑型口播与要点约束
   requireImageOptIn: true # 仅在高价值素材或人工指定时配备新闻插图
-  metaTextBlacklist: [ "已依据", "以下是", "根据您提供", "作为AI", "总结如下", "```" ]
+  titleSkillFile: skills/heiya-title.md # 黑鸦爆款标题 Skill
+  spotlightScoreThreshold: 9.2 # 达到该分值自动将当档早/晚报升级为大事件主推专场
+  headlineNarrationMaxChars: 180 # 常规档头条口播总字数上限
+  briefNarrationMaxChars: 95 # 次要短讯口播总字数上限
+  metaTextBlacklist: [ "已依据", "以下是", "根据您提供", "作为AI", "总结如下", "值得一提的是", "综上所述", "令人瞩目的是", "标志着行业", "```" ]
 
 contentLimits:
   # 默认值取自当前模板，模板适配器可以覆盖
@@ -198,7 +202,8 @@ publish:
       - 科技资讯
       - AI每日报
     aiDeclaration: true # 强制开启 B 站平台 AI 生成内容声明标识
-    aiDisclaimerText: "本视频由 AI 整理与配音，不对内容负责。"
+    maxDailyUploads: 2 # 严格早晚双更上限，防止高频投稿触发 B 站限流
+    aiDisclaimerText: "免责声明：本视频由 AI 辅助整理、配音及画面渲染，资讯均来自公开报道，仅供参考，不构成任何投资或使用建议，具体信息请以官方最新公告为准。"
 
 # 定时任务（执行时间 + 每期条数）不在配置文件设默认值，统一在 SQLite schedules 表中手动新建管理
 

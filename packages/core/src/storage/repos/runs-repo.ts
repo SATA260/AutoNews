@@ -467,6 +467,26 @@ export function createRunsRepo(db: DatabaseSync) {
         .all(nowIso) as unknown as RunRow[];
       return rows.map(mapRunSummary);
     },
+
+    /** 统计指定 UTC 时间区间内已发布或正在发布（不含当前排除 ID）的任务数量，用于早晚双更日频次护栏 */
+    countPublishedBetween(fromIso: string, toIso: string, excludeRunId?: string): number {
+      const sql = excludeRunId
+        ? `SELECT COUNT(*) AS cnt FROM runs
+           WHERE status IN ('published', 'publishing')
+             AND COALESCE(finished_at, created_at) >= ?
+             AND COALESCE(finished_at, created_at) < ?
+             AND id != ?`
+        : `SELECT COUNT(*) AS cnt FROM runs
+           WHERE status IN ('published', 'publishing')
+             AND COALESCE(finished_at, created_at) >= ?
+             AND COALESCE(finished_at, created_at) < ?`;
+      const row = (
+        excludeRunId
+          ? db.prepare(sql).get(fromIso, toIso, excludeRunId)
+          : db.prepare(sql).get(fromIso, toIso)
+      ) as { cnt: number } | undefined;
+      return Number(row?.cnt ?? 0);
+    },
   };
 }
 

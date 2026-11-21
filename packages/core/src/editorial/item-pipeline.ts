@@ -529,6 +529,11 @@ export async function processSingleItem(opts: {
       finalJson: null,
       updatedAt: ctx.now().toISOString(),
     });
+    const isHeadline = event.rank === 1;
+    const issueMode =
+      event.score >= (settings.editorial.spotlightScoreThreshold ?? 9.2) && isHeadline
+        ? 'spotlight'
+        : 'digest';
     polished = await polishItemDraft({
       ctx,
       settings,
@@ -539,11 +544,18 @@ export async function processSingleItem(opts: {
       summary,
       articlesMap,
       round: revision,
+      isHeadline,
+      issueMode,
       signal,
     });
   }
 
   // 步骤 3：确定性规则预检与独立核查循环
+  const isHeadlineForCheck = event.rank === 1;
+  const issueModeForCheck =
+    event.score >= (settings.editorial.spotlightScoreThreshold ?? 9.2) && isHeadlineForCheck
+      ? 'spotlight'
+      : 'digest';
   while (true) {
     if (signal.aborted) {
       throw new DOMException('已取消', 'AbortError');
@@ -563,6 +575,10 @@ export async function processSingleItem(opts: {
         limits,
         metaTextBlacklist: settings.editorial.metaTextBlacklist,
         compact: settings.editorial.compactStyle,
+        isHeadline: isHeadlineForCheck,
+        issueMode: issueModeForCheck,
+        headlineNarrationMaxChars: settings.editorial.headlineNarrationMaxChars,
+        briefNarrationMaxChars: settings.editorial.briefNarrationMaxChars,
         forbiddenTokens: persona?.forbiddenTokens,
         hostSelfName: persona?.selfName,
       });

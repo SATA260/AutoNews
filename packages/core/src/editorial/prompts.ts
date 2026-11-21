@@ -14,7 +14,7 @@ export interface ArticlePromptInput {
   text: string;
 }
 
-const SAFE_TEMPLATE_NAME = /^[a-zA-Z0-9._-]+\.md$/;
+const SAFE_TEMPLATE_NAME = /^[a-zA-Z0-9._-]+(?:\/[a-zA-Z0-9._-]+)?\.md$/;
 
 /** 定位提示词模板目录（兼容源码目录直跑与打包产物目录运行） */
 export function resolvePromptsDir(overrideDir?: string): string {
@@ -34,6 +34,21 @@ export function resolvePromptsDir(overrideDir?: string): string {
   throw new Error(`未找到提示词模板目录，已排查路径: ${candidates.join(', ')}`);
 }
 
+/** 读取指定名称的提示词 Skill 文件（支持单层子目录如 `skills/heiya-title.md`），缺失时返回空字符串 */
+export async function loadPromptSkill(skillFile: string, promptsDir?: string): Promise<string> {
+  const normalized = skillFile.trim();
+  if (!normalized || normalized.includes('..') || !SAFE_TEMPLATE_NAME.test(normalized)) {
+    throw new Error(`非法的提示词 Skill 文件路径: ${skillFile}`);
+  }
+  const baseDir = resolvePromptsDir(promptsDir);
+  const fullPath = path.join(baseDir, normalized);
+  try {
+    return (await fs.readFile(fullPath, 'utf8')).trim();
+  } catch {
+    return '';
+  }
+}
+
 /**
  * 读取指定名称的提示词模板文件，并用单次遍历替换全部 `{{变量名}}` 占位符，
  * 确保替换后文章正文中若恰巧包含双花括号也不会被二次展开。
@@ -43,7 +58,7 @@ export async function renderPromptTemplate(
   vars: Record<string, string>,
   promptsDir?: string,
 ): Promise<string> {
-  if (!SAFE_TEMPLATE_NAME.test(templateName)) {
+  if (templateName.includes('..') || !SAFE_TEMPLATE_NAME.test(templateName)) {
     throw new Error(`非法的提示词模板文件名: ${templateName}`);
   }
   const baseDir = resolvePromptsDir(promptsDir);

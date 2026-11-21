@@ -3,6 +3,7 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import type { Settings } from '@aidaily/contracts';
+import { TZDate } from '@date-fns/tz';
 import type { CoreContext } from '../context.js';
 import { PipelineError } from '../errors.js';
 import { inTransaction } from '../storage/db.js';
@@ -235,12 +236,24 @@ function assertMediaReady(ctx: CoreContext, runId: string): void {
   if (row?.media_dirty) throw new Error('画面或音乐已修改，请重新合成并通过质检后再投稿');
 }
 
-/** 校验执行发布动作所需的目标状态与本地成片及封面文件存在性 */
+/** 计算当前时刻在目标时区下对应自然日的起止 UTC ISO 时间边界 */
+function getLocalDayUtcBounds(now: Date, timezone: string): { startIso: string; endIso: string } {
+  const tzNow = new TZDate(now.getTime(), timezone);
+  const start = new TZDate(tzNow.getFullYear(), tzNow.getMonth(), tzNow.getDate(), 0, 0, 0, 0, timezone);
+  const end = new TZDate(tzNow.getFullYear(), tzNow.getMonth(), tzNow.getDate() + 1, 0, 0, 0, 0, timezone);
+  return {
+    startIso: new Date(start.getTime()).toISOString(),
+    endIso: new Date(end.getTime()).toISOString(),
+  };
+}
+
+/** 校验执行发布动作所需的目标状态、单日投稿频次上限与本地成片及封面文件存在性 */
 export async function assertReadyToUpload(opts: {
   ctx: CoreContext;
   runId: string;
   settings: Settings;
   allowedRunStatuses: readonly string[];
+  bypassDailyLimit?: boolean;
 }): Promise<{
   title: string;
   description: string;
@@ -249,7 +262,18 @@ export async function assertReadyToUpload(opts: {
   coverFile: string;
   cookieFile: string;
 }> {
-  const { ctx, runId, settings, allowedRunStatuses } = opts;
+  const { ctx, runId, settings, allowedRunStatuses, bypassDailyLimit } = opts;
+  const maxDailyUploads = settings.publish.bilibili.maxDailyUploads ?? 2;
+  if (!bypassDailyLimit) {
+    const { startIso, endIso } = getLocalDayUtcBounds(ctx.now(), settings.timezone);
+    const publishedToday = ctx.repos.runs.countPublishedBetween(startIso, endIso, runId);
+    if (publishedToday >= maxDailyUploads) {
+      throw new PipelineError(
+        'publish_failed',
+        `今日已发布 ${publishedToday} 期视频，达到 B 站安全日上限（${maxDailyUploads} 期/日，早晚双更防限流），已拦截本次投稿`,
+      );
+    }
+  }
   const run = ctx.repos.runs.getById(runId);
   if (!run) {
     throw new Error(`未找到任务记录: ${runId}`);
@@ -396,11 +420,21 @@ export async function executeBilibiliUpload(opts: {
   settings: Settings;
   allowedRunStatuses: readonly string[];
   alreadyLocked?: boolean;
+  bypassDailyLimit?: boolean;
   retryDelaysMs?: readonly number[];
   dtimeUnixSec?: number;
   signal?: AbortSignal;
 }): Promise<{ bvid: string }> {
-  const { ctx, runId, settings, allowedRunStatuses, alreadyLocked, dtimeUnixSec, signal } = opts;
+  const {
+    ctx,
+    runId,
+    settings,
+    allowedRunStatuses,
+    alreadyLocked,
+    bypassDailyLimit,
+    dtimeUnixSec,
+    signal,
+  } = opts;
   const retryDelaysMs = opts.retryDelaysMs ?? DEFAULT_UPLOAD_RETRY_DELAYS_MS;
 
   if (!alreadyLocked) {
@@ -420,6 +454,7 @@ export async function executeBilibiliUpload(opts: {
       runId,
       settings,
       allowedRunStatuses,
+      bypassDailyLimit,
     });
 
     if (signal?.aborted) {
