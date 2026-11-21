@@ -260,3 +260,29 @@ export const DeleteArticlesResultSchema = z.object({
 });
 /** 预演或执行删除已抓取文章后的统计结果类型 */
 export type DeleteArticlesResult = z.infer<typeof DeleteArticlesResultSchema>;
+
+/** 将已播放（已消费）文章手动重置为未播放状态的请求参数 */
+export const MarkArticlesUnplayedInputSchema = z.object({
+  ids: z.array(z.string().trim().min(1)).min(1, '请至少选择一篇需要标记为未播的文章'),
+});
+/** 将已播放文章重置为未播放状态的请求参数类型 */
+export type MarkArticlesUnplayedInput = z.input<typeof MarkArticlesUnplayedInputSchema>;
+
+/** 将已播放文章重置为未播放状态后的统计结果 */
+export const MarkArticlesUnplayedResultSchema = z.object({
+  updatedCount: z.number().int().nonnegative(),
+  updatedIds: z.array(z.string()),
+  removedHistoryCount: z.number().int().nonnegative(),
+});
+/** 将已播放文章重置为未播放状态后的统计结果类型 */
+export type MarkArticlesUnplayedResult = z.infer<typeof MarkArticlesUnplayedResultSchema>;
+
+/** 将单条历史已播事件标记为未播后的统计结果 */
+export const MarkHistoryUnplayedResultSchema = z.object({
+  removed: z.boolean(),
+  eventId: z.string(),
+  resetArticleCount: z.number().int().nonnegative(),
+});
+/** 将单条历史已播事件标记为未播后的统计结果类型 */
+export type MarkHistoryUnplayedResult = z.infer<typeof MarkHistoryUnplayedResultSchema>;
+

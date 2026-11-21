@@ -1,5 +1,10 @@
 import path from 'node:path';
-import { type PublishDraft, PublishDraftSchema } from '@aidaily/contracts';
+import {
+  type MarkHistoryUnplayedResult,
+  MarkHistoryUnplayedResultSchema,
+  type PublishDraft,
+  PublishDraftSchema,
+} from '@aidaily/contracts';
 import type { CoreContext } from '../context.js';
 import { checkCoverText, normalizeCoverText } from '../editorial/cover-text.js';
 import {
@@ -61,6 +66,8 @@ export interface PublishService {
   markConsumed(runId: string): Promise<void>;
   /** 按发布时间倒序查询已播出新闻的历史记录列表 */
   listHistory(limit?: number): Promise<PublishedHistoryRecord[]>;
+  /** 将单条已播历史记录标为未播：移除历史防重记录并把对应已播文章退回待选 */
+  markHistoryUnplayed(eventId: string): Promise<MarkHistoryUnplayedResult>;
   /** 返回用于命令行交互式扫码登录 B 站的可执行程序路径与参数列表 */
   biliLoginCommand(): { bin: string; args: string[] };
   /** 读取本期当前生效的封面文字（人工修改 / 编排生成 / 自动截取）与封面图片状态 */
@@ -433,6 +440,30 @@ export function createPublishService(
     /** 查询最近已播出新闻事件历史记录 */
     async listHistory(limit = 100): Promise<PublishedHistoryRecord[]> {
       return ctx.repos.history.listAll(limit);
+    },
+
+    /** 移除单条已播历史事件并将对应已播文章重置为未播待选状态 */
+    async markHistoryUnplayed(eventId: string): Promise<MarkHistoryUnplayedResult> {
+      const trimmed = eventId.trim();
+      if (!trimmed) {
+        throw new Error('历史事件 ID 不能为空');
+      }
+      return inTransaction(ctx.db, () => {
+        const deleted = ctx.repos.history.deleteByEventId(trimmed);
+        if (!deleted) {
+          return MarkHistoryUnplayedResultSchema.parse({
+            removed: false,
+            eventId: trimmed,
+            resetArticleCount: 0,
+          });
+        }
+        const resetArticleCount = ctx.repos.articles.markUnplayedByUrls(deleted.articleUrls);
+        return MarkHistoryUnplayedResultSchema.parse({
+          removed: true,
+          eventId: trimmed,
+          resetArticleCount,
+        });
+      });
     },
 
     /** 返回供 CLI 执行交互式 B 站扫码登录的命令结构 */

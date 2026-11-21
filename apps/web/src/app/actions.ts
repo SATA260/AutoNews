@@ -14,6 +14,9 @@ import {
   type DeleteRunsResult,
   type DoctorReport,
   HostMascotIdSchema,
+  MarkArticlesUnplayedInputSchema,
+  type MarkArticlesUnplayedResult,
+  type MarkHistoryUnplayedResult,
   PIPELINE_STAGES,
   type ScheduleCutoffMode,
   ScheduleCutoffModeSchema,
@@ -1031,6 +1034,66 @@ export async function deleteArticlesAction(
       ok: true,
       data: result,
       message: `已删除 ${result.deletedCount} 篇爬取文章及 ${result.deletedFileCount} 个本地文件，释放 ${formatBytes(result.reclaimedBytes)}${skippedNote}`,
+    };
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+  }
+}
+
+/** 将已播放的新闻文章手动标记为未播放，同时移出历史已播去重库 */
+export async function markArticlesUnplayedAction(
+  ids: string[],
+): Promise<ActionResult<MarkArticlesUnplayedResult>> {
+  try {
+    const parsed = MarkArticlesUnplayedInputSchema.parse({ ids });
+    const core = await getCore();
+    const result = await core.articles.markUnplayed(parsed);
+    safeRevalidate('/articles');
+    safeRevalidate('/history');
+    safeRevalidate('/');
+    if (result.updatedCount === 0) {
+      return {
+        ok: true,
+        data: result,
+        message: '所选文章中没有处于「已播」状态的记录，无需变更',
+      };
+    }
+    const historyNote =
+      result.removedHistoryCount > 0
+        ? `，并同步移出 ${result.removedHistoryCount} 条已播历史防重记录`
+        : '';
+    return {
+      ok: true,
+      data: result,
+      message: `已将 ${result.updatedCount} 篇新闻标记为未播（待选）${historyNote}`,
+    };
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+  }
+}
+
+/** 将历史已播库中的单条新闻手动标记为未播，并把关联文章重置为待选 */
+export async function markHistoryUnplayedAction(
+  eventId: string,
+): Promise<ActionResult<MarkHistoryUnplayedResult>> {
+  try {
+    const id = parseRequiredString(eventId, '历史事件 ID');
+    const core = await getCore();
+    const result = await core.publish.markHistoryUnplayed(id);
+    safeRevalidate('/history');
+    safeRevalidate('/articles');
+    safeRevalidate('/');
+    if (!result.removed) {
+      return { ok: false, error: '未找到该条已播历史记录，可能已被移除' };
+    }
+    const articleNote =
+      result.resetArticleCount > 0
+        ? `，并将关联的 ${result.resetArticleCount} 篇文章重置为待选`
+        : '';
+    return {
+      ok: true,
+      data: result,
+      message: `已移出历史已播库${articleNote}`,
     };
   } catch (err) {
     return { ok: false, error: err instanceof Error ? err.message : String(err) };

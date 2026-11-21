@@ -14,10 +14,15 @@ import {
   DeleteArticlesInputSchema,
   type DeleteArticlesResult,
   DeleteArticlesResultSchema,
+  type MarkArticlesUnplayedInput,
+  MarkArticlesUnplayedInputSchema,
+  type MarkArticlesUnplayedResult,
+  MarkArticlesUnplayedResultSchema,
 } from '@aidaily/contracts';
 import { readStoredArticleContent, type StoredArticleContent } from '../collector/extractor.js';
 import type { CoreContext } from '../context.js';
 import { NotFoundError } from '../errors.js';
+import { inTransaction } from '../storage/db.js';
 import { resolveTimeRangeBounds } from './time-filter.js';
 
 /** 已抓取文章查询与删除管理服务接口 */
@@ -28,6 +33,8 @@ export interface ArticleService {
   getDetail(articleId: string): Promise<ArticleDetail>;
   /** 预演或执行选择性及按条件批量删除文章，并安全回收关联的本地缓存文件 */
   delete(input: DeleteArticlesInput): Promise<DeleteArticlesResult>;
+  /** 将已播放的文章手动重置为未播放状态，并清理关联的历史已播去重记录 */
+  markUnplayed(input: MarkArticlesUnplayedInput): Promise<MarkArticlesUnplayedResult>;
 }
 
 interface CandidateLocalFile {
@@ -405,6 +412,31 @@ export function createArticleService(ctx: CoreContext): ArticleService {
         skippedReservedIds,
         deletedFileCount,
         reclaimedBytes,
+      });
+    },
+
+    /** 将已播文章手动重置为未播（status = 'new'），并清理关联的已播历史防重记录 */
+    async markUnplayed(rawInput: MarkArticlesUnplayedInput): Promise<MarkArticlesUnplayedResult> {
+      const parsed = MarkArticlesUnplayedInputSchema.parse(rawInput);
+      const uniqueIds = Array.from(new Set(parsed.ids.map((id) => id.trim()).filter(Boolean)));
+      if (uniqueIds.length === 0) {
+        throw new Error('请至少选择一篇需要标记为未播的文章');
+      }
+
+      const { updatedArticles, removedHistoryCount } = inTransaction(ctx.db, () => {
+        const updated = ctx.repos.articles.markUnplayedByIds(uniqueIds);
+        const urls = updated.map((art) => art.canonicalUrl);
+        const removedHistory = ctx.repos.history.deleteByArticleUrls(urls);
+        return {
+          updatedArticles: updated,
+          removedHistoryCount: removedHistory,
+        };
+      });
+
+      return MarkArticlesUnplayedResultSchema.parse({
+        updatedCount: updatedArticles.length,
+        updatedIds: updatedArticles.map((art) => art.id),
+        removedHistoryCount,
       });
     },
   };

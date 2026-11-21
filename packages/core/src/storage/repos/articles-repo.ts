@@ -569,6 +569,59 @@ export function createArticlesRepo(db: DatabaseSync) {
       return Number(res.changes);
     },
 
+    /** 将指定 ID 列表中的已播文章手动重置为未播（status = 'new'），跳过未播或被任务占用的文章 */
+    markUnplayedByIds(ids: string[]): Article[] {
+      const uniqueIds = Array.from(new Set(ids.map((id) => id.trim()).filter(Boolean)));
+      if (uniqueIds.length === 0) {
+        return [];
+      }
+      return inTransaction(db, () => {
+        const updated: Article[] = [];
+        for (const idChunk of chunkArray(uniqueIds)) {
+          const placeholders = idChunk.map(() => '?').join(', ');
+          const rows = db
+            .prepare(`
+              UPDATE articles
+              SET status = 'new', reserved_by_run = NULL
+              WHERE id IN (${placeholders})
+                AND status = 'consumed'
+                AND reserved_by_run IS NULL
+              RETURNING *
+            `)
+            .all(...idChunk) as unknown as ArticleRow[];
+          for (const row of rows) {
+            updated.push(mapArticle(row));
+          }
+        }
+        return updated;
+      });
+    },
+
+    /** 按标准化链接批量将已播文章手动重置为未播（status = 'new'），返回实际更新篇数 */
+    markUnplayedByUrls(urls: string[]): number {
+      const uniqueUrls = Array.from(new Set(urls.map((u) => u.trim()).filter(Boolean)));
+      if (uniqueUrls.length === 0) {
+        return 0;
+      }
+      return inTransaction(db, () => {
+        let totalChanges = 0;
+        for (const urlChunk of chunkArray(uniqueUrls)) {
+          const placeholders = urlChunk.map(() => '?').join(', ');
+          const res = db
+            .prepare(`
+              UPDATE articles
+              SET status = 'new', reserved_by_run = NULL
+              WHERE canonical_url IN (${placeholders})
+                AND status = 'consumed'
+                AND reserved_by_run IS NULL
+            `)
+            .run(...urlChunk);
+          totalChanges += Number(res.changes);
+        }
+        return totalChanges;
+      });
+    },
+
     /** 将超出最久回溯时效仍未入选的待选文章标记为已过期 */
     expireOlderThan(cutoffIso: string): number {
       const res = db
@@ -784,6 +837,77 @@ export function createHistoryRepo(db: DatabaseSync) {
     deleteByRun(runId: string): number {
       const res = db.prepare('DELETE FROM published_history WHERE run_id = ?').run(runId);
       return Number(res.changes);
+    },
+
+    /** 删除单条历史已播事件记录，并返回被删除的记录供同步重置对应文章状态 */
+    deleteByEventId(eventId: string): PublishedHistoryRecord | null {
+      const row = db
+        .prepare('DELETE FROM published_history WHERE event_id = ? RETURNING *')
+        .get(eventId) as
+        | {
+            event_id: string;
+            run_id: string;
+            title: string;
+            title_norm: string;
+            entity: string | null;
+            article_urls: string;
+            published_at: string;
+          }
+        | undefined;
+      if (!row) {
+        return null;
+      }
+      return {
+        eventId: row.event_id,
+        runId: row.run_id,
+        title: row.title,
+        titleNorm: row.title_norm,
+        entity: row.entity,
+        articleUrls: JSON.parse(row.article_urls) as string[],
+        publishedAt: row.published_at,
+      };
+    },
+
+    /** 删除关联到指定文章链接的历史已播事件记录，返回实际删除条数 */
+    deleteByArticleUrls(urls: string[]): number {
+      const urlSet = new Set(urls.map((u) => u.trim()).filter(Boolean));
+      if (urlSet.size === 0) {
+        return 0;
+      }
+      const rows = db
+        .prepare('SELECT event_id, article_urls FROM published_history')
+        .all() as unknown as Array<{
+        event_id: string;
+        article_urls: string;
+      }>;
+      const matchedEventIds: string[] = [];
+      for (const row of rows) {
+        try {
+          const parsed = JSON.parse(row.article_urls) as unknown;
+          if (
+            Array.isArray(parsed) &&
+            parsed.some((item) => typeof item === 'string' && urlSet.has(item))
+          ) {
+            matchedEventIds.push(row.event_id);
+          }
+        } catch {
+          // 忽略格式异常的历史链接字段
+        }
+      }
+      if (matchedEventIds.length === 0) {
+        return 0;
+      }
+      return inTransaction(db, () => {
+        let deleted = 0;
+        for (const idChunk of chunkArray(matchedEventIds)) {
+          const placeholders = idChunk.map(() => '?').join(', ');
+          const res = db
+            .prepare(`DELETE FROM published_history WHERE event_id IN (${placeholders})`)
+            .run(...idChunk);
+          deleted += Number(res.changes);
+        }
+        return deleted;
+      });
     },
 
     /** 按发布时间倒序查询历史已播事件列表（供后台历史页展示） */

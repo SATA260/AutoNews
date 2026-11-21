@@ -16,6 +16,7 @@ import { useEffect, useState, useTransition } from 'react';
 import {
   deleteArticlesAction,
   getArticleDetailAction,
+  markArticlesUnplayedAction,
   previewDeleteArticlesAction,
 } from '@/app/actions';
 import {
@@ -158,6 +159,9 @@ export function ArticlesManager({
     .map((art) => art.id);
   const selectableIdSet = new Set(selectableIds);
   const activeSelectedIds = selectedIds.filter((id) => selectableIdSet.has(id));
+  const selectedConsumedIds = articles
+    .filter((art) => activeSelectedIds.includes(art.id) && art.status === 'consumed')
+    .map((art) => art.id);
   const allSelectableChecked =
     selectableIds.length > 0 && activeSelectedIds.length === selectableIds.length;
 
@@ -290,6 +294,28 @@ export function ArticlesManager({
     });
   };
 
+  const handleMarkUnplayed = (ids: string[]) => {
+    if (ids.length === 0) {
+      return;
+    }
+    setFeedback(null);
+    startTransition(async () => {
+      const res = await markArticlesUnplayedAction(ids);
+      if (!res.ok) {
+        setFeedback({ ok: false, text: res.error ?? '标记为未播失败' });
+        return;
+      }
+      setSelectedIds((prev) => prev.filter((id) => !ids.includes(id)));
+      setActiveDetail((prev) =>
+        prev && ids.includes(prev.article.id)
+          ? { ...prev, article: { ...prev.article, status: 'new' } }
+          : prev,
+      );
+      setFeedback({ ok: true, text: res.message ?? '已标记为未播' });
+      router.refresh();
+    });
+  };
+
   const applyBatchPreset = (preset: '24h' | '3d' | '7d' | '30d' | 'custom') => {
     setBatchPreset(preset);
     setBatchPreview(null);
@@ -373,6 +399,16 @@ export function ArticlesManager({
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
+          {selectedConsumedIds.length > 0 && (
+            <button
+              type="button"
+              disabled={isPending}
+              onClick={() => handleMarkUnplayed(selectedConsumedIds)}
+              className="rounded-lg border border-amber-300 bg-amber-50 px-3.5 py-2 text-xs font-medium text-amber-800 shadow-xs transition hover:bg-amber-100 disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              标为未播（{selectedConsumedIds.length} 篇已播）
+            </button>
+          )}
           <button
             type="button"
             disabled={isPending || activeSelectedIds.length === 0}
@@ -764,6 +800,16 @@ export function ArticlesManager({
                           >
                             查看正文
                           </button>
+                          {art.status === 'consumed' && (
+                            <button
+                              type="button"
+                              disabled={isPending}
+                              onClick={() => handleMarkUnplayed([art.id])}
+                              className="font-medium text-amber-700 hover:underline disabled:opacity-50"
+                            >
+                              标为未播
+                            </button>
+                          )}
                           {!isReserved && (
                             <button
                               type="button"
@@ -973,17 +1019,29 @@ export function ArticlesManager({
                     ? `正被任务 ${activeDetail.article.reservedByRun ?? ''} 占用，不可删除`
                     : '删除会同时移除该文章对应的本地正文与配图缓存'}
                 </span>
-                {activeDetail.article.status !== 'reserved' &&
-                  activeDetail.article.reservedByRun === null && (
+                <div className="flex items-center gap-2">
+                  {activeDetail.article.status === 'consumed' && (
                     <button
                       type="button"
                       disabled={isPending}
-                      onClick={() => openSelectedDeleteModal([activeDetail.article.id])}
-                      className="rounded-lg bg-rose-600 px-3.5 py-1.5 text-xs font-medium text-white hover:bg-rose-700 disabled:opacity-50"
+                      onClick={() => handleMarkUnplayed([activeDetail.article.id])}
+                      className="rounded-lg border border-amber-300 bg-amber-50 px-3.5 py-1.5 text-xs font-medium text-amber-800 hover:bg-amber-100 disabled:opacity-50"
                     >
-                      删除此文章
+                      标记为未播
                     </button>
                   )}
+                  {activeDetail.article.status !== 'reserved' &&
+                    activeDetail.article.reservedByRun === null && (
+                      <button
+                        type="button"
+                        disabled={isPending}
+                        onClick={() => openSelectedDeleteModal([activeDetail.article.id])}
+                        className="rounded-lg bg-rose-600 px-3.5 py-1.5 text-xs font-medium text-white hover:bg-rose-700 disabled:opacity-50"
+                      >
+                        删除此文章
+                      </button>
+                    )}
+                </div>
               </div>
             )}
           </div>
