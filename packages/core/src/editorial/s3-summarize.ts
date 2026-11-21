@@ -5,6 +5,8 @@ import {
   type SummaryDraft,
   SummaryDraftSchema,
 } from '@aidaily/contracts';
+import { TZDate } from '@date-fns/tz';
+import { format } from 'date-fns';
 import { readStoredArticleContent } from '../collector/extractor.js';
 import type { CoreContext } from '../context.js';
 import { invokeStageLlm } from './llm.js';
@@ -128,8 +130,12 @@ export async function summarizeEventItem(opts: {
     throw new Error(`事件 ${event.id} 缺少可用的原始文章正文，无法总结`);
   }
 
+  const nowDate = ctx.now();
+  const tzNow = new TZDate(nowDate.getTime(), settings.timezone);
+  const currentTime = `${format(tzNow, 'yyyy-MM-dd HH:mm')}（${settings.timezone}，UTC: ${nowDate.toISOString()}）`;
   const articlesXml = serializeLoadedArticlesXml(articlesMap, settings.editorial.sourceMaxChars);
   const prompt = await renderPromptTemplate('s3-summarize.md', {
+    currentTime,
     eventTitle: event.title,
     articlesXml,
   });

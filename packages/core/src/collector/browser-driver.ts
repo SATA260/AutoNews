@@ -3,7 +3,12 @@ import { isAllowedUrlTarget, type SourceDef } from '@aidaily/contracts';
 import { type Browser, type BrowserContext, chromium } from 'playwright';
 import { closeBrowserSafely, resolveChromiumExecutablePath } from '../media/browser.js';
 import { assertSafeFetchTarget } from './ssrf.js';
-import { extractTweetsFromGraphQlPayload, parseXCookiesFromText } from './x-collector.js';
+import {
+  extractTweetsFromGraphQlPayload,
+  isXTimelineGraphQlUrl,
+  looksLikeTruncatedTweetText,
+  parseXCookiesFromText,
+} from './x-collector.js';
 
 /** 从 X 时间线抓取或公开接口查询得到的单条推文结构化数据 */
 export interface RawXTweet {
@@ -16,6 +21,8 @@ export interface RawXTweet {
   publishedAt: string | null;
   isReply: boolean;
   isRetweet: boolean;
+  /** 标记该条长推文是否处于未展开的折叠截断状态 */
+  isTruncated?: boolean;
   mediaUrls: string[];
   quotedTweet?: {
     handle: string;
@@ -527,32 +534,31 @@ export function createPlaywrightCollectorDriver(): CollectorBrowserDriver {
 
       return withAbortableContext(context, opts?.signal, async (ctx) => {
         const collectedTweets = new Map<string, RawXTweet>();
+        const pendingGraphQlTasks: Array<Promise<void>> = [];
         await ctx.addCookies(cookies);
         const page = await ctx.newPage();
 
-        page.on('response', async (res) => {
+        page.on('response', (res) => {
           const resUrl = res.url();
-          if (
-            !resUrl.includes('/i/api/graphql/') ||
-            (!resUrl.includes('UserTweets') &&
-              !resUrl.includes('ListLatestTweetsTimeline') &&
-              !resUrl.includes('UserBy'))
-          ) {
+          if (!isXTimelineGraphQlUrl(resUrl)) {
             return;
           }
-          try {
-            if (!res.ok()) {
-              return;
-            }
-            const json = (await res.json()) as unknown;
-            for (const tweet of extractTweetsFromGraphQlPayload(json)) {
-              if (!collectedTweets.has(tweet.tweetId)) {
-                collectedTweets.set(tweet.tweetId, tweet);
+          const task = (async () => {
+            try {
+              if (!res.ok()) {
+                return;
               }
+              const json = (await res.json()) as unknown;
+              for (const tweet of extractTweetsFromGraphQlPayload(json)) {
+                if (!collectedTweets.has(tweet.tweetId)) {
+                  collectedTweets.set(tweet.tweetId, tweet);
+                }
+              }
+            } catch {
+              // 忽略非 JSON 或提前中止的接口响应
             }
-          } catch {
-            // 忽略非 JSON 或提前中止的接口响应
-          }
+          })();
+          pendingGraphQlTasks.push(task);
         });
 
         const cfg = source.xConfig;
@@ -568,10 +574,12 @@ export function createPlaywrightCollectorDriver(): CollectorBrowserDriver {
           .waitForSelector('article[data-testid="tweet"]', { timeout: 12_000 })
           .catch(() => undefined);
         await page.waitForTimeout(1_500);
+        await Promise.allSettled(pendingGraphQlTasks);
 
         if (collectedTweets.size < 5) {
           await page.evaluate(() => window.scrollBy(0, 1200));
           await page.waitForTimeout(1_200);
+          await Promise.allSettled(pendingGraphQlTasks);
         }
 
         // 若 GraphQL 拦截为空（例如 X 接口结构变化），从已渲染的页面推文卡片中兜底提取
@@ -587,6 +595,7 @@ export function createPlaywrightCollectorDriver(): CollectorBrowserDriver {
               publishedAt: string | null;
               mediaUrls: string[];
               isRetweet: boolean;
+              hasShowMore: boolean;
             }> = [];
             for (const art of articles) {
               const link = art.querySelector('a[href*="/status/"]') as HTMLAnchorElement | null;
@@ -597,6 +606,9 @@ export function createPlaywrightCollectorDriver(): CollectorBrowserDriver {
               }
               const textEl = art.querySelector('[data-testid="tweetText"]');
               const text = textEl?.textContent?.trim() ?? '';
+              const hasShowMore = Boolean(
+                art.querySelector('[data-testid="tweet-text-show-more-link"]'),
+              );
               const timeEl = art.querySelector('time');
               const publishedAt = timeEl?.getAttribute('datetime') ?? null;
               const socialCtx =
@@ -616,6 +628,7 @@ export function createPlaywrightCollectorDriver(): CollectorBrowserDriver {
                 publishedAt,
                 mediaUrls: mediaImgs,
                 isRetweet,
+                hasShowMore,
               });
             }
             return out;
@@ -623,9 +636,17 @@ export function createPlaywrightCollectorDriver(): CollectorBrowserDriver {
 
           for (const dt of domTweets) {
             collectedTweets.set(dt.tweetId, {
-              ...dt,
+              tweetId: dt.tweetId,
+              url: dt.url,
+              handle: dt.handle,
+              authorName: dt.authorName,
+              text: dt.text,
+              publishedAt: dt.publishedAt,
+              mediaUrls: dt.mediaUrls,
               avatarUrl: null,
               isReply: false,
+              isRetweet: dt.isRetweet,
+              isTruncated: dt.hasShowMore || looksLikeTruncatedTweetText(dt.text),
               quotedTweet: null,
             });
           }

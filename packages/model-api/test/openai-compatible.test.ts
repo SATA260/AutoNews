@@ -189,6 +189,8 @@ describe('OpenAI 兼容模型 API', () => {
           availabilityNote: '待确认',
           evidence: [evidence],
           eventOccurredAt: null,
+          sourceComplete: null,
+          eventNature: null,
         },
         output: {
           facts: ['事实'],

@@ -336,6 +336,50 @@ export async function interactiveXLogin(
   }
 }
 
+const X_TIMELINE_GRAPHQL_PATTERN =
+  /\/graphql\/[^/]+\/[^/?]*(?:UserOriginalsTimeline|UserTweets(?:AndReplies)?|List(?:Latest)?TweetsTimeline|TweetDetail|UserBy)/i;
+const TRUNCATED_TWEET_END_PUNCT_RE = /[.!?。！？"”'’)\]】》…👇✨🚀🔥👀\d]$/u;
+const TRUNCATED_TWEET_DANGLING_WORD_RE =
+  /\b(?:the|a|an|in|of|to|and|with|for|is|was|are|were|that|on|at|by|from|as|but|or|its|their|our|your|this|these|those|which|where|when|while|into|about|over|under|after|before|between|through|during|without|within|behind|than|per)\s*$/i;
+
+/** 判断网络请求链接是否为 X 时间线或推文详情 GraphQL 接口 */
+export function isXTimelineGraphQlUrl(url: string): boolean {
+  if (!url.includes('/i/api/graphql/') && !url.includes('/graphql/')) {
+    return false;
+  }
+  return X_TIMELINE_GRAPHQL_PATTERN.test(url);
+}
+
+/**
+ * 识别推文正文是否在 280 字折叠上限附近于半句话处被硬截断，
+ * 用于拦截兜底提取或历史缓存中的残缺折叠推文。
+ */
+export function looksLikeTruncatedTweetText(text: string): boolean {
+  const trimmed = text.trim();
+  const len = Array.from(trimmed).length;
+  if (len < 235 || len > 290) {
+    return false;
+  }
+  if (TRUNCATED_TWEET_END_PUNCT_RE.test(trimmed)) {
+    return false;
+  }
+  return TRUNCATED_TWEET_DANGLING_WORD_RE.test(trimmed);
+}
+
+/** 将正文里的非媒体 t.co 短链替换为 GraphQL 返回的真实展开链接 */
+function expandTweetShortUrls(
+  text: string,
+  urlEntries: ReadonlyArray<{ shortUrl: string; expandedUrl: string }>,
+): string {
+  let out = text;
+  for (const entry of urlEntries) {
+    if (entry.shortUrl && entry.expandedUrl) {
+      out = out.split(entry.shortUrl).join(entry.expandedUrl);
+    }
+  }
+  return out;
+}
+
 /** 清理推文文本中的末尾追踪短链并保留完整段落换行 */
 function cleanTweetText(rawText: string, mediaShortUrls: readonly string[]): string {
   let cleaned = rawText.replace(/\r\n?/g, '\n').trim();
@@ -415,19 +459,20 @@ function parseSingleGraphQlTweetNode(rawNode: unknown): RawXTweet | null {
     (typeof userAvatar?.image_url === 'string' && userAvatar.image_url) ||
     null;
 
-  const noteText = (
-    (
-      (node.note_tweet as Record<string, unknown> | undefined)?.note_tweet_results as
-        | Record<string, unknown>
-        | undefined
-    )?.result as Record<string, unknown> | undefined
-  )?.text;
-  const rawFullText =
-    typeof noteText === 'string' && noteText.trim().length > 0
-      ? noteText
-      : typeof legacy.full_text === 'string'
-        ? legacy.full_text
-        : '';
+  const noteTweetObj =
+    node.note_tweet && typeof node.note_tweet === 'object'
+      ? (node.note_tweet as Record<string, unknown>)
+      : undefined;
+  const noteResult = (noteTweetObj?.note_tweet_results as Record<string, unknown> | undefined)
+    ?.result as Record<string, unknown> | undefined;
+  const noteText = noteResult?.text;
+  const hasNoteText = typeof noteText === 'string' && noteText.trim().length > 0;
+  const isTruncated = noteTweetObj?.is_expandable === true && !hasNoteText;
+  const rawFullText = hasNoteText
+    ? noteText
+    : typeof legacy.full_text === 'string'
+      ? legacy.full_text
+      : '';
 
   const extMedia = (
     legacy.extended_entities as { media?: Array<Record<string, unknown>> } | undefined
@@ -451,7 +496,27 @@ function parseSingleGraphQlTweetNode(rawNode: unknown): RawXTweet | null {
     }
   }
 
-  const text = cleanTweetText(rawFullText, mediaShortUrls);
+  const urlEntries: Array<{ shortUrl: string; expandedUrl: string }> = [];
+  const collectEntityUrls = (rawList: unknown): void => {
+    if (!Array.isArray(rawList)) {
+      return;
+    }
+    for (const item of rawList) {
+      if (!item || typeof item !== 'object') {
+        continue;
+      }
+      const rec = item as Record<string, unknown>;
+      const shortUrl = typeof rec.url === 'string' ? rec.url.trim() : '';
+      const expandedUrl = typeof rec.expanded_url === 'string' ? rec.expanded_url.trim() : '';
+      if (shortUrl && expandedUrl) {
+        urlEntries.push({ shortUrl, expandedUrl });
+      }
+    }
+  };
+  collectEntityUrls((noteResult?.entity_set as Record<string, unknown> | undefined)?.urls);
+  collectEntityUrls((legacy.entities as Record<string, unknown> | undefined)?.urls);
+
+  const text = expandTweetShortUrls(cleanTweetText(rawFullText, mediaShortUrls), urlEntries);
   if (!text && mediaUrls.length === 0) {
     return null;
   }
@@ -493,6 +558,7 @@ function parseSingleGraphQlTweetNode(rawNode: unknown): RawXTweet | null {
     publishedAt,
     isReply,
     isRetweet,
+    isTruncated,
     mediaUrls: Array.from(new Set(mediaUrls)),
     quotedTweet,
   };
@@ -578,6 +644,9 @@ export async function fetchXSourceItems(
 
   const results: ParsedXFeedItem[] = [];
   for (const tweet of rawTweets) {
+    if (tweet.isTruncated) {
+      continue;
+    }
     if (!cfg.includeReplies && tweet.isReply) {
       continue;
     }

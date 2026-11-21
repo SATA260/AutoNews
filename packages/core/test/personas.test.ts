@@ -145,8 +145,12 @@ describe('主播配置、情绪推导、口型包络提取与帧时间轴量化'
       expect(persona.ownGoodReaction.length).toBeGreaterThan(10);
       expect(persona.ownFlawReaction.length).toBeGreaterThan(10);
       expect(persona.rivalReaction.length).toBeGreaterThan(5);
-      expect(persona.introExamples[0]).toContain(persona.selfName);
-      expect(persona.introExamples[0]).not.toMatch(/公司的/);
+      expect(persona.introExamples.length).toBeGreaterThanOrEqual(1);
+      for (const example of persona.introExamples) {
+        expect(example).toContain(persona.selfName);
+        expect(example).toMatch(/\d{1,2}月\d{1,2}日周[日一二三四五六]/);
+        expect(example).not.toMatch(/公司的|欢迎收看今天的AI每日报/);
+      }
       expect(persona.identityBio).toContain('二创');
       expect(persona.stanceGuide).not.toMatch(/心里清楚自己属于/);
       const formattedJson = formatPersonaForPrompt(persona);
@@ -426,13 +430,14 @@ describe('主播配置、情绪推导、口型包络提取与帧时间轴量化'
       compact: true,
       forbiddenTokens: gemini?.forbiddenTokens,
       hostSelfName: gemini?.selfName,
+      dateDisplay: '11月21日周六',
     };
 
-    const missingOutroSelfName = precheckIssuePackage({
+    const missingIntroSelfName = precheckIssuePackage({
       pkg: {
         ...compactBasePkg,
         intro: {
-          narration: ['谷歌刚把多模态新能力放出来了，咱们直接看今天重点。'],
+          narration: ['哈喽大家好，今天是11月21日周六，今天看点都在屏幕上了，直接开看。'],
           hostComment: '直接进入今天的内容。',
         },
         outro: {
@@ -442,14 +447,29 @@ describe('主播配置、情绪推导、口型包络提取与帧时间轴量化'
       },
       ...commonCompactOpts,
     });
-    expect(missingOutroSelfName.passed).toBe(false);
-    expect(missingOutroSelfName.errors.some((e) => e.includes('结尾口播'))).toBe(true);
+    expect(missingIntroSelfName.passed).toBe(false);
+    expect(
+      missingIntroSelfName.errors.some((e) => e.includes('开场口播') && e.includes('哈基米')),
+    ).toBe(true);
+
+    const missingIntroDate = precheckIssuePackage({
+      pkg: {
+        ...compactBasePkg,
+        intro: {
+          narration: ['哈喽大家好，我是哈基米，今天看点都在屏幕上了，咱们直接开看！'],
+          hostComment: '直接进入今天的内容。',
+        },
+      },
+      ...commonCompactOpts,
+    });
+    expect(missingIntroDate.passed).toBe(false);
+    expect(missingIntroDate.errors.some((e) => e.includes('11月21日周六'))).toBe(true);
 
     const companyMentionIntro = precheckIssuePackage({
       pkg: {
         ...compactBasePkg,
         intro: {
-          narration: ['大家好，我是谷歌公司的哈基米，欢迎收看今天的AI每日报。'],
+          narration: ['大家好，今天是11月21日周六，我是谷歌公司的哈基米，直接看正文。'],
           hostComment: '直接进入今天的内容。',
         },
       },
@@ -462,8 +482,12 @@ describe('主播配置、情绪推导、口型包络提取与帧时间轴量化'
       pkg: {
         ...compactBasePkg,
         intro: {
-          narration: ['谷歌刚把多模态新能力放出来了，咱们直接看今天重点。'],
+          narration: ['哈喽大家好，今天是11月21日周六，我是哈基米，看点都在屏幕上了。'],
           hostComment: '直接进入今天的内容。',
+        },
+        outro: {
+          ...compactBasePkg.outro,
+          narration: ['今天的资讯播送完了，明天见。'],
         },
       },
       ...commonCompactOpts,
@@ -471,11 +495,31 @@ describe('主播配置、情绪推导、口型包络提取与帧时间轴量化'
     expect(cleanIntro.errors).toEqual([]);
     expect(cleanIntro.passed).toBe(true);
 
+    const twoSentenceIntro = precheckIssuePackage({
+      pkg: {
+        ...compactBasePkg,
+        intro: {
+          narration: [
+            '哈喽大家好，今天是11月21日周六，我是哈基米！',
+            '今天看点都在屏幕上了，咱们直接开看！',
+          ],
+          hostComment: '直接进入今天的内容。',
+        },
+        outro: {
+          ...compactBasePkg.outro,
+          narration: ['今天的资讯播送完了，明天见。'],
+        },
+      },
+      ...commonCompactOpts,
+    });
+    expect(twoSentenceIntro.errors).toEqual([]);
+    expect(twoSentenceIntro.passed).toBe(true);
+
     const companyFamilyIntro = precheckIssuePackage({
       pkg: {
         ...compactBasePkg,
         intro: {
-          narration: ['大家好，我是OpenAI家的gpt，欢迎收看今天的AI每日报。'],
+          narration: ['大家好，今天是11月21日周六，我是OpenAI家的gpt，直接看正文。'],
           hostComment: '直接进入今天的内容。',
         },
       },

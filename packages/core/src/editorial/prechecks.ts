@@ -1,5 +1,6 @@
 import type {
   ContentLimits,
+  EventNature,
   Evidence,
   HostMascotId,
   IssueMode,
@@ -595,10 +596,68 @@ function checkCompanySpokespersonPhrases(
   }
 }
 
+const PREMATURE_BREAKING_WORDING_RE = /(?:刚刚?|最新|首次)(?:发布|公布|披露|曝光|推出|上线)/;
+const FRESH_LAUNCH_SIGNAL_RE =
+  /\b(?:today|just\s+(?:released|launched|announced|shipped|rolled\s+out|reset|updated|introduced|unveiled)|introducing|announcing|we(?:'|’)?re\s+(?:launching|releasing|introducing|announcing|rolling\s+out)|now\s+(?:available|supports|live|rolling\s+out)|reset\s+everyone)\b|今天|今日|刚刚|正式发布|正式上线|正式推出|现已上线|现已支持|刚刚更新|全局重置|重置了/i;
+const RECAP_OR_HIGHLIGHT_SIGNAL_RE =
+  /\b(?:highlights\s+on|recap|roundup|icymi|in\s+case\s+you\s+missed|overview\s+of)\b|盘点|回顾|汇总/i;
+const STALE_RECAP_AGE_MS = 30 * 3600_000;
+
+/** 检查稿件是否在缺乏首发依据或属于盘点回顾时擅加“刚发布/刚披露/刚曝光”等时效词 */
+function checkPrematureBreakingClaims(opts: {
+  fields: Array<{ label: string; value: string }>;
+  articlesById: ReadonlyMap<string, { text: string; publishedAt?: string | null }>;
+  eventNature?: EventNature;
+  now?: Date;
+  errors: string[];
+}): void {
+  const { fields, articlesById, eventNature, now, errors } = opts;
+  const hitField = fields.find((f) => PREMATURE_BREAKING_WORDING_RE.test(f.value));
+  if (!hitField) {
+    return;
+  }
+  if (eventNature === 'benchmark_or_recap') {
+    errors.push(
+      `字段「${hitField.label}」对第三方评测或盘点回顾使用了“刚发布/刚披露/刚曝光”等首发措辞，请改为客观盘点或实测表述`,
+    );
+    return;
+  }
+  const sourceText = Array.from(articlesById.values())
+    .map((a) => a.text)
+    .join('\n');
+  if (!FRESH_LAUNCH_SIGNAL_RE.test(sourceText)) {
+    errors.push(
+      `字段「${hitField.label}」使用了“刚/最新/首次”等即时首发措辞，但原始文章未说明为新近首发或首次披露，请删去首发词改为中性表述`,
+    );
+    return;
+  }
+  if (now) {
+    let latestPubMs: number | null = null;
+    for (const article of articlesById.values()) {
+      if (!article.publishedAt) {
+        continue;
+      }
+      const parsed = Date.parse(article.publishedAt);
+      if (!Number.isNaN(parsed) && (latestPubMs === null || parsed > latestPubMs)) {
+        latestPubMs = parsed;
+      }
+    }
+    if (
+      latestPubMs !== null &&
+      now.getTime() - latestPubMs > STALE_RECAP_AGE_MS &&
+      RECAP_OR_HIGHLIGHT_SIGNAL_RE.test(sourceText)
+    ) {
+      errors.push(
+        `字段「${hitField.label}」在原文已超过 30 小时且带有盘点回顾特征时仍使用即时首发措辞，请改为客观中性表述`,
+      );
+    }
+  }
+}
+
 /**
  * 对中文润色后的单条新闻定稿执行确定性规则检查：
  * 校验逐字引语是否在原文中真实存在、稿件里的阿拉伯数字是否有原文或依据支撑、
- * 各展示字段与口播分句是否超出字数上限、是否混入自我描述套话或非法符号。
+ * 各展示字段与口播分句是否超出字数上限、是否混入自我描述套话、虚假首发措辞或非法符号。
  */
 export function precheckPolishedItem(opts: {
   item: PolishedItem;
@@ -612,6 +671,8 @@ export function precheckPolishedItem(opts: {
   briefNarrationMaxChars?: number;
   forbiddenTokens?: readonly string[];
   hostSelfName?: string;
+  now?: Date;
+  eventNature?: EventNature;
 }): PrecheckResult {
   const errors: string[] = [];
   const warnings: string[] = [];
@@ -867,6 +928,19 @@ export function precheckPolishedItem(opts: {
   checkMetaBlacklist(draftFields, metaTextBlacklist, errors);
   checkForbiddenPersonaTokens(personaSpeechFields, opts.forbiddenTokens, opts.hostSelfName, errors);
   checkCompanySpokespersonPhrases(personaSpeechFields, errors);
+  checkPrematureBreakingClaims({
+    fields: [
+      { label: 'title', value: item.title },
+      { label: 'shortTitle', value: item.shortTitle },
+      { label: 'summary', value: item.summary },
+      { label: 'detail', value: item.detail },
+      ...item.narration.map((line, idx) => ({ label: `narration[${idx}]`, value: line })),
+    ],
+    articlesById,
+    eventNature: opts.eventNature,
+    now: opts.now,
+    errors,
+  });
 
   // 5. 校验口播分句规则
   for (let i = 0; i < item.narration.length; i++) {
@@ -878,6 +952,31 @@ export function precheckPolishedItem(opts: {
     errors,
     warnings,
   };
+}
+
+/**
+ * 校验开场口播文本是否明确包含当期真实的月日与星期信息（兼容“日/号”与“周/星期”等口语说法）。
+ */
+function matchesExpectedDateDisplay(text: string, dateDisplay: string): boolean {
+  const normalizedExpected = dateDisplay.normalize('NFKC').trim();
+  if (!normalizedExpected) {
+    return true;
+  }
+  const normalizedText = text.normalize('NFKC');
+  if (normalizedText.includes(normalizedExpected)) {
+    return true;
+  }
+  const match = /^(\d{1,2})月(\d{1,2})日(周[日一二三四五六])$/.exec(normalizedExpected);
+  if (!match) {
+    return false;
+  }
+  const monthNum = Number(match[1]);
+  const dayNum = Number(match[2]);
+  const weekdayChar = match[3]?.slice(1) ?? '';
+  const monthDayPattern = new RegExp(`(?<!\\d)0?${monthNum}\\s*月\\s*0?${dayNum}\\s*[日号]`);
+  const weekdayAlternatives = weekdayChar === '日' ? ['日', '天'] : [weekdayChar];
+  const weekdayPattern = new RegExp(`(?:周|星期)(?:${weekdayAlternatives.join('|')})`);
+  return monthDayPattern.test(normalizedText) && weekdayPattern.test(normalizedText);
 }
 
 /**
@@ -894,6 +993,7 @@ export function precheckIssuePackage(opts: {
   forbiddenTokens?: readonly string[];
   hostSelfName?: string;
   activeHostId?: HostMascotId;
+  dateDisplay?: string;
 }): PrecheckResult {
   const errors: string[] = [];
   const warnings: string[] = [];
@@ -974,9 +1074,9 @@ export function precheckIssuePackage(opts: {
   if (opts.compact) {
     const introText = pkg.intro.narration.join('');
     const introTotal = charLength(introText);
-    if (pkg.intro.narration.length !== 1 || introTotal > 48) {
+    if (pkg.intro.narration.length > 2 || introTotal > 55) {
       errors.push(
-        '开场口播必须用一句话说清本期重点（严格 1 句、总长不超过四十八字），不要分成多句或冗长寒暄',
+        '开场口播应干脆利落（一到两句、总长不超过五十五字），按人设报清日期与名字后直接进入正文，不要展开播报新闻内容',
       );
     }
     const outroText = pkg.outro.narration.join('');
@@ -985,11 +1085,14 @@ export function precheckIssuePackage(opts: {
       errors.push('结尾口播应干净利落（一到两句、总长不超过五十五字），不要做长篇总结');
     }
     if (opts.hostSelfName) {
-      const normOutro = outroText.normalize('NFKC').toLowerCase();
+      const normIntro = introText.normalize('NFKC').toLowerCase();
       const normSelf = opts.hostSelfName.normalize('NFKC').toLowerCase();
-      if (!normOutro.includes(normSelf)) {
-        errors.push(`结尾口播必须自然自报家门并包含主播自称「${opts.hostSelfName}」`);
+      if (!normIntro.includes(normSelf)) {
+        errors.push(`开场口播必须自然打招呼并包含主播自称「${opts.hostSelfName}」`);
       }
+    }
+    if (opts.dateDisplay && !matchesExpectedDateDisplay(introText, opts.dateDisplay)) {
+      errors.push(`开场口播必须说明本期日期与星期（如「${opts.dateDisplay}」）`);
     }
     if (
       /(?:我是|来自|代表)[^，。！？]{1,15}(?:公司|旗下|出品|团队)的|(?:我是|来自|代表)[^，。！？]{0,10}(?:谷歌|google|deepmind|openai|anthropic|深度求索|deepseek)[^，。！？]{0,8}(?:的|家的)/i.test(

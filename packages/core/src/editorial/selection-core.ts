@@ -8,6 +8,7 @@ import {
 } from '@aidaily/contracts';
 import { TZDate } from '@date-fns/tz';
 import { format } from 'date-fns';
+import { looksLikeTruncatedTweetText } from '../collector/x-collector.js';
 import type { CoreContext } from '../context.js';
 import type { PublishedHistoryRecord } from '../storage/repos/articles-repo.js';
 import { invokeStageLlm } from './llm.js';
@@ -20,8 +21,14 @@ import {
 } from './similarity.js';
 
 const MAX_SELECT_CANDIDATES = 80;
+const MAX_CANDIDATES_PER_SOURCE = 8;
 const MAX_PROMPT_HISTORY_TITLES = 80;
 const MAX_PROMPT_ORIGIN_REFS = 40;
+const MAX_PROMPT_BACKGROUND_REFS = 30;
+const TIER_TIME_BONUS_MS: Record<number, number> = {
+  1: 6 * 3600_000,
+  2: 2 * 3600_000,
+};
 
 /** 经过确定性初筛与去重后的候选事件输出结果 */
 export interface CandidateSelectionOutput {
@@ -41,10 +48,10 @@ function articlePublishedMs(article: Article): number {
   return Number.isNaN(ms) ? 0 : ms;
 }
 
-/** 计算单篇文章进入候选池的排序权重（高权威信源等级优先，其次发布时间越新越靠前） */
-function candidateRankScore(article: Article, sourceTier: number): number {
-  const tierWeight = Math.max(1, 4 - sourceTier) * 1e13;
-  return tierWeight + articlePublishedMs(article);
+/** 计算单篇文章进入候选池的排序权重（以发布新鲜度为主，结合温和的信源等级时间加成） */
+export function candidateRankScore(article: Article, sourceTier: number): number {
+  const tierBonusMs = TIER_TIME_BONUS_MS[sourceTier] ?? 0;
+  return articlePublishedMs(article) + tierBonusMs;
 }
 
 /**
@@ -155,6 +162,31 @@ function buildTimeCutoffRuleText(
   return lines.join('\n');
 }
 
+/** 生成注入选题提示词的近期相关背景参考区块，辅助识别第三方盘点与复述旧闻 */
+function buildBackgroundReferencesText(
+  timezone: string,
+  refs: ReadonlyArray<{
+    publishedAt: string | null;
+    firstSeenAt: string;
+    sourceName: string;
+    title: string;
+    excerpt: string | null;
+  }>,
+): string {
+  if (refs.length === 0) {
+    return '';
+  }
+  const lines = [
+    '## 近期已入库相关背景参考（仅用于识别第三方盘点/复述，不同型号或新版本发布不算重复）',
+  ];
+  for (const ref of refs) {
+    const refTime = formatLocalDateTime(ref.publishedAt ?? ref.firstSeenAt, timezone) || '未知时间';
+    const snippet = compactExcerpt(ref.excerpt, ref.title);
+    lines.push(`- [${refTime}] [${ref.sourceName}] ${ref.title}${snippet ? ` — ${snippet}` : ''}`);
+  }
+  return lines.join('\n');
+}
+
 /**
  * 执行一轮候选文章确定性预过滤与大模型聚类选题：
  * 1) 仅按规范化链接、时间下限与归一化标题完全一致规则排除原题重复，不再按标题字符相似度误删不同代号/版本的新发布；
@@ -234,10 +266,17 @@ export async function selectCandidateEvents(opts: {
           )
       : [];
 
-  // 1. 排除已占用/已播链接、早于时间下限及与历史/前期原题完全一致的文章
+  // 1. 排除已占用/已播链接、早于时间下限、截断残缺推文及与历史/前期原题完全一致的文章
   const freshFiltered: Article[] = [];
   for (const article of rawCandidates) {
     if (opts.excludeArticleIds?.has(article.id)) {
+      continue;
+    }
+    if (
+      sourceById.get(article.sourceId)?.kind === 'x-timeline' &&
+      (article.contentChars ?? 0) <= 290 &&
+      looksLikeTruncatedTweetText(article.excerpt ?? '')
+    ) {
       continue;
     }
     if (hasCutoff && article.publishedAt) {
@@ -288,10 +327,35 @@ export async function selectCandidateEvents(opts: {
     }
   }
 
-  // 3. 候选超过 80 条时按综合评分截断保留前 80 条
-  const dedupedGroups = Array.from(groupedByTitle.values())
-    .sort((a, b) => b.score - a.score)
-    .slice(0, MAX_SELECT_CANDIDATES);
+  // 3. 候选超过 80 条时先按单信源配额均衡筛选，若不足再按总分顺延补足
+  const sortedGroups = Array.from(groupedByTitle.values()).sort((a, b) => b.score - a.score);
+  const dedupedGroups: typeof sortedGroups = [];
+  const pickedGroupSet = new Set<(typeof sortedGroups)[number]>();
+  const countBySource = new Map<string, number>();
+
+  for (const group of sortedGroups) {
+    if (dedupedGroups.length >= MAX_SELECT_CANDIDATES) {
+      break;
+    }
+    const count = countBySource.get(group.rep.sourceId) ?? 0;
+    if (count >= MAX_CANDIDATES_PER_SOURCE) {
+      continue;
+    }
+    countBySource.set(group.rep.sourceId, count + 1);
+    dedupedGroups.push(group);
+    pickedGroupSet.add(group);
+  }
+  if (dedupedGroups.length < MAX_SELECT_CANDIDATES) {
+    for (const group of sortedGroups) {
+      if (dedupedGroups.length >= MAX_SELECT_CANDIDATES) {
+        break;
+      }
+      if (!pickedGroupSet.has(group)) {
+        dedupedGroups.push(group);
+        pickedGroupSet.add(group);
+      }
+    }
+  }
 
   const aliasesByRepId = new Map<string, string[]>();
   const validRepIds = new Set<string>();
@@ -301,14 +365,20 @@ export async function selectCandidateEvents(opts: {
     validRepIds.add(group.rep.id);
   }
 
+  const nowMs = ctx.now().getTime();
   const promptCandidates = dedupedGroups.map(({ rep }) => {
     const src = sourceById.get(rep.sourceId);
+    const pubMs = articlePublishedMs(rep);
+    const ageHours =
+      pubMs > 0 ? Math.max(0, Math.round(((nowMs - pubMs) / 3600_000) * 10) / 10) : 0;
     return {
       id: rep.id,
       source: src?.name ?? rep.sourceId,
+      sourceKind: src?.kind ?? 'rss',
       tier: src?.tier ?? 3,
       lang: rep.lang,
       publishedAt: rep.publishedAt ?? rep.firstSeenAt,
+      ageHours,
       title: rep.title,
       excerpt: (rep.excerpt ?? '').slice(0, 300),
     };
@@ -370,11 +440,47 @@ export async function selectCandidateEvents(opts: {
         }))
       : [];
 
+  let backgroundReferencesText = '';
+  if (!hasCutoff) {
+    const bgDays = Math.max(14, settings.editorial.historyDedupDays);
+    const bgSinceIso = new Date(nowMs - bgDays * 24 * 3600_000).toISOString();
+    const candidateIdSet = new Set(dedupedGroups.flatMap((g) => g.aliases));
+    const recentAuthoritative = ctx.repos.articles
+      .listRecentForOriginCheck(bgSinceIso, new Date(nowMs).toISOString(), 400)
+      .filter(
+        (art) =>
+          !candidateIdSet.has(art.id) &&
+          (sourceById.get(art.sourceId)?.tier ?? 3) <= 2 &&
+          art.extractStatus !== 'failed' &&
+          !isDuplicateOfHistory(art.title, promptHistoryEntries).duplicate,
+      );
+    const bgRefs =
+      recentAuthoritative.length > 0
+        ? selectRelevantOriginReferences(
+            dedupedGroups.map((g) => g.rep),
+            recentAuthoritative,
+            MAX_PROMPT_BACKGROUND_REFS,
+          ).map((art) => ({
+            publishedAt: art.publishedAt,
+            firstSeenAt: art.firstSeenAt,
+            sourceName: sourceById.get(art.sourceId)?.name ?? art.sourceId,
+            title: art.title,
+            excerpt: art.excerpt,
+          }))
+        : [];
+    backgroundReferencesText = buildBackgroundReferencesText(settings.timezone, bgRefs);
+  }
+
+  const nowIso = new Date(nowMs).toISOString();
+  const currentTime = `${formatLocalDateTime(nowIso, settings.timezone)}（${settings.timezone}，UTC: ${nowIso}）`;
+
   const prompt = await renderPromptTemplate('s2-select.md', {
+    currentTime,
     targetCount: String(Math.max(1, targetCount)),
     itemCount: String(Math.max(1, itemCount)),
     historyDedupDays: String(settings.editorial.historyDedupDays),
     timeCutoffRule: buildTimeCutoffRuleText(notBeforeAt, settings.timezone, originReferences),
+    backgroundReferences: backgroundReferencesText,
     hostSelectionRule: opts.hostSelectionRule ?? '',
     historyTitles: historyText,
     candidates: JSON.stringify(promptCandidates, null, 2),

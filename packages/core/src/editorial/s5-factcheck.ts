@@ -4,6 +4,8 @@ import {
   type PolishedItem,
   type Settings,
 } from '@aidaily/contracts';
+import { TZDate } from '@date-fns/tz';
+import { format } from 'date-fns';
 import type { CoreContext } from '../context.js';
 import { invokeStageLlm } from './llm.js';
 import { describePersonaRelation, formatPersonaForPrompt, getRunPersona } from './personas.js';
@@ -122,7 +124,12 @@ export async function factCheckPolishedItem(opts: {
         ].join('\n')
       : '';
 
+  const nowDate = ctx.now();
+  const tzNow = new TZDate(nowDate.getTime(), settings.timezone);
+  const currentTime = `${format(tzNow, 'yyyy-MM-dd HH:mm')}（${settings.timezone}，UTC: ${nowDate.toISOString()}）`;
+
   const prompt = await renderPromptTemplate('s5-factcheck.md', {
+    currentTime,
     articlesXml,
     personaJson: formatPersonaForPrompt(await getRunPersona(ctx, runId), 'null', {
       includeReactions: false,

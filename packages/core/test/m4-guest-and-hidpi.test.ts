@@ -45,7 +45,7 @@ function makePackage(guestReactions?: IssuePackage['guestReactions']): IssuePack
     headline: 'OpenAI把ChatGPT和Codex合并计费，免费额度翻倍',
     leadSummary: 'OpenAI合并订阅体系并提高免费额度。',
     intro: {
-      narration: ['免费额度翻倍，OpenAI把ChatGPT和Codex合并计费了，直接看细则。'],
+      narration: ['嗨各位，今天是11月21日周六，我是聪明的大肥鱼，看点在屏幕上了。'],
       hostComment: '算力账越算越精。',
     },
     outro: {

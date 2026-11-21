@@ -15,7 +15,7 @@ issue:
   reserveFactor: 2 # 兼容旧任务配置
   minScore: 7.5 # 只播报达到重要性门槛的新闻
   allowPartial: true # 允许少于目标条数继续制作，并在 0 条入选时自动跳过
-  freshnessHours: 48 # 候选新闻的默认时效
+  freshnessHours: 30 # 候选新闻的默认时效
   itemConcurrency: 6 # 同时处理的条目数
   refill:
     maxRounds: 3

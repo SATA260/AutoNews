@@ -18,7 +18,11 @@ import {
   createRun,
   downloadArticleImage,
   extractArticleContent,
+  extractTweetsFromGraphQlPayload,
   fetchArticleHtml,
+  fetchXSourceItems,
+  isXTimelineGraphQlUrl,
+  looksLikeTruncatedTweetText,
   type Notifier,
   type NotifyEvent,
   normalizeTitle,
@@ -1577,5 +1581,169 @@ describe('collector module and SourceService', () => {
     } finally {
       await core.close();
     }
+  });
+
+  it('matches updated X GraphQL endpoints, extracts full note_tweet with expanded URLs, and skips truncated tweets', async () => {
+    expect(
+      isXTimelineGraphQlUrl(
+        'https://x.com/i/api/graphql/ZFKu1DFS63hgrkLzR3Hsdw/UserOriginalsTimeline?variables=%7B%7D',
+      ),
+    ).toBe(true);
+    expect(
+      isXTimelineGraphQlUrl('https://x.com/i/api/graphql/abc123/UserTweets?variables=%7B%7D'),
+    ).toBe(true);
+    expect(
+      isXTimelineGraphQlUrl(
+        'https://x.com/i/api/graphql/abc123/ListLatestTweetsTimeline?variables=%7B%7D',
+      ),
+    ).toBe(true);
+    expect(
+      isXTimelineGraphQlUrl('https://x.com/i/api/graphql/abc123/TweetDetail?variables=%7B%7D'),
+    ).toBe(true);
+    expect(
+      isXTimelineGraphQlUrl(
+        'https://x.com/i/api/graphql/I7FbT7Bfw_If9nT5q6PUQQ/ViewerBadgeCounts?variables=%7B%7D',
+      ),
+    ).toBe(false);
+    expect(
+      isXTimelineGraphQlUrl(
+        'https://x.com/i/api/graphql/cM7LCaFTQnUWRA1jMWH6Pg/ExploreSidebar?variables=%7B%7D',
+      ),
+    ).toBe(false);
+
+    const longBody =
+      'Out of your element with the new Gemini 4 releases? Read the full table at https://t.co/xyz123 ' +
+      'Carbon ($4/$20 per 1M input/output tokens), Neon ($3/$15), and Hydrogen ($1.50/$7.50) are benchmarked across coding, agentic workflows, and long-context retrieval with detailed latency measurements across providers.';
+    const payload = {
+      data: {
+        items: [
+          {
+            rest_id: '2123513872095269336',
+            core: {
+              user_results: {
+                result: {
+                  legacy: {
+                    screen_name: 'ArtificialAnlys',
+                    name: 'Artificial Analysis',
+                  },
+                },
+              },
+            },
+            note_tweet: {
+              is_expandable: true,
+              note_tweet_results: {
+                result: {
+                  text: longBody,
+                  entity_set: {
+                    urls: [
+                      {
+                        url: 'https://t.co/xyz123',
+                        expanded_url: 'https://artificialanalysis.ai/models/gemini-4',
+                      },
+                    ],
+                  },
+                },
+              },
+            },
+            legacy: {
+              user_id_str: '174348786',
+              created_at: 'Thu Nov 19 20:28:54 +0000 2026',
+              full_text: 'Out of your element with the new Gemini 4 releases? https://t.co/trunc',
+              entities: { urls: [] },
+            },
+          },
+          {
+            rest_id: '2123513872095269999',
+            core: {
+              user_results: {
+                result: {
+                  legacy: {
+                    screen_name: 'ArtificialAnlys',
+                    name: 'Artificial Analysis',
+                  },
+                },
+              },
+            },
+            note_tweet: {
+              is_expandable: true,
+            },
+            legacy: {
+              user_id_str: '174348786',
+              created_at: 'Thu Nov 19 20:20:00 +0000 2026',
+              full_text:
+                'Out of your element with the new Gemini 4 releases? Here are some key highlights on Gemini 4 Carbon, Neon and Hydrogen\n\nCarbon is the highest-priced model ($4/$20 per 1M input/output tokens), followed by Neon ($3/$15) and Hydrogen ($1.50/$7.50). At low effort, Carbon performs the',
+              entities: { urls: [] },
+            },
+          },
+        ],
+      },
+    };
+
+    const parsed = extractTweetsFromGraphQlPayload(payload);
+    expect(parsed).toHaveLength(2);
+    expect(parsed[0]?.isTruncated).toBe(false);
+    expect(parsed[0]?.text).toContain('https://artificialanalysis.ai/models/gemini-4');
+    expect(parsed[0]?.text).not.toContain('https://t.co/xyz123');
+    expect(parsed[0]?.text.length).toBeGreaterThan(280);
+    expect(parsed[1]?.isTruncated).toBe(true);
+
+    expect(
+      looksLikeTruncatedTweetText(
+        'Out of your element with the new Gemini 4 releases? Here are some key highlights on Gemini 4 Carbon, Neon and Hydrogen\n\nCarbon is the highest-priced model ($4/$20 per 1M input/output tokens), followed by Neon ($3/$15) and Hydrogen ($1.50/$7.50). At low effort, Carbon performs the',
+      ),
+    ).toBe(true);
+    expect(
+      looksLikeTruncatedTweetText(
+        'Reset everyone’s Gemini quota on Antigravity. The caching improvements have increased the amount you can get done per unit of quota by > 20%!',
+      ),
+    ).toBe(false);
+
+    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'aidaily-x-trunc-'));
+    tempDirs.push(tmpDir);
+    const cookiePath = path.join(tmpDir, 'x-cookies.json');
+    await fs.writeFile(
+      cookiePath,
+      JSON.stringify({ auth_token: 'tok-test', ct0: 'ct0-test' }),
+      'utf8',
+    );
+    const items = await fetchXSourceItems(
+      {
+        id: 'x-aa',
+        name: 'AA',
+        lang: 'en',
+        tier: 2,
+        kind: 'x-timeline',
+        pool: 'primary',
+        url: 'https://x.com/ArtificialAnlys',
+        xConfig: {
+          mode: 'user',
+          handleOrListId: 'ArtificialAnlys',
+          includeReplies: false,
+          includeRetweets: false,
+          minChars: 20,
+        },
+        enabled: true,
+      },
+      {
+        cookieFileAbs: cookiePath,
+        driver: {
+          async fetchRenderedHtml() {
+            return '';
+          },
+          async fetchXTimeline() {
+            return parsed;
+          },
+          async renderTweetCardPng() {
+            return null;
+          },
+          async renderDomFragmentPng() {
+            return null;
+          },
+          async close() {},
+        },
+      },
+    );
+    expect(items).toHaveLength(1);
+    expect(items[0]?.url).toContain('2123513872095269336');
   });
 });

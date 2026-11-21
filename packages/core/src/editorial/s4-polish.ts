@@ -2,6 +2,7 @@ import {
   type ArticleMediaAsset,
   type ContentLimits,
   createPolishedItemSchema,
+  type EventNature,
   type EventRecord,
   type Evidence,
   type IssueMode,
@@ -9,6 +10,8 @@ import {
   type Settings,
   type SummaryDraft,
 } from '@aidaily/contracts';
+import { TZDate } from '@date-fns/tz';
+import { format } from 'date-fns';
 import type { CoreContext } from '../context.js';
 import { invokeStageLlm } from './llm.js';
 import { describePersonaRelation, formatPersonaForPrompt, getRunPersona } from './personas.js';
@@ -145,6 +148,41 @@ export function normalizePolishedMediaSelection(
   };
 }
 
+/** 构造注入润色与微调提示词的时间与来源背景说明，防止误将旧闻或第三方盘点写成最新首发 */
+function buildArticleTimeContext(opts: {
+  ctx: CoreContext;
+  settings: Settings;
+  articlesMap?: ReadonlyMap<string, LoadedEventArticle>;
+  eventNature?: EventNature;
+}): string {
+  const { ctx, settings, articlesMap, eventNature } = opts;
+  const nowDate = ctx.now();
+  const nowMs = nowDate.getTime();
+  const tzNow = new TZDate(nowMs, settings.timezone);
+  const lines = [
+    '## 当前任务时间与原文来源时效背景',
+    `- 当前时间：${format(tzNow, 'yyyy-MM-dd HH:mm')}（${settings.timezone}，UTC: ${nowDate.toISOString()}）`,
+  ];
+  if (eventNature) {
+    lines.push(`- 事件性质判定：${eventNature}`);
+  }
+  if (articlesMap && articlesMap.size > 0) {
+    for (const art of articlesMap.values()) {
+      const pubMs = art.publishedAt ? Date.parse(art.publishedAt) : Number.NaN;
+      const pubLabel = !Number.isNaN(pubMs)
+        ? `${format(new TZDate(pubMs, settings.timezone), 'yyyy-MM-dd HH:mm')}（距今约 ${Math.max(0, Math.round(((nowMs - pubMs) / 3600_000) * 10) / 10)} 小时）`
+        : '未知发布时间';
+      lines.push(`- 原文 [${art.sourceName}]（${art.title}）：发布于 ${pubLabel}`);
+    }
+  }
+  if (eventNature === 'benchmark_or_recap') {
+    lines.push(
+      '- **重要提醒**：本条属于第三方评测/盘点回顾，严禁使用“刚发布/刚披露/刚曝光/首次公布/亮相”等首发措辞，必须写明具体机构盘点或实测视角。',
+    );
+  }
+  return lines.join('\n');
+}
+
 /** 将事实摘要草稿润色成符合中文口播习惯和字数约束的展示定稿初版 */
 export async function polishItemDraft(opts: {
   ctx: CoreContext;
@@ -190,6 +228,12 @@ export async function polishItemDraft(opts: {
       ? buildNarrationRules({ isHeadline, issueMode, settings })
       : '',
     tierHint,
+    timeContext: buildArticleTimeContext({
+      ctx,
+      settings,
+      articlesMap,
+      eventNature: summary.eventNature,
+    }),
     availableMediaSection: buildAvailableMediaSection(mediaPool),
     eventTitle: event.title,
     category: event.category ?? 'AI 资讯',
@@ -245,6 +289,7 @@ export async function revisePolishedItem(opts: {
   round: number;
   isHeadline?: boolean;
   issueMode?: IssueMode;
+  eventNature?: EventNature;
   signal?: AbortSignal;
 }): Promise<PolishedItem> {
   const {
@@ -260,6 +305,7 @@ export async function revisePolishedItem(opts: {
     round,
     isHeadline = previous.isHeadlineTier === true,
     issueMode = 'digest',
+    eventNature,
     signal,
   } = opts;
 
@@ -272,6 +318,12 @@ export async function revisePolishedItem(opts: {
     narrationRules: settings.editorial.compactStyle
       ? buildNarrationRules({ isHeadline, issueMode, settings })
       : '',
+    timeContext: buildArticleTimeContext({
+      ctx,
+      settings,
+      articlesMap,
+      eventNature,
+    }),
     availableMediaSection: buildAvailableMediaSection(mediaPool),
     previousItemJson: JSON.stringify(previous, null, 2),
     revisionNotesJson: JSON.stringify(revisionNotes, null, 2),

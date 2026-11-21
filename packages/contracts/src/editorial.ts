@@ -67,6 +67,17 @@ export const AvailabilitySchema = z.enum([
 /** 可用范围标记类型 */
 export type Availability = z.infer<typeof AvailabilitySchema>;
 
+/** 新闻事件性质分类：区分新发布、价格或政策变动、第三方评测盘点、行业动态与传闻 */
+export const EventNatureSchema = z.enum([
+  'new_release',
+  'price_or_policy_change',
+  'benchmark_or_recap',
+  'industry_news',
+  'rumor',
+]);
+/** 新闻事件性质分类类型 */
+export type EventNature = z.infer<typeof EventNatureSchema>;
+
 /** 对同一新闻事件提炼出的客观事实摘要草稿 */
 export const SummaryDraftSchema = z.object({
   facts: z.array(z.string().min(1)).min(1).max(10),
@@ -75,6 +86,10 @@ export const SummaryDraftSchema = z.object({
   availabilityNote: z.string().min(1),
   evidence: z.array(EvidenceSchema).min(1),
   eventOccurredAt: z.string().optional(),
+  /** 原文正文是否完整，明显截断缺失核心结论时为 false */
+  sourceComplete: z.boolean().optional(),
+  /** 事件核心性质分类 */
+  eventNature: EventNatureSchema.optional(),
 });
 /** 事实摘要草稿类型 */
 export type SummaryDraft = z.infer<typeof SummaryDraftSchema>;

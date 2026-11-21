@@ -172,6 +172,7 @@ export async function runPackageStage(
       forbiddenTokens: persona?.forbiddenTokens,
       hostSelfName: persona?.selfName,
       activeHostId: persona?.id,
+      dateDisplay,
     });
 
     if (check.passed) {

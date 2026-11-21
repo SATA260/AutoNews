@@ -304,16 +304,20 @@ if (stage === 'factcheck') {
 if (stage === 'package') {
   const items = extractJsonSection(prompt, '## 本期已过审新闻列表（JSON）') ?? [];
   const persona = extractJsonSection(prompt, '## 当期主播人设');
+  const dateDisplayMatch = prompt.match(/- 日期：\d{4}-\d{2}-\d{2}（([^）]+)）/);
+  const dateDisplay = dateDisplayMatch?.[1]?.trim() ?? '';
   const order = items.map((i) => i.itemId);
   const selfName =
     typeof persona?.selfName === 'string' && persona.selfName ? persona.selfName : '';
+  const datePart = dateDisplay ? `今天是${dateDisplay}，` : '';
+  const namePart = selfName ? `我是${selfName}，` : '';
   emitSuccess({
     order,
     headlineItemId: order[0] ?? 'item-1',
     headline: '今日头条看点：大模型应用再迎实用升级',
     leadSummary: '今天重点为你盘点几条贴近日常工作的人工智能新动向。',
     intro: {
-      narration: ['主流研发团队刚发布新一代工具更新，咱们直接看今天重点。'],
+      narration: [`大家好，${datePart}${namePart}看点在屏幕上，直接看正文。`],
       hostComment: '直接看今天重点。',
     },
     outro: {

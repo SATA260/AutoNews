@@ -9,6 +9,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   abandonRun,
   cancelRun,
+  candidateRankScore,
   computeArticleId,
   createCore,
   createRun,
@@ -2465,6 +2466,391 @@ describe('editorial workflow, TTS timeline, interruption recovery, and retry eng
       });
       expect((await core.tasks.get(runManual)).hostId).toBe('gpt');
       expect((await core.tasks.get(runManual)).bgmFile).toBe('gpt-bgm.mp3');
+    } finally {
+      await core.close();
+    }
+  }, 30_000);
+
+  it('ranks candidates primarily by freshness, caps single-source crowding, skips truncated X posts, and injects background references even without notBeforeAt', async () => {
+    const now = new Date('2026-11-21T10:00:00.000Z');
+    const tier1Old = {
+      id: 't1-old',
+      sourceId: 'x-aa',
+      canonicalUrl: 'https://x.com/aa/status/1',
+      title: 'Old tier 1 post',
+      titleNorm: 'old tier 1 post',
+      lang: 'en' as const,
+      publishedAt: new Date(now.getTime() - 36 * 3600_000).toISOString(),
+      firstSeenAt: now.toISOString(),
+      excerpt: null,
+      contentPath: null,
+      contentChars: 200,
+      imagePath: null,
+      extractStatus: 'ok' as const,
+      status: 'new' as const,
+      reservedByRun: null,
+    };
+    const tier2Fresh = {
+      ...tier1Old,
+      id: 't2-fresh',
+      sourceId: 'tech-media',
+      canonicalUrl: 'https://media.example.com/fresh',
+      title: 'Fresh tier 2 news',
+      titleNorm: 'fresh tier 2 news',
+      publishedAt: new Date(now.getTime() - 2 * 3600_000).toISOString(),
+    };
+    expect(candidateRankScore(tier2Fresh, 2)).toBeGreaterThan(candidateRankScore(tier1Old, 1));
+
+    const { rootDir } = await setupWorkflowWorkspace();
+    const mediaSources = Array.from({ length: 9 }, (_, s) => ({
+      id: `tech-media-${s}`,
+      name: `Tech Media ${s}`,
+      lang: 'en' as const,
+      tier: 2 as const,
+      kind: 'rss' as const,
+      pool: 'primary' as const,
+      url: `https://media-${s}.example.com/rss.xml`,
+      enabled: true,
+    }));
+    await updateSourcesFile(path.join(rootDir, 'config', 'sources.yaml'), [
+      {
+        id: 'x-aa',
+        name: 'AA (X)',
+        lang: 'en',
+        tier: 1,
+        kind: 'x-timeline',
+        pool: 'primary',
+        url: 'https://x.com/ArtificialAnlys',
+        xConfig: {
+          mode: 'user',
+          handleOrListId: 'ArtificialAnlys',
+          includeReplies: false,
+          includeRetweets: false,
+          minChars: 20,
+        },
+        enabled: true,
+      },
+      ...mediaSources,
+      {
+        id: 'official-blog',
+        name: 'Official Blog',
+        lang: 'en',
+        tier: 1,
+        kind: 'rss',
+        pool: 'primary',
+        url: 'https://official.example.com/rss.xml',
+        enabled: true,
+      },
+    ]);
+
+    const capturedPrompts: string[] = [];
+    const core = await createCore({
+      rootDir,
+      now: () => now,
+      fetchImpl: async (input, init) => {
+        const url = String(input);
+        if (url.includes('gateway.test')) {
+          const payload = JSON.parse(String(init?.body ?? '{}')) as {
+            messages?: Array<{ content?: string }>;
+          };
+          const promptText = payload.messages?.map((m) => m.content ?? '').join('\n') ?? '';
+          capturedPrompts.push(promptText);
+          return Response.json({
+            id: 'select-freshness-cap',
+            choices: [
+              {
+                finish_reason: 'stop',
+                message: {
+                  content: JSON.stringify({
+                    events: [
+                      {
+                        title: 'Fresh Gemini 4 Benchmark Update',
+                        articleIds: ['art-official-gemini'],
+                        category: '大模型',
+                        entity: 'Google',
+                        score: 8.8,
+                        publicAppeal: 8.5,
+                        reason: '官方更新',
+                        duplicateOfHistory: false,
+                      },
+                    ],
+                  }),
+                },
+              },
+            ],
+          });
+        }
+        return new Response('Not found', { status: 404 });
+      },
+    });
+
+    try {
+      await fs.writeFile(
+        path.join(core.context.paths.secretsDir, 'fixture-key'),
+        'freshness-test-key',
+        { mode: 0o600 },
+      );
+      await core.config.updateSettings({
+        ai: {
+          providers: {
+            fixture: {
+              adapter: 'openai-compatible',
+              protocol: 'chat-completions',
+              baseUrl: 'https://mock.gateway.test/v1',
+              apiKeyFile: 'fixture-key',
+            },
+          },
+          stages: { select: { cli: 'fixture', model: 'fixture-model' } },
+        },
+      });
+
+      // 构造超过 80 条的候选池：12 条极新的 x-aa 推文 + 9 个二级媒体源共 72 条 + 1 条 2 小时前的 official-blog（含 Gemini 4），验证单信源配额（8 条）不会让 x-aa 挤占名额
+      for (let i = 0; i < 12; i++) {
+        const pub = new Date(now.getTime() - (i + 1) * 60_000).toISOString();
+        core.context.repos.articles.insertIfAbsent({
+          id: `art-xaa-${i}`,
+          sourceId: 'x-aa',
+          canonicalUrl: `https://x.com/ArtificialAnlys/status/${1000 + i}`,
+          title: `AA Benchmark Note ${i}`,
+          titleNorm: normalizeTitle(`AA Benchmark Note ${i}`),
+          lang: 'en',
+          publishedAt: pub,
+          firstSeenAt: pub,
+          excerpt: `Detailed benchmark post ${i} with full results and metrics.`,
+          contentPath: null,
+          contentChars: 500,
+          imagePath: null,
+          extractStatus: 'ok',
+        });
+      }
+      for (let i = 0; i < 72; i++) {
+        const pub = new Date(now.getTime() - (i + 20) * 60_000).toISOString();
+        const mediaSourceIndex = i % 9;
+        core.context.repos.articles.insertIfAbsent({
+          id: `art-media-${i}`,
+          sourceId: `tech-media-${mediaSourceIndex}`,
+          canonicalUrl: `https://media-${mediaSourceIndex}.example.com/post-${i}`,
+          title: `Tech Update Story ${i}`,
+          titleNorm: normalizeTitle(`Tech Update Story ${i}`),
+          lang: 'en',
+          publishedAt: pub,
+          firstSeenAt: pub,
+          excerpt: `Tech media coverage ${i}.`,
+          contentPath: null,
+          contentChars: 600,
+          imagePath: null,
+          extractStatus: 'ok',
+        });
+      }
+      const officialPub = new Date(now.getTime() - 2 * 3600_000).toISOString();
+      core.context.repos.articles.insertIfAbsent({
+        id: 'art-official-gemini',
+        sourceId: 'official-blog',
+        canonicalUrl: 'https://official.example.com/gemini-4-tool-update',
+        title: 'Gemini 4 Tool Retrieval Release',
+        titleNorm: normalizeTitle('Gemini 4 Tool Retrieval Release'),
+        lang: 'en',
+        publishedAt: officialPub,
+        firstSeenAt: officialPub,
+        excerpt: 'Google announces Tool Retrieval for Gemini 4 models.',
+        contentPath: null,
+        contentChars: 900,
+        imagePath: null,
+        extractStatus: 'ok',
+      });
+
+      // 入库一条被 280 字腰斩的残缺 X 推文（必须被 selection-core 过滤掉）
+      core.context.repos.articles.insertIfAbsent({
+        id: 'art-xaa-truncated',
+        sourceId: 'x-aa',
+        canonicalUrl: 'https://x.com/ArtificialAnlys/status/9999',
+        title: 'AA (@ArtificialAnlys): Out of your element with the new Gemini 4…',
+        titleNorm: normalizeTitle('AA Out of your element with the new Gemini 4'),
+        lang: 'en',
+        publishedAt: new Date(now.getTime() - 5 * 60_000).toISOString(),
+        firstSeenAt: now.toISOString(),
+        excerpt:
+          'Out of your element with the new Gemini 4 releases? Here are some key highlights on Gemini 4 Carbon, Neon and Hydrogen\n\nCarbon is the highest-priced model ($4/$20 per 1M input/output tokens), followed by Neon ($3/$15) and Hydrogen ($1.50/$7.50). At low effort, Carbon performs the',
+        contentPath: null,
+        contentChars: 280,
+        imagePath: null,
+        extractStatus: 'ok',
+      });
+
+      // 插入 82 条较新的已播历史记录把 3 天前的 Gemini 4 Neon 官方报道挤出 80 条近期已播标题上限，验证无 notBeforeAt 时背景参考仍能精准召回
+      for (let i = 0; i < 82; i++) {
+        core.context.repos.history.insert({
+          eventId: `ev-filler-${i}`,
+          runId: '20261120-0800-fill',
+          title: `其他人工智能日常快讯编号 ${i}`,
+          titleNorm: normalizeTitle(`其他人工智能日常快讯编号 ${i}`),
+          entity: 'Other',
+          articleUrls: [`https://media.example.com/hist-${i}`],
+          publishedAt: new Date(now.getTime() - (i + 1) * 60_000).toISOString(),
+        });
+      }
+      core.context.repos.articles.insertIfAbsent({
+        id: 'art-earlier-gemini-neon',
+        sourceId: 'official-blog',
+        canonicalUrl: 'https://official.example.com/introducing-gemini-4-neon',
+        title: 'Introducing Gemini 4 Neon',
+        titleNorm: normalizeTitle('Introducing Gemini 4 Neon'),
+        lang: 'en',
+        publishedAt: new Date(now.getTime() - 72 * 3600_000).toISOString(),
+        firstSeenAt: new Date(now.getTime() - 72 * 3600_000).toISOString(),
+        excerpt: 'Google DeepMind releases Gemini 4 Neon priced at $3/$15 per 1M tokens.',
+        contentPath: null,
+        contentChars: 1200,
+        imagePath: null,
+        extractStatus: 'ok',
+      });
+
+      const runId = createRun(core.context, { itemCount: 5, trigger: 'manual-cli' });
+      await selectCandidateEvents({
+        ctx: core.context,
+        runId,
+        settings: core.context.settings,
+        sinceIso: new Date(now.getTime() - 30 * 3600_000).toISOString(),
+        includeExpired: false,
+        targetCount: 10,
+        itemCount: 5,
+      });
+
+      expect(capturedPrompts).toHaveLength(1);
+      const promptText = capturedPrompts[0] ?? '';
+      expect(promptText).toContain('## 当前任务时间');
+      expect(promptText).toContain('2026-11-21 18:00');
+      expect(promptText).toContain('## 近期已入库相关背景参考');
+      expect(promptText).toContain('Introducing Gemini 4 Neon');
+      expect(promptText).not.toContain('art-xaa-truncated');
+
+      const marker = '## 候选文章列表（JSON）\n';
+      const candJson = JSON.parse(
+        promptText.slice(promptText.indexOf(marker) + marker.length).trim(),
+      ) as Array<{ id: string; source: string; ageHours: number }>;
+      expect(candJson).toHaveLength(80);
+      expect(candJson.filter((c) => c.source === 'AA (X)').length).toBeLessThanOrEqual(8);
+      expect(candJson.some((c) => c.id === 'art-official-gemini')).toBe(true);
+      expect(candJson.every((c) => typeof c.ageHours === 'number')).toBe(true);
+    } finally {
+      await core.close();
+    }
+  });
+
+  it('drops items with incomplete_source when summarize flags truncated source and injects currentTime into polish and factcheck', async () => {
+    const { rootDir, scriptFile } = await setupWorkflowWorkspace({ itemConcurrency: 1 });
+    const now = new Date('2026-11-16T10:00:00.000Z');
+
+    const truncSlug = 'trunc-post';
+    const goodSlug = 'good-launch';
+    const truncBody =
+      'Out of your element with Gemini 4? Carbon is $4/$20 per 1M tokens. At low effort, Carbon performs the '.repeat(
+        6,
+      );
+    const goodBody =
+      'Anthropic launched Claude Code remote sandboxes today with built-in OIDC keyless execution for engineering teams. '.repeat(
+        6,
+      );
+    const truncId = computeArticleId(`https://primary.example.com/${truncSlug}`);
+    const goodId = computeArticleId(`https://primary.example.com/${goodSlug}`);
+
+    await fs.writeFile(
+      scriptFile,
+      JSON.stringify({
+        rules: [
+          {
+            stage: 'summarize',
+            contains: [truncId],
+            actions: [
+              {
+                output: {
+                  facts: ['文中仅留下部分定价数字，评测结论在半句话处截断。'],
+                  relevance: '内容残缺。',
+                  availability: 'unknown',
+                  availabilityNote: '原文截断无法确认完整结论。',
+                  evidence: [
+                    {
+                      claim: '原文片段',
+                      articleId: truncId,
+                      quote: truncBody.slice(0, 60).trim(),
+                    },
+                  ],
+                  sourceComplete: false,
+                  eventNature: 'benchmark_or_recap',
+                },
+              },
+            ],
+          },
+          {
+            stage: 'summarize',
+            contains: [goodId],
+            actions: [
+              {
+                output: {
+                  facts: ['Anthropic 今日正式上线 Claude Code 远程沙盒。'],
+                  relevance: '开发者可在持续集成流程中免密安全执行代码任务。',
+                  availability: 'available_now',
+                  availabilityNote: '现已面向团队用户正式开放使用。',
+                  evidence: [
+                    {
+                      claim: '官方上线远程沙盒说明',
+                      articleId: goodId,
+                      quote: goodBody.slice(0, 70).trim(),
+                    },
+                  ],
+                  sourceComplete: true,
+                  eventNature: 'new_release',
+                },
+              },
+            ],
+          },
+        ],
+      }),
+      'utf8',
+    );
+
+    const core = await createCore({
+      rootDir,
+      now: () => now,
+      fetchImpl: makeFeedMockFetch([
+        {
+          slug: truncSlug,
+          title: '截断残缺短推候选',
+          pubDate: 'Mon, 16 Nov 2026 09:00:00 GMT',
+          body: truncBody,
+        },
+        {
+          slug: goodSlug,
+          title: 'Claude Code 上线远程沙盒',
+          pubDate: 'Mon, 16 Nov 2026 08:00:00 GMT',
+          body: goodBody,
+        },
+      ]),
+    });
+
+    try {
+      const runId = createRun(core.context, { itemCount: 1, trigger: 'manual-cli' });
+      await executeRun(core.context, runId, { stopAfterStage: 'edit' });
+
+      const items = core.context.repos.runItems.listByRun(runId);
+      const dropped = items.filter((i) => i.status === 'dropped');
+      const passed = items.filter((i) => i.status === 'passed');
+      expect(dropped).toHaveLength(1);
+      expect(dropped[0]?.dropReason).toBe('incomplete_source');
+      expect(passed).toHaveLength(1);
+      expect(passed[0]?.finalJson?.evidence[0]?.articleId).toBe(goodId);
+
+      const llmCalls = await core.tasks.getLlmCalls(runId);
+      for (const stageName of ['summarize', 'polish', 'factcheck'] as const) {
+        const call = llmCalls.find((c) => c.stage === stageName);
+        expect(call).toBeDefined();
+        if (call) {
+          const log = (await core.tasks.getLlmCallLog(runId, call.id)) as {
+            prompt?: string;
+          } | null;
+          expect(log?.prompt).toContain('2026-11-16 18:00');
+        }
+      }
     } finally {
       await core.close();
     }

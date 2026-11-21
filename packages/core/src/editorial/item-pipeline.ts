@@ -412,6 +412,7 @@ export async function processSingleItem(opts: {
       evidence: optsRev.currentPolished.evidence,
       articlesMap,
       round: optsRev.nextRevision,
+      eventNature: summary?.eventNature,
       signal,
     });
     return { dropped: false, updated };
@@ -507,6 +508,19 @@ export async function processSingleItem(opts: {
     });
   }
 
+  if (summary.sourceComplete === false) {
+    markItemDropped({
+      ctx,
+      runId,
+      item,
+      event,
+      revision,
+      reason: 'incomplete_source',
+    });
+    await clearPendingRetry();
+    return 'dropped';
+  }
+
   if (isEventOlderThanCutoff(summary.eventOccurredAt, notBeforeAt)) {
     markItemDropped({
       ctx,
@@ -581,6 +595,8 @@ export async function processSingleItem(opts: {
         briefNarrationMaxChars: settings.editorial.briefNarrationMaxChars,
         forbiddenTokens: persona?.forbiddenTokens,
         hostSelfName: persona?.selfName,
+        now: ctx.now(),
+        eventNature: summary?.eventNature,
       });
 
       ctx.repos.runItems.appendVersion({

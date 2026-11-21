@@ -58,10 +58,14 @@ function makeValidPolishedItem(): PolishedItem {
 describe('editorial foundation: prompts, similarity, and deterministic prechecks', () => {
   it('renders prompt templates single-pass without expanding nested {{}} in articles', async () => {
     const rendered = await renderPromptTemplate('s3-summarize.md', {
+      currentTime: '2026-11-21 18:00（Asia/Shanghai，UTC: 2026-11-21T10:00:00.000Z）',
       eventTitle: '测试主题',
       articlesXml: '<article id="a1">原文含 {{eventTitle}} 模板标记</article>',
     });
     expect(rendered.startsWith('<!--stage:summarize-->')).toBe(true);
+    expect(rendered).toContain('2026-11-21 18:00');
+    expect(rendered).toContain('sourceComplete');
+    expect(rendered).toContain('eventNature');
     expect(rendered).toContain('原文含 {{eventTitle}} 模板标记');
 
     const xml = buildArticlesXml(
@@ -142,13 +146,17 @@ describe('editorial foundation: prompts, similarity, and deterministic prechecks
     expect(recalled[0]?.title).toBe('DeepSeek 正式发布开源新一代推理优化框架');
 
     const selectPrompt = await renderPromptTemplate('s2-select.md', {
+      currentTime: '2026-11-21 18:00（Asia/Shanghai，UTC: 2026-11-21T10:00:00.000Z）',
       targetCount: '10',
       itemCount: '5',
       historyDedupDays: '14',
       timeCutoffRule: '',
+      backgroundReferences: '',
+      hostSelectionRule: '',
       historyTitles: '（近期暂无已播事件）',
       candidates: '[]',
     });
+    expect(selectPrompt).toContain('2026-11-21 18:00');
     expect(selectPrompt).toContain('GPT');
     expect(selectPrompt).toContain('Claude');
     expect(selectPrompt).toContain('Gemini');
@@ -178,8 +186,9 @@ describe('editorial foundation: prompts, similarity, and deterministic prechecks
       coverSubtitleMax: '22',
     });
     expect(packagePrompt).toContain('重磅主流模型、顶尖突破或全局大事优先头条');
-    expect(packagePrompt).toContain('直给干货的一句话钩子开场');
-    expect(packagePrompt).toContain('把“我是谁”放在结尾');
+    expect(packagePrompt).toContain('按主播人设打招呼开场');
+    expect(packagePrompt).toContain('干脆利落的性格收尾');
+    expect(packagePrompt).toContain('本期看点');
     expect(packagePrompt).toContain('AI圈大地震！上期示例标题');
     expect(packagePrompt).toContain('黑鸦爆款标题 Skill');
   });
@@ -370,11 +379,14 @@ describe('editorial foundation: prompts, similarity, and deterministic prechecks
     const compactValidPkg: IssuePackage = {
       ...validPkg,
       intro: {
-        narration: ['新推理模型速度翻倍、OpenAI还合并了计费额度，咱们直接看细则。'],
+        narration: [
+          '哈喽大家好，今天是11月21日周六，我是哈基米！',
+          '今天看点都在屏幕上了，咱们直接开看！',
+        ],
         hostComment: '今天看点很集中。',
       },
       outro: {
-        narration: ['今天的资讯播送完了，我是哈基米，明天见。'],
+        narration: ['今天的资讯播送完了，明天见。'],
         hostComment: '欢迎留言聊聊。',
         cta: '你平时最常用哪款模型？评论区聊聊。',
       },
@@ -392,16 +404,20 @@ describe('editorial foundation: prompts, similarity, and deterministic prechecks
       metaTextBlacklist: BLACKLIST,
       compact: true,
       hostSelfName: '哈基米',
+      dateDisplay: '11月21日周六',
     });
     expect(compactTitleOk.errors).toEqual([]);
     expect(compactTitleOk.passed).toBe(true);
 
-    const multiSentenceIntro = precheckIssuePackage({
+    const colloquialDateOk = precheckIssuePackage({
       pkg: {
         ...compactValidPkg,
         intro: {
           ...compactValidPkg.intro,
-          narration: ['今天来看两条重磅消息。', '第一条是推理提速，第二条是额度调整。'],
+          narration: [
+            '哈喽大家好，今天是11月21号星期六，我是哈基米！',
+            '看点都在屏幕上了，直接进正文。',
+          ],
         },
       },
       expectedItemIds: ['item-1', 'item-2'],
@@ -410,9 +426,33 @@ describe('editorial foundation: prompts, similarity, and deterministic prechecks
       metaTextBlacklist: BLACKLIST,
       compact: true,
       hostSelfName: '哈基米',
+      dateDisplay: '11月21日周六',
+    });
+    expect(colloquialDateOk.errors).toEqual([]);
+    expect(colloquialDateOk.passed).toBe(true);
+
+    const multiSentenceIntro = precheckIssuePackage({
+      pkg: {
+        ...compactValidPkg,
+        intro: {
+          ...compactValidPkg.intro,
+          narration: [
+            '哈喽大家好，今天是11月21日周六。',
+            '我是哈基米，看点在屏幕上了。',
+            '咱们直接看第一条。',
+          ],
+        },
+      },
+      expectedItemIds: ['item-1', 'item-2'],
+      limits: DEFAULT_LIMITS,
+      publishConfig,
+      metaTextBlacklist: BLACKLIST,
+      compact: true,
+      hostSelfName: '哈基米',
+      dateDisplay: '11月21日周六',
     });
     expect(multiSentenceIntro.passed).toBe(false);
-    expect(multiSentenceIntro.errors.some((e) => e.includes('严格 1 句'))).toBe(true);
+    expect(multiSentenceIntro.errors.some((e) => e.includes('一到两句'))).toBe(true);
 
     const badColumnTitle = precheckIssuePackage({
       pkg: {
@@ -932,11 +972,11 @@ describe('editorial foundation: prompts, similarity, and deterministic prechecks
       headline: '推理速度翻倍，每百万词元十五美元',
       leadSummary: '今天重点看新款推理模型提速与定价细节。',
       intro: {
-        narration: ['推理速度直接翻倍，OpenAI刚把新模型放出来，咱们直接看细则。'],
+        narration: ['嗨各位，今天是11月19日周四，我是聪明的大肥鱼，看点都在屏幕上了。'],
         hostComment: '今天这条真干货。',
       },
       outro: {
-        narration: ['今天的AI账先算到这儿，我是聪明的大肥鱼，咱们下期见。'],
+        narration: ['今天的AI账先算到这儿，咱们下期见。'],
         hostComment: '欢迎评论区聊聊。',
         cta: '哪一条最戳中你？欢迎留言。',
       },
@@ -959,16 +999,17 @@ describe('editorial foundation: prompts, similarity, and deterministic prechecks
       metaTextBlacklist: BLACKLIST,
       compact: true,
       hostSelfName: '聪明的大肥鱼',
+      dateDisplay: '11月19日周四',
     });
     expect(hookOk.errors).toEqual([]);
     expect(hookOk.passed).toBe(true);
 
-    const missingOutroSelfName = precheckIssuePackage({
+    const missingIntroSelfName = precheckIssuePackage({
       pkg: {
         ...hookIntroPkg,
-        outro: {
-          ...hookIntroPkg.outro,
-          narration: ['今天的资讯就播到这里，咱们明天见。'],
+        intro: {
+          ...hookIntroPkg.intro,
+          narration: ['嗨各位，今天是11月19日周四，看点都在屏幕上了，咱们直接开聊。'],
         },
       },
       expectedItemIds: ['item-1'],
@@ -977,9 +1018,31 @@ describe('editorial foundation: prompts, similarity, and deterministic prechecks
       metaTextBlacklist: BLACKLIST,
       compact: true,
       hostSelfName: '聪明的大肥鱼',
+      dateDisplay: '11月19日周四',
     });
-    expect(missingOutroSelfName.passed).toBe(false);
-    expect(missingOutroSelfName.errors.some((e) => e.includes('结尾口播'))).toBe(true);
+    expect(missingIntroSelfName.passed).toBe(false);
+    expect(
+      missingIntroSelfName.errors.some((e) => e.includes('开场口播') && e.includes('聪明的大肥鱼')),
+    ).toBe(true);
+
+    const wrongIntroDate = precheckIssuePackage({
+      pkg: {
+        ...hookIntroPkg,
+        intro: {
+          ...hookIntroPkg.intro,
+          narration: ['嗨各位，今天是11月18日周三，我是聪明的大肥鱼，看点在屏幕上。'],
+        },
+      },
+      expectedItemIds: ['item-1'],
+      limits: DEFAULT_LIMITS,
+      publishConfig,
+      metaTextBlacklist: BLACKLIST,
+      compact: true,
+      hostSelfName: '聪明的大肥鱼',
+      dateDisplay: '11月19日周四',
+    });
+    expect(wrongIntroDate.passed).toBe(false);
+    expect(wrongIntroDate.errors.some((e) => e.includes('11月19日周四'))).toBe(true);
 
     const badCandidate = precheckIssuePackage({
       pkg: {
@@ -1054,5 +1117,122 @@ describe('editorial foundation: prompts, similarity, and deterministic prechecks
     });
     expect(headlineRes.errors).toEqual([]);
     expect(headlineRes.passed).toBe(true);
+  });
+
+  it('blocks premature breaking wording for recaps, missing launch signals, or stale recap posts while allowing genuine launches', () => {
+    const recapArticles = new Map([
+      [
+        'art-recap',
+        {
+          text: 'Here are some key highlights on Gemini 4 Carbon, Neon and Hydrogen. Carbon is $4/$20 per 1M tokens.',
+          publishedAt: '2026-11-19T20:28:54.000Z',
+        },
+      ],
+    ]);
+
+    const recapItem: PolishedItem = {
+      ...makeValidPolishedItem(),
+      title: '谷歌Gemini 4定价刚披露，三档计费明确',
+      shortTitle: 'Gemini 4三档定价披露',
+      progressLabel: '谷歌三档定价',
+      summary: '谷歌Gemini 4三款模型每百万词元定价刚披露，Carbon为4美元。',
+      detail: '评测机构盘点Gemini 4三款模型价格，Carbon输入4美元。',
+      narration: ['谷歌Gemini 4定价刚披露，每百万词元分三档。', '其中Carbon档输入4美元。'],
+      evidence: [
+        {
+          claim: 'Gemini 4 Carbon输入价格为4美元',
+          articleId: 'art-recap',
+          quote: 'Carbon is $4/$20 per 1M tokens.',
+        },
+      ],
+    };
+
+    const blockedByNature = precheckPolishedItem({
+      item: recapItem,
+      articlesById: recapArticles,
+      limits: DEFAULT_LIMITS,
+      metaTextBlacklist: BLACKLIST,
+      eventNature: 'benchmark_or_recap',
+      now: new Date('2026-11-21T10:00:00.000Z'),
+    });
+    expect(blockedByNature.passed).toBe(false);
+    expect(blockedByNature.errors.some((e) => e.includes('第三方评测或盘点回顾'))).toBe(true);
+
+    const blockedByMissingSignal = precheckPolishedItem({
+      item: recapItem,
+      articlesById: recapArticles,
+      limits: DEFAULT_LIMITS,
+      metaTextBlacklist: BLACKLIST,
+      now: new Date('2026-11-21T10:00:00.000Z'),
+    });
+    expect(blockedByMissingSignal.passed).toBe(false);
+    expect(blockedByMissingSignal.errors.some((e) => e.includes('首发措辞'))).toBe(true);
+
+    const staleHighlightsWithLaunchWord = new Map([
+      [
+        'art-stale',
+        {
+          text: 'Here are some key highlights on the new Gemini 4 releases introducing Carbon ($4/1M tokens).',
+          publishedAt: '2026-11-19T20:28:54.000Z',
+        },
+      ],
+    ]);
+    const staleItem: PolishedItem = {
+      ...recapItem,
+      evidence: [
+        {
+          claim: 'Gemini 4 Carbon价格',
+          articleId: 'art-stale',
+          quote: 'introducing Carbon ($4/1M tokens).',
+        },
+      ],
+    };
+    const blockedByStaleAge = precheckPolishedItem({
+      item: staleItem,
+      articlesById: staleHighlightsWithLaunchWord,
+      limits: DEFAULT_LIMITS,
+      metaTextBlacklist: BLACKLIST,
+      now: new Date('2026-11-21T10:00:00.000Z'),
+    });
+    expect(blockedByStaleAge.passed).toBe(false);
+    expect(blockedByStaleAge.errors.some((e) => e.includes('30 小时'))).toBe(true);
+
+    const genuineLaunchArticles = new Map([
+      [
+        'art-launch',
+        {
+          text: 'Today we are launching Tool Retrieval and Reset everyone’s Gemini quota on Antigravity with 4% higher cache hit rates.',
+          publishedAt: '2026-11-21T09:00:00.000Z',
+        },
+      ],
+    ]);
+    const genuineLaunchItem: PolishedItem = {
+      ...makeValidPolishedItem(),
+      title: '谷歌刚上线按需工具检索并重置了Antigravity额度',
+      shortTitle: 'Antigravity额度重置',
+      progressLabel: '工具检索与额度重置',
+      summary: '谷歌官方刚上线按需工具检索并重置了额度，缓存命中率提高4%。',
+      detail: '官方团队正式重置用户额度并上线工具按需检索，缓存命中率提升4%。',
+      keyPoints: ['按需检索工具并减少输入消耗', '全面重置并提高缓存命中率'],
+      narration: ['谷歌刚刚上线按需工具检索，同时重置了Antigravity额度。', '缓存命中率提升了4%。'],
+      evidence: [
+        {
+          claim: '官方上线工具检索并重置额度，缓存命中率提升4%',
+          articleId: 'art-launch',
+          quote:
+            'Today we are launching Tool Retrieval and Reset everyone’s Gemini quota on Antigravity with 4% higher cache hit rates.',
+        },
+      ],
+    };
+    const genuineAllowed = precheckPolishedItem({
+      item: genuineLaunchItem,
+      articlesById: genuineLaunchArticles,
+      limits: DEFAULT_LIMITS,
+      metaTextBlacklist: BLACKLIST,
+      eventNature: 'price_or_policy_change',
+      now: new Date('2026-11-21T10:00:00.000Z'),
+    });
+    expect(genuineAllowed.errors).toEqual([]);
+    expect(genuineAllowed.passed).toBe(true);
   });
 });
