@@ -42,7 +42,19 @@ editorial:
   spotlightScoreThreshold: 9.2 # 达到该分值自动将当档早/晚报升级为大事件主推专场
   headlineNarrationMaxChars: 180 # 常规档头条口播总字数上限
   briefNarrationMaxChars: 95 # 次要短讯口播总字数上限
-  metaTextBlacklist: [ "已依据", "以下是", "根据您提供", "作为AI", "总结如下", "值得一提的是", "综上所述", "令人瞩目的是", "标志着行业", "```" ]
+  metaTextBlacklist:
+    [
+      "已依据",
+      "以下是",
+      "根据您提供",
+      "作为AI",
+      "总结如下",
+      "值得一提的是",
+      "综上所述",
+      "令人瞩目的是",
+      "标志着行业",
+      "```"
+    ]
 
 contentLimits:
   # 默认值取自当前模板，模板适配器可以覆盖
@@ -80,11 +92,46 @@ ai:
         }
     }
   stages:
-    select: { mode: pool, cli: agy, model: gemini-4-hydrogen-high, timeoutSec: 300, retries: 2 }
-    summarize: { mode: pool, cli: agy, model: gemini-4-hydrogen-high, timeoutSec: 240, retries: 2 }
-    polish: { mode: pool, cli: agy, model: gemini-4-hydrogen-high, timeoutSec: 180, retries: 2 }
-    factcheck: { mode: pool, cli: agy, model: gemini-4-hydrogen-high, timeoutSec: 300, retries: 2 }
-    package: { mode: pool, cli: agy, model: gemini-4-hydrogen-high, timeoutSec: 240, retries: 2 }
+    select:
+      {
+        mode: pool,
+        cli: agy,
+        model: gemini-4-hydrogen-high,
+        timeoutSec: 300,
+        retries: 2
+      }
+    summarize:
+      {
+        mode: pool,
+        cli: agy,
+        model: gemini-4-hydrogen-high,
+        timeoutSec: 240,
+        retries: 2
+      }
+    polish:
+      {
+        mode: pool,
+        cli: agy,
+        model: gemini-4-hydrogen-high,
+        timeoutSec: 180,
+        retries: 2
+      }
+    factcheck:
+      {
+        mode: pool,
+        cli: agy,
+        model: gemini-4-hydrogen-high,
+        timeoutSec: 300,
+        retries: 2
+      }
+    package:
+      {
+        mode: pool,
+        cli: agy,
+        model: gemini-4-hydrogen-high,
+        timeoutSec: 240,
+        retries: 2
+      }
   channels:
     - { cli: agy, model: gemini-4-hydrogen-high, retries: 2, enabled: true }
     - { cli: icomp, model: deepseek-v4.1-flash, retries: 2, enabled: true }
@@ -192,7 +239,7 @@ render:
     }
 
 publish:
-  mode: auto # manual-review | auto（auto 只在 qa 通过时自动发布）
+  mode: manual-review # manual-review | auto（auto 只在 qa 通过时自动发布）
   bilibili:
     cli: biliup
     cookieFile: ~/cookies.json # 直接复用在家目录执行 biliup login 生成的登录凭据
