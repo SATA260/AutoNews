@@ -102,6 +102,43 @@ describe('M4：四阵营跨阵营互怼与时间轴内嵌窗口', () => {
     });
     expect(selfRoastRes.passed).toBe(false);
     expect(selfRoastRes.errors.some((e) => e.includes('不能与当期主讲主播相同'))).toBe(true);
+
+    const englishHeavyRes = precheckIssuePackage({
+      pkg: makePackage([
+        {
+          itemId: 'item-1',
+          hostId: 'claude',
+          line: 'OpenAI把ChatGPT和Codex的API合一起，Token真够用吗？',
+        },
+      ]),
+      expectedItemIds: ['item-1'],
+      limits: LIMITS,
+      publishConfig: PUBLISH_CONFIG,
+      metaTextBlacklist: [],
+      compact: true,
+      hostSelfName: '聪明的大肥鱼',
+      activeHostId: 'deepseek',
+    });
+    expect(englishHeavyRes.passed).toBe(false);
+    expect(englishHeavyRes.errors.some((e) => e.includes('包含过多英文'))).toBe(true);
+
+    const shortEnglishOkRes = precheckIssuePackage({
+      pkg: makePackage([
+        {
+          itemId: 'item-1',
+          hostId: 'claude',
+          line: '这波GPT额度看着挺香，就是不知道高峰期稳不稳。',
+        },
+      ]),
+      expectedItemIds: ['item-1'],
+      limits: LIMITS,
+      publishConfig: PUBLISH_CONFIG,
+      metaTextBlacklist: [],
+      compact: true,
+      hostSelfName: '聪明的大肥鱼',
+      activeHostId: 'deepseek',
+    });
+    expect(shortEnglishOkRes.passed).toBe(true);
   });
 
   it('时间轴在原条目末尾内嵌嘉宾插嘴窗口，不增加额外翻页并在帧率量化后保持对齐', () => {

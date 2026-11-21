@@ -178,7 +178,7 @@ describe('editorial foundation: prompts, similarity, and deterministic prechecks
       coverSubtitleMax: '22',
     });
     expect(packagePrompt).toContain('重磅主流模型、顶尖突破或全局大事优先头条');
-    expect(packagePrompt).toContain('直给干货的钩子开场');
+    expect(packagePrompt).toContain('直给干货的一句话钩子开场');
     expect(packagePrompt).toContain('把“我是谁”放在结尾');
     expect(packagePrompt).toContain('AI圈大地震！上期示例标题');
     expect(packagePrompt).toContain('黑鸦爆款标题 Skill');
@@ -370,10 +370,7 @@ describe('editorial foundation: prompts, similarity, and deterministic prechecks
     const compactValidPkg: IssuePackage = {
       ...validPkg,
       intro: {
-        narration: [
-          '大家好，我是哈基米，欢迎收看今天的AI每日报。',
-          '屏幕上是今天的主要内容，接下来请看详细报道。',
-        ],
+        narration: ['新推理模型速度翻倍、OpenAI还合并了计费额度，咱们直接看细则。'],
         hostComment: '今天看点很集中。',
       },
       outro: {
@@ -398,6 +395,24 @@ describe('editorial foundation: prompts, similarity, and deterministic prechecks
     });
     expect(compactTitleOk.errors).toEqual([]);
     expect(compactTitleOk.passed).toBe(true);
+
+    const multiSentenceIntro = precheckIssuePackage({
+      pkg: {
+        ...compactValidPkg,
+        intro: {
+          ...compactValidPkg.intro,
+          narration: ['今天来看两条重磅消息。', '第一条是推理提速，第二条是额度调整。'],
+        },
+      },
+      expectedItemIds: ['item-1', 'item-2'],
+      limits: DEFAULT_LIMITS,
+      publishConfig,
+      metaTextBlacklist: BLACKLIST,
+      compact: true,
+      hostSelfName: '哈基米',
+    });
+    expect(multiSentenceIntro.passed).toBe(false);
+    expect(multiSentenceIntro.errors.some((e) => e.includes('严格 1 句'))).toBe(true);
 
     const badColumnTitle = precheckIssuePackage({
       pkg: {

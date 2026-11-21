@@ -637,6 +637,7 @@ function assertValidTimezone(timezone: string): void {
 export async function updateWorkflowSettingsAction(formData: FormData): Promise<ActionResult> {
   try {
     const rawTtsProvider = formData.get('ttsProvider');
+    const rawTtsGuestProvider = formData.get('ttsGuestProvider');
     const rawRenderTheme = formData.get('renderTheme');
     const rawRenderLive2dPack = formData.get('renderLive2dPack');
     const rawBgmVolumeDb = formData.get('bgmVolumeDb');
@@ -652,6 +653,7 @@ export async function updateWorkflowSettingsAction(formData: FormData): Promise<
         reservationHoldHours: z.number().int().positive(),
         maxRevisions: z.number().int().min(0).max(5),
         ttsProvider: z.string().trim().min(1).optional(),
+        ttsGuestProvider: z.string().trim().optional(),
         pauseAfterNarrate: z.boolean(),
         activeTemplate: z.string().trim().min(1),
         renderTheme: z.enum(['light', 'dark']).optional(),
@@ -684,6 +686,9 @@ export async function updateWorkflowSettingsAction(formData: FormData): Promise<
         maxRevisions: parseRequiredIntField(formData.get('maxRevisions'), '单条最大核查打回次数'),
         ...(typeof rawTtsProvider === 'string' && rawTtsProvider.trim()
           ? { ttsProvider: rawTtsProvider.trim() }
+          : {}),
+        ...(typeof rawTtsGuestProvider === 'string'
+          ? { ttsGuestProvider: rawTtsGuestProvider.trim() }
           : {}),
         pauseAfterNarrate: parseBooleanField(formData.get('pauseAfterNarrate')),
         activeTemplate: formData.get('activeTemplate'),
@@ -728,6 +733,13 @@ export async function updateWorkflowSettingsAction(formData: FormData): Promise<
     ) {
       throw new Error(`未配置语音合成引擎: ${parsed.ttsProvider}`);
     }
+    if (
+      parsed.ttsGuestProvider !== undefined &&
+      parsed.ttsGuestProvider !== '' &&
+      !Object.hasOwn(currentSettings.tts.providers, parsed.ttsGuestProvider)
+    ) {
+      throw new Error(`未配置嘉宾吐槽语音合成引擎: ${parsed.ttsGuestProvider}`);
+    }
     if (!Object.hasOwn(currentSettings.template.registry, parsed.activeTemplate)) {
       throw new Error(`未在模板注册表中配置模板: ${parsed.activeTemplate}`);
     }
@@ -751,6 +763,9 @@ export async function updateWorkflowSettingsAction(formData: FormData): Promise<
       },
       tts: {
         ...(parsed.ttsProvider !== undefined ? { provider: parsed.ttsProvider } : {}),
+        ...(parsed.ttsGuestProvider !== undefined
+          ? { guestProvider: parsed.ttsGuestProvider }
+          : {}),
         pauseAfterNarrate: parsed.pauseAfterNarrate,
       },
       template: {

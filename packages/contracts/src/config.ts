@@ -140,6 +140,8 @@ export const ModelApiConnectionInputSchema = z
 /** 语音合成调度配置（支持随时切换不同的合成引擎与后处理响度参数） */
 export const TtsSettingsSchema = z.object({
   provider: z.string().min(1),
+  /** 跨阵营嘉宾插嘴吐槽专用语音引擎（留空或未填时跟随主讲 provider） */
+  guestProvider: z.string().trim().optional(),
   providers: z.record(z.string(), z.record(z.string(), z.unknown())).default({}),
   /** 配音全部完成后是否先停下来，等人试听满意再合成视频。默认不停，直接继续做视频 */
   pauseAfterNarrate: z.boolean().default(false),

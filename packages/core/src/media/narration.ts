@@ -425,6 +425,7 @@ export async function runNarrateStage(opts: {
     const itemSectionKeyById = new Map(
       sections.filter((s) => s.itemId).map((s) => [s.itemId as string, s.key]),
     );
+    const guestProviderId = settings.tts.guestProvider?.trim() || settings.tts.provider;
     for (const reaction of guestReactions) {
       const baseKey = itemSectionKeyById.get(reaction.itemId);
       if (!baseKey) {
@@ -437,12 +438,13 @@ export async function runNarrateStage(opts: {
         itemId: reaction.itemId,
         sentences: [reaction.line],
         voiceHostId: reaction.hostId,
+        provider: guestProviderId,
       };
       const guestSettings = await settingsForNarrationProvidersForHost(
         ctx,
         reaction.hostId,
         settings,
-        [settings.tts.provider],
+        [guestProviderId],
       );
       const guestDigest = computeSectionDigest(guestSection, guestSettings);
       let guestAudio: SectionAudio | null = null;

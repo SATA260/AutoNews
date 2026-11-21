@@ -103,7 +103,8 @@ clis:
     bin: biliup
 
 tts:
-  provider: qwen-local # 默认使用项目内 IndexTTS2.5 本地语音克隆模型
+  provider: qwen-local # 默认主讲语音合成引擎
+  guestProvider: indextts # 跨阵营嘉宾插嘴吐槽专用 IndexTTS2.5，口语与情绪更自然
   providers:
     silent: { charsPerSecond: 4.5 }
     indextts:

@@ -1058,6 +1058,7 @@ export function WorkflowSettingsForm({ settings }: { settings: Settings }) {
     retry: settings.retry,
     editorial: settings.editorial,
     ttsProvider: settings.tts.provider,
+    ttsGuestProvider: settings.tts.guestProvider ?? '',
     pauseAfterNarrate: settings.tts.pauseAfterNarrate,
     activeTemplate: settings.template.active,
     renderTheme: settings.render.theme ?? 'dark',
@@ -1230,12 +1231,33 @@ export function WorkflowSettingsForm({ settings }: { settings: Settings }) {
           <div className="grid gap-4 md:grid-cols-3">
             <div>
               <label className="block text-xs font-medium text-slate-700">
-                语音合成引擎
+                主讲语音合成引擎
                 <select
                   name="ttsProvider"
                   defaultValue={settings.tts.provider}
                   className="mt-1 w-full rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-xs font-normal"
                 >
+                  {ttsProviders.map((name) => (
+                    <option key={name} value={name}>
+                      {name === 'indextts'
+                        ? 'indextts（本地 IndexTTS2.5）'
+                        : name === 'qwen-local'
+                          ? 'qwen-local（本地 Qwen3-TTS）'
+                          : name}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            </div>
+            <div>
+              <label className="block text-xs font-medium text-slate-700">
+                嘉宾插嘴吐槽语音引擎
+                <select
+                  name="ttsGuestProvider"
+                  defaultValue={settings.tts.guestProvider ?? ''}
+                  className="mt-1 w-full rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-xs font-normal"
+                >
+                  <option value="">跟随主讲语音引擎</option>
                   {ttsProviders.map((name) => (
                     <option key={name} value={name}>
                       {name === 'indextts'

@@ -974,8 +974,10 @@ export function precheckIssuePackage(opts: {
   if (opts.compact) {
     const introText = pkg.intro.narration.join('');
     const introTotal = charLength(introText);
-    if (pkg.intro.narration.length > 2 || introTotal > 65) {
-      errors.push('开场口播应直给头条重点（一到两句、总长不超过六十五字），不要冗长寒暄');
+    if (pkg.intro.narration.length !== 1 || introTotal > 48) {
+      errors.push(
+        '开场口播必须用一句话说清本期重点（严格 1 句、总长不超过四十八字），不要分成多句或冗长寒暄',
+      );
     }
     const outroText = pkg.outro.narration.join('');
     const outroTotal = pkg.outro.narration.reduce((sum, line) => sum + charLength(line), 0);
@@ -1057,6 +1059,13 @@ export function precheckIssuePackage(opts: {
         );
       }
       checkNarrationSentence(reaction.line, 0, 38, `嘉宾插嘴[${i + 1}]`, errors);
+      const guestAsciiWords = reaction.line.match(/[A-Za-z]{2,}/g) ?? [];
+      const guestAsciiLetters = (reaction.line.match(/[A-Za-z]/g) ?? []).length;
+      if (guestAsciiWords.length > 1 || guestAsciiLetters > 6) {
+        errors.push(
+          `嘉宾插嘴[${i + 1}]包含过多英文（${guestAsciiWords.join('、')}），请尽量全部改用自然中文口语表达（如用“接口”“算力”“大模型”等替代英文词）以便语音合成更自然`,
+        );
+      }
     }
   }
 
