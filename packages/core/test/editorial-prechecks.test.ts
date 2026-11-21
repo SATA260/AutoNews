@@ -982,7 +982,7 @@ describe('editorial foundation: prompts, similarity, and deterministic prechecks
       hostSelfName: '聪明的大肥鱼',
     });
     expect(badCandidate.passed).toBe(false);
-    expect(badCandidate.errors.some((e) => e.includes('titleCandidates[0]'))).toBe(true);
+    expect(badCandidate.errors.some((e) => e.includes('候选标题[1]'))).toBe(true);
 
     const itemWithUrlHint: PolishedItem = {
       ...makeValidPolishedItem(),
@@ -999,11 +999,21 @@ describe('editorial foundation: prompts, similarity, and deterministic prechecks
 
     const briefOverCap: PolishedItem = {
       ...makeValidPolishedItem(),
+      title: '新推理模型速度翻倍，每百万词元十五美元',
+      shortTitle: '新推理模型提速两倍',
+      progressLabel: '新推理模型提速',
+      highlight: '速度比前代快两倍，每百万词元十五美元',
+      keyPoints: ['速度比前代快两倍', '每百万词元定价十五美元'],
+      cards: [
+        { icon: 'zap', title: '推理提速', body: '编程与复杂问答速度比前代快两倍' },
+        { icon: 'banknote', title: '接口定价', body: '每百万词元接口定价控制到十五美元' },
+      ],
       actionHint: '搜 OpenAI Reasoning 体验',
       narration: [
         '官方正式推出全新推理模型，编码与复杂问答速度比前代快两倍。',
         '每百万词元接口定价控制到十五美元，目前已面向付费会员开放。',
         '这项更新专门面向日常高频开发与长程问答场景大幅降低响应延迟。',
+        '付费订阅会员登录后台即可直接切换体验这项全新推理能力。',
       ],
     };
     const briefRes = precheckPolishedItem({
@@ -1011,17 +1021,19 @@ describe('editorial foundation: prompts, similarity, and deterministic prechecks
       articlesById,
       limits: DEFAULT_LIMITS,
       metaTextBlacklist: BLACKLIST,
+      compact: true,
       isHeadline: false,
-      briefNarrationMaxChars: 75,
+      briefNarrationMaxChars: 95,
     });
     expect(briefRes.passed).toBe(false);
-    expect(briefRes.errors.some((e) => e.includes('次要短讯'))).toBe(true);
+    expect(briefRes.errors.some((e) => e.includes('总长四十到95字'))).toBe(true);
 
     const headlineRes = precheckPolishedItem({
       item: briefOverCap,
       articlesById,
       limits: DEFAULT_LIMITS,
       metaTextBlacklist: BLACKLIST,
+      compact: true,
       isHeadline: true,
       headlineNarrationMaxChars: 180,
     });

@@ -1224,6 +1224,8 @@ describe('Bilibili publishing, AI declaration, consumption, and uncertain recove
       await core.publish.approve(r1, { retryDelaysMs: [0] });
       expect(core.context.repos.runs.getById(r1)?.status).toBe('published');
 
+      core.context.db.prepare("DELETE FROM run_items WHERE id = 'item-1'").run();
+      core.context.db.prepare("DELETE FROM events WHERE id = 'ev-1'").run();
       core.context.db
         .prepare("UPDATE articles SET status = 'new', reserved_by_run = NULL WHERE id = 'art-used'")
         .run();
@@ -1232,6 +1234,8 @@ describe('Bilibili publishing, AI declaration, consumption, and uncertain recove
       await core.publish.approve(r2, { retryDelaysMs: [0] });
       expect(core.context.repos.runs.getById(r2)?.status).toBe('published');
 
+      core.context.db.prepare("DELETE FROM run_items WHERE id = 'item-1'").run();
+      core.context.db.prepare("DELETE FROM events WHERE id = 'ev-1'").run();
       core.context.db
         .prepare("UPDATE articles SET status = 'new', reserved_by_run = NULL WHERE id = 'art-used'")
         .run();
