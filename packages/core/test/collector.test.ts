@@ -52,6 +52,10 @@ async function setupWorkspaceWithSources(sources: SourceDef[]): Promise<string> 
     clis: {
       biliup: { adapter: 'generic', bin: 'fixture-disabled-biliup', extraArgs: [] },
     },
+    collector: {
+      captureGithubCards: false,
+      captureArticleSections: false,
+    },
     publish: {
       mode: 'manual-review',
       bilibili: { cookieFile: path.join(dir, 'test-bili-cookies.json') },
