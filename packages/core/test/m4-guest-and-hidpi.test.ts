@@ -143,7 +143,9 @@ describe('M4：四阵营跨阵营互怼与时间轴内嵌窗口', () => {
             key: 'guest-item-01',
             file: path.join(runDir, 'audio', 'guest-item-01.wav'),
             speechMs: 2200,
-            sentences: [{ text: '额度给得挺大方，高峰期别掉链子就行。', offsetMs: 0, durationMs: 2200 }],
+            sentences: [
+              { text: '额度给得挺大方，高峰期别掉链子就行。', offsetMs: 0, durationMs: 2200 },
+            ],
           },
         },
       ],
@@ -161,17 +163,16 @@ describe('M4：四阵营跨阵营互怼与时间轴内嵌窗口', () => {
 
     // 章节总数保持 3 页（不额外触发切页音效）
     expect(timeline.sections).toHaveLength(3);
-    const itemSec = timeline.sections[1]!;
-    expect(itemSec.guestWindow).toBeDefined();
-    expect(itemSec.guestWindow?.hostId).toBe('claude');
-    expect(itemSec.guestWindow?.offsetInSectionMs).toBe(1000 + 4000 + 260);
-    expect(itemSec.guestWindow?.durationMs).toBe(2200);
-    expect(itemSec.pageMs).toBe(1000 + 4000 + 260 + 2200 + 1000);
+    const itemSec = timeline.sections[1];
+    expect(itemSec?.guestWindow).toBeDefined();
+    expect(itemSec?.guestWindow?.hostId).toBe('claude');
+    expect(itemSec?.guestWindow?.offsetInSectionMs).toBe(1000 + 4000 + 260);
+    expect(itemSec?.guestWindow?.durationMs).toBe(2200);
+    expect(itemSec?.pageMs).toBe(1000 + 4000 + 260 + 2200 + 1000);
 
     const quantized = quantizeTimelineToFps(timeline, 30);
-    expect(quantized.audioTimeline.sections[1]?.guestWindow?.hostId).toBe('claude');
-    expect(quantized.audioTimeline.sections[1]?.guestWindow?.startMs).toBeGreaterThanOrEqual(
-      quantized.audioTimeline.sections[1]!.startMs,
-    );
+    const qItemSec = quantized.audioTimeline.sections[1];
+    expect(qItemSec?.guestWindow?.hostId).toBe('claude');
+    expect(qItemSec?.guestWindow?.startMs).toBeGreaterThanOrEqual(qItemSec?.startMs ?? 0);
   });
 });

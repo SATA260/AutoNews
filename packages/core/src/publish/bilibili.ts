@@ -239,8 +239,26 @@ function assertMediaReady(ctx: CoreContext, runId: string): void {
 /** 计算当前时刻在目标时区下对应自然日的起止 UTC ISO 时间边界 */
 function getLocalDayUtcBounds(now: Date, timezone: string): { startIso: string; endIso: string } {
   const tzNow = new TZDate(now.getTime(), timezone);
-  const start = new TZDate(tzNow.getFullYear(), tzNow.getMonth(), tzNow.getDate(), 0, 0, 0, 0, timezone);
-  const end = new TZDate(tzNow.getFullYear(), tzNow.getMonth(), tzNow.getDate() + 1, 0, 0, 0, 0, timezone);
+  const start = new TZDate(
+    tzNow.getFullYear(),
+    tzNow.getMonth(),
+    tzNow.getDate(),
+    0,
+    0,
+    0,
+    0,
+    timezone,
+  );
+  const end = new TZDate(
+    tzNow.getFullYear(),
+    tzNow.getMonth(),
+    tzNow.getDate() + 1,
+    0,
+    0,
+    0,
+    0,
+    timezone,
+  );
   return {
     startIso: new Date(start.getTime()).toISOString(),
     endIso: new Date(end.getTime()).toISOString(),

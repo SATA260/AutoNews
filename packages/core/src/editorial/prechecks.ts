@@ -1000,13 +1000,17 @@ export function precheckIssuePackage(opts: {
     const validateTitle = (rawTitle: string, label: string) => {
       const publishTitle = rawTitle.trim();
       if (/^(?:【?\s*)?(?:AI\s*(?:每日报|早报|晚报|日报)|今日\s*AI\s*资讯)/i.test(publishTitle)) {
-        errors.push(`${label}严禁以“AI每日报/AI早报”等死板栏目名开头，请直接切入本期最核心新闻看点`);
+        errors.push(
+          `${label}严禁以“AI每日报/AI早报”等死板栏目名开头，请直接切入本期最核心新闻看点`,
+        );
       }
       if (charLength(publishTitle) < 18) {
         errors.push(`${label}过于简短（须至少十八字并写入具体产品/模型名、关键数字或核心事件）`);
       }
       if (charLength(publishTitle) > publishConfig.titleMax) {
-        errors.push(`${label}超出平台字数上限（${charLength(publishTitle)} > ${publishConfig.titleMax} 字）`);
+        errors.push(
+          `${label}超出平台字数上限（${charLength(publishTitle)} > ${publishConfig.titleMax} 字）`,
+        );
       }
       if (/(?<=[\u4e00-\u9fff])_|_(?=[\u4e00-\u9fff])/.test(publishTitle)) {
         errors.push(`${label}请使用正常标点或空格，不要混入文件名下划线“_”`);

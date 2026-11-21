@@ -323,7 +323,9 @@ export async function captureArticleVisualMedia(opts: {
               kind: regionKind,
               imagePath: saved.relPath,
               sourceUrl: articleUrl,
-              captionHint: isReleaseUrl ? 'GitHub 官方 Release 更新日志截图' : 'GitHub 开源项目页截图',
+              captionHint: isReleaseUrl
+                ? 'GitHub 官方 Release 更新日志截图'
+                : 'GitHub 开源项目页截图',
               contextSnippet: extracted.excerpt.slice(0, 180),
               score: 93,
               width: shot.width,
@@ -333,9 +335,14 @@ export async function captureArticleVisualMedia(opts: {
         } else if (
           (collectorCfg.captureArticleSections ?? true) &&
           !mediaAssets.some((asset) =>
-            ['chart', 'table_shot', 'tweet_shot', 'tweet_media', 'github_card', 'changelog_shot'].includes(
-              asset.kind,
-            ),
+            [
+              'chart',
+              'table_shot',
+              'tweet_shot',
+              'tweet_media',
+              'github_card',
+              'changelog_shot',
+            ].includes(asset.kind),
           )
         ) {
           if (signal?.aborted) {

@@ -548,7 +548,9 @@ export async function buildRenderableIssue(opts: {
           line: guestWindow.line,
           ...(guestWindow.mood ? { mood: guestWindow.mood } : {}),
           startSec: Number((guestWindow.offsetInSectionMs / 1000).toFixed(3)),
-          endSec: Number(((guestWindow.offsetInSectionMs + guestWindow.durationMs) / 1000).toFixed(3)),
+          endSec: Number(
+            ((guestWindow.offsetInSectionMs + guestWindow.durationMs) / 1000).toFixed(3),
+          ),
           audioUrl: `/__run_assets__/${guestWindow.audioFile.replace(/^\/+/, '')}`,
         }
       : undefined;
