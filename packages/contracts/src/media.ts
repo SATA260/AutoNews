@@ -1,4 +1,6 @@
 import { z } from 'zod';
+import { MascotMoodSchema } from './editorial.js';
+import { HostMascotIdSchema } from './persona.js';
 
 /** 口播语音段落分类：开场导语、单条新闻正文或结束语 */
 export const NarrationSectionKindSchema = z.enum(['intro', 'item', 'outro']);
@@ -16,6 +18,8 @@ export const NarrationSectionSchema = z.object({
   displaySentences: z.array(z.string().min(1)).optional(),
   /** 这一段单独使用的语音引擎。不填时用全局当前引擎 */
   provider: z.string().min(1).optional(),
+  /** 这一段指定使用的角色音色 ID（用于跨阵营嘉宾插嘴，不填时使用当期主讲主播） */
+  voiceHostId: HostMascotIdSchema.optional(),
 });
 /** 语音合成段落输入类型 */
 export type NarrationSection = z.infer<typeof NarrationSectionSchema>;
@@ -91,6 +95,22 @@ export const TimelineSentenceSchema = z.object({
 /** 视频字幕时间点类型 */
 export type TimelineSentence = z.infer<typeof TimelineSentenceSchema>;
 
+/** 单条新闻末尾附带的跨阵营嘉宾插嘴音画窗口（不触发额外翻页） */
+export const GuestAudioWindowSchema = z.object({
+  hostId: HostMascotIdSchema,
+  hostName: z.string().min(1).optional(),
+  line: z.string().min(1),
+  mood: MascotMoodSchema.optional(),
+  audioFile: z.string().min(1),
+  /** 相对整部视频起点的毫秒位置 */
+  startMs: z.number().nonnegative(),
+  /** 相对本章节起点的毫秒位置 */
+  offsetInSectionMs: z.number().nonnegative(),
+  durationMs: z.number().positive(),
+});
+/** 跨阵营嘉宾插嘴音画窗口类型 */
+export type GuestAudioWindow = z.infer<typeof GuestAudioWindowSchema>;
+
 /** 整部视频中某一页画面对应的音画时间段 */
 export const TimelineSectionSchema = z.object({
   key: z.string().min(1),
@@ -103,6 +123,8 @@ export const TimelineSectionSchema = z.object({
   speechMs: z.number().nonnegative(),
   pageMs: z.number().positive(),
   sentences: z.array(TimelineSentenceSchema),
+  /** 可选的跨阵营嘉宾插嘴窗口（接在主讲口播之后发声，不单独翻页） */
+  guestWindow: GuestAudioWindowSchema.optional(),
 });
 /** 视频页时间轴段落类型 */
 export type TimelineSection = z.infer<typeof TimelineSectionSchema>;

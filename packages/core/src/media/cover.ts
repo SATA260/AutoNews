@@ -263,7 +263,7 @@ export async function renderCoverImage(opts: {
     });
     const page = await browser.newPage({
       viewport: { width: COVER_WIDTH, height: COVER_HEIGHT },
-      deviceScaleFactor: 1,
+      deviceScaleFactor: settings.render.deviceScaleFactor ?? 1,
     });
     await page.goto(`${server.baseUrl}/index.html?external=1`, {
       waitUntil: 'load',

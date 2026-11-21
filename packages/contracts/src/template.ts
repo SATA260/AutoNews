@@ -24,6 +24,17 @@ export type ContentLimits = z.infer<typeof ContentLimitsSchema>;
 /** 新闻重要程度标签，供前端模板展示不同视觉徽章 */
 export type ImpactLevel = 'breaking' | 'high' | 'normal';
 
+/** 传递给前端视频模板的单条新闻跨阵营嘉宾插嘴数据 */
+export interface RenderableGuestReaction {
+  hostId: HostMascotId;
+  hostName?: string;
+  line: string;
+  mood?: MascotMood;
+  startSec: number;
+  endSec: number;
+  audioUrl?: string;
+}
+
 /** 传递给前端视频模板的单条新闻渲染数据 */
 export interface RenderableNewsItem extends PolishedItem {
   id: string;
@@ -37,6 +48,8 @@ export interface RenderableNewsItem extends PolishedItem {
   companyLogoUrl?: string;
   impact: ImpactLevel;
   mascotMood?: MascotMood;
+  /** 可选的跨阵营嘉宾插嘴气泡与时间窗 */
+  guestReaction?: RenderableGuestReaction;
 }
 
 /** 传递给前端视频模板的整期结构化渲染数据 */

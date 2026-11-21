@@ -171,6 +171,7 @@ export async function runPackageStage(
       compact: settings.editorial.compactStyle,
       forbiddenTokens: persona?.forbiddenTokens,
       hostSelfName: persona?.selfName,
+      activeHostId: persona?.id,
     });
 
     if (check.passed) {

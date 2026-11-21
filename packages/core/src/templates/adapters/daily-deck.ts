@@ -550,6 +550,7 @@ export function createDailyDeckAdapter(): TemplateAdapter {
             publishedAt: formatShortDate(item.publishedAt),
             mascotId: mapEntityToMascotId(item.entity),
             mascotMood: item.mascotMood ?? 'neutral',
+            guestReaction: item.guestReaction ?? null,
             frameCount: itemFrameCount,
             durationSec,
             speechStartSec,

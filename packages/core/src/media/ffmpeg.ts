@@ -135,10 +135,11 @@ export async function buildMasterAudioWav(opts: {
   await fs.mkdir(workDir, { recursive: true });
 
   try {
-    // 1. 按各页起始毫秒位置（adelay）把所有分镜配音拼接成精确时长的纯净人声主轨
+    // 1. 按各页起始毫秒位置（adelay）把所有分镜配音及可选的跨阵营嘉宾插嘴拼接成精确时长的纯净人声主轨
     const inputArgs: string[] = [];
     const filterParts: string[] = [];
     const mixTags: string[] = [];
+    let inputIdx = 0;
 
     for (let i = 0; i < opts.timeline.sections.length; i++) {
       const sec = opts.timeline.sections[i];
@@ -157,6 +158,7 @@ export async function buildMasterAudioWav(opts: {
         await levelSpeechPhrasesWav(leveledCopy);
         sectionInputPath = leveledCopy;
       }
+      const mainIdx = inputIdx++;
       inputArgs.push('-i', sectionInputPath);
 
       // 切页后若配置了等待静默时长，把整段口播往后推迟对应的毫秒数
@@ -170,9 +172,32 @@ export async function buildMasterAudioWav(opts: {
           ? `${cleanupPrefix}${VOICE_DYNAMICS_FILTER},loudnorm=I=${opts.loudnessLUFS}:TP=-1.5:LRA=8,`
           : '';
       filterParts.push(
-        `[${i}:a]${levelingPrefix}${buildHighQualityResampleFilter(opts.sampleRate)},aformat=sample_fmts=s16:channel_layouts=stereo${delayFilter}[s${i}]`,
+        `[${mainIdx}:a]${levelingPrefix}${buildHighQualityResampleFilter(opts.sampleRate)},aformat=sample_fmts=s16:channel_layouts=stereo${delayFilter}[s${mainIdx}]`,
       );
-      mixTags.push(`[s${i}]`);
+      mixTags.push(`[s${mainIdx}]`);
+
+      if (sec.guestWindow?.audioFile) {
+        const absGuestAudio = await assertConfinedMediaPath(
+          opts.runDir,
+          sec.guestWindow.audioFile,
+          `嘉宾插嘴音频文件 ${sec.key}`,
+        );
+        let guestInputPath = absGuestAudio;
+        if (opts.levelVoice && !opts.isSilentProvider) {
+          const leveledGuest = path.join(workDir, `leveled-guest-${i}.wav`);
+          await fs.copyFile(absGuestAudio, leveledGuest);
+          await levelSpeechPhrasesWav(leveledGuest);
+          guestInputPath = leveledGuest;
+        }
+        const guestIdx = inputIdx++;
+        inputArgs.push('-i', guestInputPath);
+        const guestDelayMs = Math.max(0, Math.round(sec.guestWindow.startMs));
+        const guestDelayFilter = guestDelayMs > 0 ? `,adelay=${guestDelayMs}|${guestDelayMs}` : '';
+        filterParts.push(
+          `[${guestIdx}:a]${levelingPrefix}${buildHighQualityResampleFilter(opts.sampleRate)},aformat=sample_fmts=s16:channel_layouts=stereo${guestDelayFilter}[s${guestIdx}]`,
+        );
+        mixTags.push(`[s${guestIdx}]`);
+      }
     }
 
     if (mixTags.length === 0) {

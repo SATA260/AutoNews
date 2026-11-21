@@ -567,4 +567,46 @@ describe('Layer 2-5: Editorial Deck, Segmented Chapter Bar, Virtual Clock & Erro
     expect(hintEl).toHaveTextContent('实操检索');
     expect(hintEl).toHaveTextContent('GitHub 搜索 llama.cpp');
   });
+
+  it('renders rival-host guestReaction speech bubble synced to playback time window', async () => {
+    render(
+      <NewsDeck
+        initialData={{
+          fps: 30,
+          coverDurationSec: 4,
+          outroDurationSec: 4,
+          items: [
+            {
+              title: '大厂合并订阅并翻倍额度',
+              summary: '免费额度翻倍但高峰期限流规则收紧。',
+              durationSec: 10,
+              speechDurationSec: 5,
+              guestReaction: {
+                hostId: 'claude',
+                hostName: '小克',
+                line: '额度给得挺大方，高峰期别掉链子就行。',
+                startSec: 5.5,
+                endSec: 8.5,
+              },
+            },
+          ],
+        }}
+      />,
+    );
+
+    // 播放到主讲前半段（第 1 条新闻本地 2s，全局 6s），嘉宾气泡尚未出现
+    await act(async () => {
+      await window.__NEWS_DECK__!.seekTo(6000, 1000 / 30);
+    });
+    expect(screen.queryByTestId('guest-reaction-bubble')).toBeNull();
+
+    // 播放到嘉宾插嘴窗口内（第 1 条新闻本地 6.5s，全局 10.5s），气泡滑入显示
+    await act(async () => {
+      await window.__NEWS_DECK__!.seekTo(10500, 1000 / 30);
+    });
+    const bubble = screen.getByTestId('guest-reaction-bubble');
+    expect(bubble).toHaveAttribute('data-guest-host', 'claude');
+    expect(bubble).toHaveTextContent('小克 插嘴');
+    expect(bubble).toHaveTextContent('额度给得挺大方，高峰期别掉链子就行。');
+  });
 });

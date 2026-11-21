@@ -272,6 +272,8 @@ const SettingsFieldsSchema = z.object({
     theme: RenderThemeSchema.optional(),
     /** 看板娘 Live2D 模型套组（fullbody 全身动作版 / expression 仅表情版），未配置时默认使用全身动作版 */
     live2dPack: Live2dPackSchema.optional(),
+    /** 浏览器渲染与截图设备像素倍率（1 为默认，1.5 或 2 启用 2K/4K 超清矢量文字与截图渲染） */
+    deviceScaleFactor: z.union([z.literal(1), z.literal(1.5), z.literal(2)]).optional(),
     width: z.number().int().positive(),
     height: z.number().int().positive(),
     fps: z.number().int().positive(),

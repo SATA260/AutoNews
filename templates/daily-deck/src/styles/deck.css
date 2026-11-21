@@ -2214,3 +2214,67 @@ button {
   overflow: hidden;
   text-overflow: ellipsis;
 }
+
+/* 跨阵营嘉宾插嘴气泡（左下角悬浮，与右下角主讲看板娘形成隔空互怼） */
+.guest-reaction-bubble {
+  --guest-accent: #7353bc;
+  position: absolute;
+  left: 8px;
+  bottom: 12px;
+  z-index: 16;
+  max-width: 720px;
+  display: inline-flex;
+  align-items: center;
+  gap: 14px;
+  padding: 12px 22px 12px 14px;
+  border-radius: 20px;
+  background: color-mix(in srgb, var(--plate) 96%, var(--guest-accent) 4%);
+  border: 2px solid var(--guest-accent);
+  box-shadow: 0 12px 30px rgba(0, 0, 0, 0.24);
+}
+
+.guest-reaction-bubble[data-guest-host="deepseek"] {
+  --guest-accent: #167cb8;
+}
+.guest-reaction-bubble[data-guest-host="gpt"] {
+  --guest-accent: #16836b;
+}
+.guest-reaction-bubble[data-guest-host="gemini"] {
+  --guest-accent: #7353bc;
+}
+.guest-reaction-bubble[data-guest-host="claude"] {
+  --guest-accent: #b36b2d;
+}
+
+.guest-reaction-avatar {
+  width: 58px;
+  height: 58px;
+  border-radius: 50%;
+  object-fit: cover;
+  object-position: top center;
+  background: var(--tint);
+  border: 2px solid var(--guest-accent);
+  flex-shrink: 0;
+}
+
+.guest-reaction-body {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.guest-reaction-name {
+  font-size: 15px;
+  font-weight: 800;
+  color: var(--guest-accent);
+  letter-spacing: 0.03em;
+}
+
+.guest-reaction-line {
+  margin: 0;
+  font-size: 22px;
+  font-weight: 700;
+  line-height: 1.35;
+  color: var(--ink);
+}

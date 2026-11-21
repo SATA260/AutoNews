@@ -95,6 +95,15 @@ export interface NewsItemInput {
   audioUrl?: string | null;
   lipSyncFrames?: number[];
   subtitles?: SubtitleCueInput[];
+  guestReaction?: {
+    hostId?: PresetMascotId | string;
+    hostName?: string | null;
+    line: string;
+    mood?: MascotMood | string;
+    startSec?: number;
+    endSec?: number;
+    audioUrl?: string | null;
+  } | null;
 }
 
 /** 外部传入的整期日报原始输入结构 */
@@ -170,6 +179,15 @@ export interface SanitizedNewsItem {
   audioUrl: string | null;
   lipSyncFrames: number[];
   subtitles: SanitizedSubtitleCue[];
+  guestReaction: {
+    hostId: PresetMascotId;
+    hostName: string;
+    line: string;
+    mood: MascotMood;
+    startSec: number;
+    endSec: number;
+    audioUrl: string | null;
+  } | null;
 }
 
 /** 经安全清洗与上限裁剪后的整期日报渲染数据 */
@@ -259,6 +277,7 @@ export const HARD_LIMITS = {
   maxLipSyncFrames: 12000,
   subtitleText: 80,
   subtitlesMaxCount: 24,
+  guestLine: 38,
 } as const;
 
 const PRESET_MASCOTS: readonly PresetMascotId[] = [
@@ -909,6 +928,62 @@ function sanitizeSingleNewsItem(
   const lipSyncFrames = sanitizeLipSyncArray(obj.lipSyncFrames);
   const subtitles = sanitizeSubtitleArray(obj.subtitles, durationSec);
 
+  let guestReaction: SanitizedNewsItem['guestReaction'] = null;
+  const guestRec = LooseRecordSchema.safeParse(obj.guestReaction);
+  if (guestRec.success) {
+    const rawLine = normalizeText(guestRec.data.line)
+      .replace(/https?:\/\/\S+/gi, '')
+      .trim();
+    if (rawLine) {
+      const gHostId = sanitizeMascotId(
+        guestRec.data.hostId,
+        'claude',
+        `${basePath}.guestReaction.hostId`,
+        warnings,
+      );
+      const rawName = normalizeText(guestRec.data.hostName);
+      const gHostName = rawName
+        ? cleanAndTruncate(
+            rawName,
+            HARD_LIMITS.hostDisplayName,
+            MASCOT_DEFAULT_NAMES[gHostId],
+            `${basePath}.guestReaction.hostName`,
+            warnings,
+          )
+        : MASCOT_DEFAULT_NAMES[gHostId];
+      const gLine = cleanAndTruncate(
+        rawLine,
+        HARD_LIMITS.guestLine,
+        '',
+        `${basePath}.guestReaction.line`,
+        warnings,
+      );
+      const rawStart = Number(guestRec.data.startSec);
+      const rawEnd = Number(guestRec.data.endSec);
+      const gStartSec = Number.isFinite(rawStart)
+        ? Math.max(0, Math.min(durationSec, Math.round(rawStart * 1000) / 1000))
+        : Math.max(0, Math.min(durationSec, speechStartSec + speechDurationSec));
+      const gEndSec = Number.isFinite(rawEnd)
+        ? Math.max(gStartSec, Math.min(durationSec, Math.round(rawEnd * 1000) / 1000))
+        : durationSec;
+      if (gLine) {
+        guestReaction = {
+          hostId: gHostId,
+          hostName: gHostName,
+          line: gLine,
+          mood: sanitizeMascotMood(guestRec.data.mood),
+          startSec: gStartSec,
+          endSec: gEndSec,
+          audioUrl: sanitizeAudioUrl(
+            guestRec.data.audioUrl,
+            `${basePath}.guestReaction.audioUrl`,
+            warnings,
+          ),
+        };
+      }
+    }
+  }
+
   const id = normalizeText(obj.id) || `news-${indexLabel}`;
 
   return {
@@ -943,6 +1018,7 @@ function sanitizeSingleNewsItem(
     audioUrl,
     lipSyncFrames,
     subtitles,
+    guestReaction,
   };
 }
 

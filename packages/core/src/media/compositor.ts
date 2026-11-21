@@ -540,6 +540,19 @@ export async function buildRenderableIssue(opts: {
       catalog: logoCatalog,
     });
 
+    const guestWindow = timeline?.sections.find((sec) => sec.itemId === item.id)?.guestWindow;
+    const guestReaction = guestWindow
+      ? {
+          hostId: guestWindow.hostId,
+          ...(guestWindow.hostName ? { hostName: guestWindow.hostName } : {}),
+          line: guestWindow.line,
+          ...(guestWindow.mood ? { mood: guestWindow.mood } : {}),
+          startSec: Number((guestWindow.offsetInSectionMs / 1000).toFixed(3)),
+          endSec: Number(((guestWindow.offsetInSectionMs + guestWindow.durationMs) / 1000).toFixed(3)),
+          audioUrl: `/__run_assets__/${guestWindow.audioFile.replace(/^\/+/, '')}`,
+        }
+      : undefined;
+
     renderItems.push({
       ...item.finalJson,
       ...(item.imageMode === 'custom' && item.customImageCaption
@@ -554,6 +567,7 @@ export async function buildRenderableIssue(opts: {
       ...(companyIdentity.logoUrl ? { companyLogoUrl: companyIdentity.logoUrl } : {}),
       impact: mapScoreToImpact(ev?.score ?? 5),
       mascotMood,
+      ...(guestReaction ? { guestReaction } : {}),
     });
   }
 
@@ -851,6 +865,7 @@ export async function runRenderStage(opts: {
             adapter: adapter.id,
             theme: resolveRenderTheme(settings.render),
             assetFingerprint,
+            deviceScaleFactor: settings.render.deviceScaleFactor ?? 1,
             width: settings.render.width,
             height: settings.render.height,
             fps: settings.render.fps,
@@ -1003,7 +1018,7 @@ export async function runRenderStage(opts: {
         });
         const browserCtx = await browser.newContext({
           viewport: { width: settings.render.width, height: settings.render.height },
-          deviceScaleFactor: 1,
+          deviceScaleFactor: settings.render.deviceScaleFactor ?? 1,
         });
         const page = await browserCtx.newPage();
         await page.setViewportSize({
@@ -1095,6 +1110,7 @@ export async function runRenderStage(opts: {
           template: resolvedTemplate.name,
           adapter: adapter.id,
           theme: resolveRenderTheme(settings.render),
+          deviceScaleFactor: settings.render.deviceScaleFactor ?? 1,
           width: settings.render.width,
           height: settings.render.height,
           templateData,
@@ -1172,7 +1188,7 @@ export async function runRenderStage(opts: {
         });
         const browserCtx = await browser.newContext({
           viewport: { width: settings.render.width, height: settings.render.height },
-          deviceScaleFactor: 1,
+          deviceScaleFactor: settings.render.deviceScaleFactor ?? 1,
         });
         const page = await browserCtx.newPage();
         await page.setViewportSize({

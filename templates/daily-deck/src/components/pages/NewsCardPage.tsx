@@ -386,6 +386,30 @@ export const NewsCardPage: React.FC<NewsCardPageProps> = ({
           />
         </section>
       )}
+
+      {item.guestReaction &&
+        (revealLocalMs === null ||
+          (revealLocalMs >= item.guestReaction.startSec * 1000 - 120 &&
+            revealLocalMs <= item.guestReaction.endSec * 1000 + 400)) && (
+          <aside
+            className="guest-reaction-bubble"
+            data-testid="guest-reaction-bubble"
+            data-guest-host={item.guestReaction.hostId}
+            aria-label="跨阵营嘉宾插嘴"
+          >
+            {item.guestReaction.hostId !== 'none' && (
+              <img
+                className="guest-reaction-avatar"
+                src={`/mascots/${item.guestReaction.hostId}.png`}
+                alt={item.guestReaction.hostName}
+              />
+            )}
+            <div className="guest-reaction-body">
+              <span className="guest-reaction-name">{item.guestReaction.hostName} 插嘴</span>
+              <p className="guest-reaction-line">{item.guestReaction.line}</p>
+            </div>
+          </aside>
+        )}
     </div>
   );
 };

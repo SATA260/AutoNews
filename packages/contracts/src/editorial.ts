@@ -147,6 +147,16 @@ export const IssueModeSchema = z.enum(['digest', 'spotlight']);
 /** 档期模式类型 */
 export type IssueMode = z.infer<typeof IssueModeSchema>;
 
+/** 跨阵营嘉宾插嘴吐槽（由非当期主播的另一阵营角色用独立音色插入 1 句短评） */
+export const GuestReactionSchema = z.object({
+  itemId: z.string().min(1),
+  hostId: HostMascotIdSchema,
+  line: z.string().min(4).max(38),
+  mood: MascotMoodSchema.optional(),
+});
+/** 跨阵营嘉宾插嘴吐槽类型 */
+export type GuestReaction = z.infer<typeof GuestReactionSchema>;
+
 /** 按指定核心要点数量上限构建单条新闻润色定稿校验规则 */
 export function createPolishedItemSchema(keyPointsMax = 3) {
   return z.object({
@@ -257,6 +267,8 @@ export const IssuePackageSchema = z.object({
   cover: CoverTextSchema.optional(),
   /** 本期档期模式（常规早晚报或大事件主推专场） */
   issueMode: IssueModeSchema.optional(),
+  /** 跨阵营嘉宾插嘴吐槽列表（每期最多 2 条，均由非当期主播的另一阵营角色发声） */
+  guestReactions: z.array(GuestReactionSchema).max(2).optional(),
 });
 /** 整期节目编排结果类型 */
 export type IssuePackage = z.infer<typeof IssuePackageSchema>;

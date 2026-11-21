@@ -175,6 +175,7 @@ template:
 render:
   theme: dark # 视频模板外观主题：dark（深色模式）| light（浅色模式）
   live2dPack: fullbody # 看板娘 Live2D 模型套组：fullbody（全身动作版）| expression（仅表情版）
+  deviceScaleFactor: 2 # 超清渲染像素倍率：1 | 1.5 | 2（2x 超采样显著提升小字与截图清晰度）
   width: 1920
   height: 1080
   fps: 30

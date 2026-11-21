@@ -26,12 +26,17 @@ import {
 } from '@aidaily/tts';
 import { z } from 'zod';
 import type { CoreContext } from '../context.js';
+import { loadPersonas } from '../editorial/personas.js';
 import { PackageCheckpointSchema } from '../editorial/s6-package.js';
 import { PipelineError } from '../errors.js';
 import { inTransaction } from '../storage/db.js';
 import { readJsonOrNull, readJsonOrNullWithSchema, writeJsonAtomic } from '../storage/files.js';
 import { emitRunEvent } from '../workflow/events.js';
-import { buildTimeline, resolvePageTurnPostDelayMs } from './timeline.js';
+import {
+  buildTimeline,
+  type GuestAudioTimelineInput,
+  resolvePageTurnPostDelayMs,
+} from './timeline.js';
 
 /** 语音合成阶段完成后写入检查点的结果摘要 */
 export interface NarrateCheckpoint {
@@ -59,6 +64,7 @@ function computeSectionDigest(section: NarrationSection, settings: Settings): st
   const denoise = settings.tts.postprocess.denoise ?? true;
   const payload = JSON.stringify({
     key: section.key,
+    voiceHostId: section.voiceHostId ?? null,
     paragraph: buildNarrationParagraph(section.sentences),
     synthesisMode: 'whole-paragraph',
     subtitleTimingVersion: 2,
@@ -188,17 +194,13 @@ async function readNarrationOverrides(runDir: string): Promise<NarrationOverride
   return parsed.data;
 }
 
-/** 把本期主播和音色摘要写进即将使用的每个语音引擎配置，保证换引擎后仍用同一个主播 */
-async function settingsForNarrationProviders(
+/** 按指定主播 ID 生成附带音色摘要的语音合成配置（同时服务主讲主播与跨阵营插嘴嘉宾） */
+async function settingsForNarrationProvidersForHost(
   ctx: CoreContext,
-  runId: string,
+  hostId: string | null,
   settings: Settings,
   providerIds: readonly string[],
 ): Promise<Settings> {
-  const row = ctx.db.prepare('SELECT host_id FROM runs WHERE id = ?').get(runId) as
-    | { host_id: string | null }
-    | undefined;
-  const hostId = row?.host_id ?? null;
   const providers = { ...settings.tts.providers };
   for (const providerId of new Set(providerIds)) {
     if (isLocalVoiceCloneProvider(providerId) && !hostId) {
@@ -221,6 +223,19 @@ async function settingsForNarrationProviders(
       providers,
     },
   };
+}
+
+/** 把本期主播和音色摘要写进即将使用的每个语音引擎配置，保证换引擎后仍用同一个主播 */
+async function settingsForNarrationProviders(
+  ctx: CoreContext,
+  runId: string,
+  settings: Settings,
+  providerIds: readonly string[],
+): Promise<Settings> {
+  const row = ctx.db.prepare('SELECT host_id FROM runs WHERE id = ?').get(runId) as
+    | { host_id: string | null }
+    | undefined;
+  return settingsForNarrationProvidersForHost(ctx, row?.host_id ?? null, settings, providerIds);
 }
 
 /** 读取磁盘最新全局配置，供只读列表与试听视图展示（不在读取请求中写入数据库快照） */
@@ -402,6 +417,76 @@ export async function runNarrateStage(opts: {
     orderedAudio.push(audio);
   }
 
+  const guestAudiosByItemId = new Map<string, GuestAudioTimelineInput>();
+  const guestReactions = packageData.guestReactions ?? [];
+  if (guestReactions.length > 0) {
+    const personas = await loadPersonas(ctx).catch(() => []);
+    const personaNameById = new Map(personas.map((p) => [p.id, p.displayName]));
+    const itemSectionKeyById = new Map(
+      sections.filter((s) => s.itemId).map((s) => [s.itemId as string, s.key]),
+    );
+    for (const reaction of guestReactions) {
+      const baseKey = itemSectionKeyById.get(reaction.itemId);
+      if (!baseKey) {
+        continue;
+      }
+      const guestKey = `guest-${baseKey}`;
+      const guestSection: NarrationSection = {
+        key: guestKey,
+        kind: 'item',
+        itemId: reaction.itemId,
+        sentences: [reaction.line],
+        voiceHostId: reaction.hostId,
+      };
+      const guestSettings = await settingsForNarrationProvidersForHost(
+        ctx,
+        reaction.hostId,
+        settings,
+        [settings.tts.provider],
+      );
+      const guestDigest = computeSectionDigest(guestSection, guestSettings);
+      let guestAudio: SectionAudio | null = null;
+      const prevGuest = savedProgress[guestKey];
+      if (prevGuest && prevGuest.hash === guestDigest && prevGuest.audio.file) {
+        const resolvedGuestFile = path.resolve(prevGuest.audio.file);
+        if (resolvedGuestFile.startsWith(`${resolvedAudioDir}${path.sep}`)) {
+          try {
+            await fs.access(resolvedGuestFile);
+            const probedMs = await probeAudioDurationMs(resolvedGuestFile, undefined, signal);
+            if (Math.abs(probedMs - prevGuest.audio.speechMs) <= 40) {
+              guestAudio = { ...prevGuest.audio, file: resolvedGuestFile };
+            }
+          } catch {
+            guestAudio = null;
+          }
+        }
+      }
+      if (!guestAudio) {
+        await fs
+          .rm(path.join(resolvedAudioDir, `${guestKey}.wav`), { force: true })
+          .catch(() => undefined);
+        const [synthesized] = await ctx.tts.synthesizeSections([guestSection], audioDir, {
+          signal,
+          settingsOverride: guestSettings.tts,
+        });
+        if (synthesized) {
+          guestAudio = synthesized;
+          savedProgress[guestKey] = { hash: guestDigest, audio: synthesized };
+          progressDirty = true;
+        }
+      }
+      if (guestAudio) {
+        guestAudiosByItemId.set(reaction.itemId, {
+          hostId: reaction.hostId,
+          hostName: personaNameById.get(reaction.hostId),
+          line: reaction.line,
+          mood: reaction.mood,
+          audio: guestAudio,
+        });
+      }
+    }
+  }
+
   if (progressDirty) {
     await writeJsonAtomic(progressFile, savedProgress);
   }
@@ -413,6 +498,7 @@ export async function runNarrateStage(opts: {
     pagePaddingSec: settings.render.pagePaddingSec,
     sectionGapMs: settings.tts.postprocess.sectionGapMs,
     sectionLeadSilenceMs: resolvePageTurnPostDelayMs(settings.render.pageTurnSfx),
+    ...(guestAudiosByItemId.size > 0 ? { guestAudiosByItemId } : {}),
   });
 
   await writeJsonAtomic(timelineFile, timeline);

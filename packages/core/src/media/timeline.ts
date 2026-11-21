@@ -1,11 +1,26 @@
 import path from 'node:path';
 import {
+  type GuestAudioWindow,
+  type HostMascotId,
+  type MascotMood,
   type NarrationSection,
   type SectionAudio,
   type Timeline,
   TimelineSchema,
   type TimelineSection,
 } from '@aidaily/contracts';
+
+/** 供时间轴拼接的单条新闻跨阵营嘉宾插嘴音频信息 */
+export interface GuestAudioTimelineInput {
+  hostId: HostMascotId;
+  hostName?: string;
+  line: string;
+  mood?: MascotMood;
+  audio: SectionAudio;
+}
+
+/** 主讲口播结束到跨阵营嘉宾插嘴开口之间的自然呼吸停顿（毫秒） */
+const GUEST_REACTION_GAP_MS = 260;
 
 /** 启用切页音效后，切页到下一段口播开始前的默认等待时长（毫秒） */
 export const DEFAULT_PAGE_TURN_POST_DELAY_MS = 1000;
@@ -54,9 +69,18 @@ export function buildTimeline(opts: {
   sectionGapMs: number;
   /** 除第一页外，每页画面切入后等待多少毫秒再开始下一段口播（用于让切页音效清晰落位） */
   sectionLeadSilenceMs?: number;
+  /** 可选的跨阵营嘉宾插嘴音频映射（key 为 itemId） */
+  guestAudiosByItemId?: ReadonlyMap<string, GuestAudioTimelineInput>;
 }): Timeline {
-  const { sections, audioSections, runDir, pagePaddingSec, sectionGapMs, sectionLeadSilenceMs } =
-    opts;
+  const {
+    sections,
+    audioSections,
+    runDir,
+    pagePaddingSec,
+    sectionGapMs,
+    sectionLeadSilenceMs,
+    guestAudiosByItemId,
+  } = opts;
   const audioByKey = new Map(audioSections.map((a) => [a.key, a]));
   const paddingMs = Math.max(0, Math.round(pagePaddingSec * 1000));
   const leadSilenceMs =
@@ -80,14 +104,32 @@ export function buildTimeline(opts: {
     const isLast = i === sections.length - 1;
     const speechOffsetMs = i === 0 ? 0 : leadSilenceMs;
     const trailingGapMs = isLast ? 0 : Math.max(0, sectionGapMs);
-    const pageMs = Math.max(
-      1,
-      speechOffsetMs + Math.round(audio.speechMs) + paddingMs + trailingGapMs,
-    );
+    const mainSpeechMs = Math.round(audio.speechMs);
+    const guestEntry = section.itemId ? guestAudiosByItemId?.get(section.itemId) : undefined;
+    const guestDurationMs = guestEntry ? Math.max(1, Math.round(guestEntry.audio.speechMs)) : 0;
+    const guestOffsetInSectionMs = guestEntry
+      ? speechOffsetMs + mainSpeechMs + GUEST_REACTION_GAP_MS
+      : 0;
+    const totalSpokenSpanMs = guestEntry
+      ? guestOffsetInSectionMs + guestDurationMs
+      : speechOffsetMs + mainSpeechMs;
+    const pageMs = Math.max(1, totalSpokenSpanMs + paddingMs + trailingGapMs);
     const startMs = cursorMs;
     cursorMs += pageMs;
 
     const relAudioFile = path.relative(runDir, audio.file);
+    const guestWindow: GuestAudioWindow | undefined = guestEntry
+      ? {
+          hostId: guestEntry.hostId,
+          ...(guestEntry.hostName ? { hostName: guestEntry.hostName } : {}),
+          line: guestEntry.line,
+          ...(guestEntry.mood ? { mood: guestEntry.mood } : {}),
+          audioFile: path.relative(runDir, guestEntry.audio.file),
+          startMs: startMs + guestOffsetInSectionMs,
+          offsetInSectionMs: guestOffsetInSectionMs,
+          durationMs: guestDurationMs,
+        }
+      : undefined;
     timelineSections.push({
       key: section.key,
       kind: section.kind,
@@ -95,13 +137,14 @@ export function buildTimeline(opts: {
       audioFile: relAudioFile,
       startMs,
       ...(speechOffsetMs > 0 ? { speechOffsetMs } : {}),
-      speechMs: Math.round(audio.speechMs),
+      speechMs: mainSpeechMs,
       pageMs,
       sentences: audio.sentences.map((s) => ({
         text: s.text,
         startMs: startMs + speechOffsetMs + Math.round(s.offsetMs),
         durationMs: Math.round(s.durationMs),
       })),
+      ...(guestWindow ? { guestWindow } : {}),
     });
   }
 
@@ -219,6 +262,14 @@ export function quantizeTimelineToFps(timeline: Timeline, fps: number): Quantize
         ...s,
         startMs: Math.max(audioStartMs + clampedSpeechOffsetMs, s.startMs + shiftMs),
       })),
+      ...(orig.guestWindow
+        ? {
+            guestWindow: {
+              ...orig.guestWindow,
+              startMs: Math.max(audioStartMs, orig.guestWindow.startMs + shiftMs),
+            },
+          }
+        : {}),
     });
   }
 

@@ -1,6 +1,7 @@
 import type {
   ContentLimits,
   Evidence,
+  HostMascotId,
   IssueMode,
   IssuePackage,
   PolishedItem,
@@ -892,6 +893,7 @@ export function precheckIssuePackage(opts: {
   compact?: boolean;
   forbiddenTokens?: readonly string[];
   hostSelfName?: string;
+  activeHostId?: HostMascotId;
 }): PrecheckResult {
   const errors: string[] = [];
   const warnings: string[] = [];
@@ -1026,6 +1028,32 @@ export function precheckIssuePackage(opts: {
     )
   ) {
     errors.push('视频简介导览（publish.descriptionIntro）中不要包含信息来源、参考链接或 URL');
+  }
+
+  if (pkg.guestReactions && pkg.guestReactions.length > 0) {
+    if (pkg.guestReactions.length > 2) {
+      errors.push('跨阵营嘉宾插嘴 guestReactions 每期最多 2 条');
+    }
+    const seenGuestItems = new Set<string>();
+    for (let i = 0; i < pkg.guestReactions.length; i++) {
+      const reaction = pkg.guestReactions[i];
+      if (!reaction) {
+        continue;
+      }
+      if (!expectedSet.has(reaction.itemId)) {
+        errors.push(`guestReactions[${i}] 引用了不在本期列表中的新闻条目: ${reaction.itemId}`);
+      }
+      if (seenGuestItems.has(reaction.itemId)) {
+        errors.push(`guestReactions[${i}] 重复为同一条新闻设置了插嘴吐槽: ${reaction.itemId}`);
+      }
+      seenGuestItems.add(reaction.itemId);
+      if (opts.activeHostId && reaction.hostId === opts.activeHostId) {
+        errors.push(
+          `guestReactions[${i}] 的吐槽角色（${reaction.hostId}）不能与当期主讲主播相同，请选择其他阵营角色`,
+        );
+      }
+      checkNarrationSentence(reaction.line, 0, 38, `嘉宾插嘴[${i + 1}]`, errors);
+    }
   }
 
   const fields: Array<{ label: string; value: string }> = [
