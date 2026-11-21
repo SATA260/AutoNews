@@ -679,13 +679,57 @@ export async function executeBilibiliUpload(opts: {
     committed = true;
 
     try {
+      const publishedMs = Date.parse(doneIso);
+      const passedItems = ctx.repos.runItems
+        .listByRun(runId)
+        .filter((item) => item.status === 'passed');
+      const eventsById = new Map(ctx.repos.events.listByRun(runId).map((ev) => [ev.id, ev]));
+      const lagHours: number[] = [];
+      let oldestArticlePublishedAt: string | null = null;
+      let newestArticlePublishedAt: string | null = null;
+      for (const item of passedItems) {
+        const ev = eventsById.get(item.eventId);
+        for (const artId of ev?.articleIds ?? []) {
+          const art = ctx.repos.articles.getById(artId);
+          if (!art?.publishedAt) continue;
+          const artMs = Date.parse(art.publishedAt);
+          if (Number.isNaN(artMs)) continue;
+          if (!oldestArticlePublishedAt || art.publishedAt < oldestArticlePublishedAt) {
+            oldestArticlePublishedAt = art.publishedAt;
+          }
+          if (!newestArticlePublishedAt || art.publishedAt > newestArticlePublishedAt) {
+            newestArticlePublishedAt = art.publishedAt;
+          }
+          lagHours.push(Math.max(0, Number(((publishedMs - artMs) / 3600_000).toFixed(2))));
+        }
+      }
+      lagHours.sort((a, b) => a - b);
+      const mid = Math.floor(lagHours.length / 2);
+      const medianPublishLagHours =
+        lagHours.length === 0
+          ? null
+          : lagHours.length % 2 === 1
+            ? lagHours[mid]
+            : Number((((lagHours[mid - 1] ?? 0) + (lagHours[mid] ?? 0)) / 2).toFixed(2));
+      const maxPublishLagHours = lagHours.length > 0 ? (lagHours.at(-1) ?? null) : null;
+
       emitRunEvent(ctx, {
         runId,
         level: 'info',
         stage: 'publish',
         type: 'run_published',
         message: `B 站投稿成功（BV 号：${uploadedBvid}），已消耗 ${stats.consumedArticleCount} 篇文章并释放 ${stats.releasedUnusedCount} 篇未用文章`,
-        data: { bvid: uploadedBvid, ...stats, aiDeclaration: true },
+        data: {
+          bvid: uploadedBvid,
+          ...stats,
+          aiDeclaration: true,
+          latencyMetrics: {
+            oldestArticlePublishedAt,
+            newestArticlePublishedAt,
+            medianPublishLagHours,
+            maxPublishLagHours,
+          },
+        },
       });
     } catch (eventErr) {
       ctx.logger.warn({ err: eventErr, runId, bvid: uploadedBvid }, '记录发布成功事件时出错');

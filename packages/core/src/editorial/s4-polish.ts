@@ -62,7 +62,7 @@ function buildAvailableMediaSection(mediaPool: readonly ArticleMediaAsset[]): st
   }));
   return [
     '## 本条新闻可用配图与截图候选列表（JSON）',
-    '请优先选用真实高信息密度素材（`tweet_shot` 发言原帖截图、`tweet_media` 推文附图、`chart` 跑分对比图、`table_shot` 评测或定价表格截图、`screenshot` 实机界面或架构图）：',
+    '请优先选用真实高信息密度素材（`tweet_shot` 发言原帖截图、`tweet_media` 推文附图、`chart` 跑分对比图、`table_shot` 评测或定价表格截图、`github_card` GitHub 开源项目卡片、`changelog_shot` 官方更新日志截图、`article_section` 去弹窗原文核心截图、`screenshot` 实机界面或架构图）：',
     '- 每条新闻最多只能展示 1 张配图：请将最核心、最有信息量的一张填入 `primaryMediaId`，并将 `preferArticleImage` 设为 `true`，不要填写 `secondaryMediaId`；',
     '- 若候选列表中仅有普通的 `cover` 网页品牌封面图且无实质信息，请留空不填 `primaryMediaId`，并将 `preferArticleImage` 设为 `false`；',
     '- 若选用了图片，请在 `imageCaption` 中填写不超过 44 字的客观准确图注。',

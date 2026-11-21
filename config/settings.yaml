@@ -6,6 +6,9 @@ collector:
   maxImagesPerArticle: 4
   captureWebTables: true
   captureTweetScreenshots: true
+  captureArticleSections: true
+  captureGithubCards: true
+  screenshotScale: 2
 
 issue:
   # 每期条数 N 不在全局设默认值，在新建定时任务或手动触发时显式填写

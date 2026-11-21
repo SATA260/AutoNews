@@ -48,6 +48,34 @@ export interface DomChartFragment {
   titleHint?: string;
 }
 
+/** 去弹窗自动截取原文核心区域/GitHub 卡片/更新日志的输入参数 */
+export interface WebRegionCaptureInput {
+  url: string;
+  kind: 'github_card' | 'changelog_shot' | 'article_section';
+  scale?: 1 | 2;
+  allowedOrigins?: readonly string[];
+}
+
+/** 采集阶段自动截图前隐藏 Cookie 横幅、订阅弹窗与悬浮遮罩的通用样式 */
+export const CLEANUP_OVERLAYS_CSS = `
+  [class*="cookie" i], [id*="cookie" i],
+  [class*="consent" i], [id*="consent" i],
+  [class*="newsletter" i], [id*="newsletter" i],
+  [class*="subscribe-modal" i], [class*="paywall" i],
+  [class*="intercom" i], [id*="intercom" i],
+  [role="dialog"], [aria-modal="true"],
+  .modal-backdrop, .popup-overlay, .toast-container {
+    display: none !important;
+    visibility: hidden !important;
+    opacity: 0 !important;
+    pointer-events: none !important;
+  }
+  html, body {
+    overflow: visible !important;
+    position: static !important;
+  }
+`;
+
 /** 采集阶段共用的浏览器抓取与局部截图驱动接口（便于测试环境离线注入模拟实现） */
 export interface CollectorBrowserDriver {
   /** 加载并渲染动态网页列表后返回完整 HTML 文本 */
@@ -69,6 +97,11 @@ export interface CollectorBrowserDriver {
   /** 将原网页评测或定价表格及矢量图表片段渲染为白底高清 PNG 截图 */
   renderDomFragmentPng(
     fragment: DomChartFragment,
+    opts?: { signal?: AbortSignal },
+  ): Promise<{ png: Buffer; width: number; height: number } | null>;
+  /** 打开原文网页并自动去除弹窗/横幅遮罩，以高倍缩放截取 GitHub 卡片、更新日志或核心正文区域 */
+  captureCleanWebRegionPng?(
+    input: WebRegionCaptureInput,
     opts?: { signal?: AbortSignal },
   ): Promise<{ png: Buffer; width: number; height: number } | null>;
   /** 释放本次采集过程中复用的无头浏览器实例 */
@@ -705,6 +738,109 @@ export function createPlaywrightCollectorDriver(): CollectorBrowserDriver {
             width: Math.round(box.width * 2),
             height: Math.round(box.height * 2),
           };
+        });
+      } catch (err) {
+        if (opts?.signal?.aborted) {
+          throw err;
+        }
+        return null;
+      }
+    },
+
+    /** 打开目标原文页，清理 Cookie/订阅弹窗与悬浮遮罩后以 2x 分辨率截取干净的核心区域 */
+    async captureCleanWebRegionPng(input, opts) {
+      const scale = input.scale ?? 2;
+      await assertSafeFetchTarget(new URL(input.url), {
+        fetchImpl: globalThis.fetch,
+        allowedOrigins: input.allowedOrigins,
+      });
+      const browser = await getBrowser(opts?.signal);
+      const context = await browser.newContext({
+        userAgent: BROWSER_USER_AGENT,
+        viewport: { width: 1280, height: 900 },
+        deviceScaleFactor: scale,
+      });
+      try {
+        return await withAbortableContext(context, opts?.signal, async (ctx) => {
+          await ctx.route('**/*', async (route) => {
+            const reqUrl = route.request().url();
+            if (
+              reqUrl.startsWith('data:') ||
+              reqUrl.startsWith('blob:') ||
+              reqUrl === 'about:blank'
+            ) {
+              await route.continue();
+              return;
+            }
+            try {
+              const parsed = new URL(reqUrl);
+              if (!isAllowedUrlTarget(parsed, { allowedOrigins: input.allowedOrigins })) {
+                await route.abort('blockedbyclient');
+                return;
+              }
+            } catch {
+              await route.abort('blockedbyclient');
+              return;
+            }
+            await route.continue();
+          });
+          const page = await ctx.newPage();
+          await page.goto(input.url, { waitUntil: 'domcontentloaded', timeout: 15_000 });
+          await page.addStyleTag({ content: CLEANUP_OVERLAYS_CSS }).catch(() => undefined);
+          await page
+            .evaluate(() => {
+              for (const el of Array.from(document.querySelectorAll('body *'))) {
+                const style = window.getComputedStyle(el);
+                if (
+                  (style.position === 'fixed' || style.position === 'sticky') &&
+                  el.getBoundingClientRect().height < 260
+                ) {
+                  (el as HTMLElement).style.setProperty('display', 'none', 'important');
+                }
+              }
+            })
+            .catch(() => undefined);
+          await page.waitForTimeout(500);
+
+          const selectorCandidates =
+            input.kind === 'github_card' || input.kind === 'changelog_shot'
+              ? [
+                  '[data-hpc] .Box-body',
+                  '.markdown-body',
+                  '#repo-content-pjax-container article',
+                  'main article',
+                  'main',
+                ]
+              : ['article figure', 'article', 'main', '[role="main"]'];
+
+          for (const selector of selectorCandidates) {
+            const locator = page.locator(selector).first();
+            const visible = await locator.isVisible().catch(() => false);
+            if (!visible) {
+              continue;
+            }
+            const box = await locator.boundingBox().catch(() => null);
+            if (!box || box.width < 320 || box.height < 160) {
+              continue;
+            }
+            const clipHeight = Math.min(box.height, 760);
+            const clipWidth = Math.min(box.width, 1200);
+            const png = await page.screenshot({
+              type: 'png',
+              clip: {
+                x: Math.max(0, box.x),
+                y: Math.max(0, box.y),
+                width: clipWidth,
+                height: clipHeight,
+              },
+            });
+            return {
+              png,
+              width: Math.round(clipWidth * scale),
+              height: Math.round(clipHeight * scale),
+            };
+          }
+          return null;
         });
       } catch (err) {
         if (opts?.signal?.aborted) {

@@ -71,6 +71,9 @@ export const ArticleMediaKindSchema = z.enum([
   'table_shot',
   'tweet_shot',
   'tweet_media',
+  'github_card',
+  'changelog_shot',
+  'article_section',
   'screenshot',
   'cover',
 ]);

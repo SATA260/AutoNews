@@ -368,6 +368,7 @@ async function collectSingleSource(
             if (extracted.extractStatus !== 'failed') {
               const visualResult = await captureArticleVisualMedia({
                 articleId: entry.articleId,
+                articleUrl: entry.canonicalUrl,
                 source,
                 extracted,
                 tweetData: entry.tweetData,

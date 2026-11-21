@@ -1232,7 +1232,7 @@ describe('Bilibili publishing, AI declaration, consumption, and uncertain recove
       const r3 = createRun(core.context, { itemCount: 1, trigger: 'manual-cli' });
       await seedCompletedRunReadyForReview(core, r3);
       await expect(core.publish.approve(r3, { retryDelaysMs: [0] })).rejects.toThrow(
-        /已发布 2 条/,
+        /已发布 2 期/,
       );
       expect(core.context.repos.runs.getById(r3)?.status).toBe('awaiting_review');
 

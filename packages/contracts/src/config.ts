@@ -169,6 +169,12 @@ export const CollectorSettingsSchema = z.object({
   maxImagesPerArticle: z.number().int().min(1).max(8).default(4),
   captureWebTables: z.boolean().default(true),
   captureTweetScreenshots: z.boolean().default(true),
+  /** 无高分原图/图表时，是否自动打开原文页面去弹窗截取核心段落高清图（默认 true） */
+  captureArticleSections: z.boolean().optional(),
+  /** 遇到 GitHub 仓库或 Release 页面时，是否自动截取干净的卡片/更新日志高清图（默认 true） */
+  captureGithubCards: z.boolean().optional(),
+  /** 采集自动截图设备缩放倍率（1 或 2，默认 2 倍高清截图） */
+  screenshotScale: z.union([z.literal(1), z.literal(2)]).optional(),
 });
 /** 采集配置类型 */
 export type CollectorSettings = z.infer<typeof CollectorSettingsSchema>;

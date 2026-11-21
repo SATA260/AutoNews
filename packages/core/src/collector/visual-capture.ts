@@ -38,6 +38,7 @@ async function savePngAssetFile(opts: {
  */
 export async function captureArticleVisualMedia(opts: {
   articleId: string;
+  articleUrl?: string;
   source: SourceDef;
   extracted: ExtractedArticleContent;
   tweetData?: RawXTweet;
@@ -50,6 +51,7 @@ export async function captureArticleVisualMedia(opts: {
 }): Promise<CaptureArticleMediaResult> {
   const {
     articleId,
+    articleUrl,
     source,
     extracted,
     tweetData,
@@ -290,6 +292,82 @@ export async function captureArticleVisualMedia(opts: {
           ...(candidate.width ? { width: candidate.width } : {}),
           ...(candidate.height ? { height: candidate.height } : {}),
         });
+      }
+
+      // 4. 结合白鸦工作流：对 GitHub/更新日志或缺少高信息密度原图的文章自动去弹窗截取 2x 高清片段
+      const screenshotScale = collectorCfg.screenshotScale ?? 2;
+      if (articleUrl && driver.captureCleanWebRegionPng) {
+        const isGithubUrl = /^https?:\/\/(?:www\.)?github\.com\//i.test(articleUrl);
+        const isReleaseUrl = /\/releases(?:\/tag)?\//i.test(articleUrl);
+        if (isGithubUrl && (collectorCfg.captureGithubCards ?? true)) {
+          if (signal?.aborted) {
+            throw new DOMException('已取消', 'AbortError');
+          }
+          const regionKind = isReleaseUrl ? 'changelog_shot' : 'github_card';
+          const shot = await driver.captureCleanWebRegionPng(
+            { url: articleUrl, kind: regionKind, scale: screenshotScale },
+            { signal },
+          );
+          if (shot) {
+            const saved = await savePngAssetFile({
+              articleId,
+              fileSuffix: isReleaseUrl ? 'rel1' : 'gh1',
+              png: shot.png,
+              imagesDir,
+              rootDir,
+            });
+            writtenFiles.push(saved.absPath);
+            mediaAssets.push({
+              id: `${articleId}-${isReleaseUrl ? 'rel1' : 'gh1'}`,
+              articleId,
+              kind: regionKind,
+              imagePath: saved.relPath,
+              sourceUrl: articleUrl,
+              captionHint: isReleaseUrl ? 'GitHub 官方 Release 更新日志截图' : 'GitHub 开源项目页截图',
+              contextSnippet: extracted.excerpt.slice(0, 180),
+              score: 93,
+              width: shot.width,
+              height: shot.height,
+            });
+          }
+        } else if (
+          (collectorCfg.captureArticleSections ?? true) &&
+          !mediaAssets.some((asset) =>
+            ['chart', 'table_shot', 'tweet_shot', 'tweet_media', 'github_card', 'changelog_shot'].includes(
+              asset.kind,
+            ),
+          )
+        ) {
+          if (signal?.aborted) {
+            throw new DOMException('已取消', 'AbortError');
+          }
+          const shot = await driver.captureCleanWebRegionPng(
+            { url: articleUrl, kind: 'article_section', scale: screenshotScale },
+            { signal },
+          );
+          if (shot) {
+            const saved = await savePngAssetFile({
+              articleId,
+              fileSuffix: 'sec1',
+              png: shot.png,
+              imagesDir,
+              rootDir,
+            });
+            writtenFiles.push(saved.absPath);
+            mediaAssets.push({
+              id: `${articleId}-sec1`,
+              articleId,
+              kind: 'article_section',
+              imagePath: saved.relPath,
+              sourceUrl: articleUrl,
+              captionHint: '原文核心内容去弹窗高清截图',
+              contextSnippet: extracted.excerpt.slice(0, 180),
+              score: 88,
+              width: shot.width,
+              height: shot.height,
+            });
+          }
+        }
       }
     }
 
