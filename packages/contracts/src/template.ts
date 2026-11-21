@@ -170,4 +170,12 @@ export interface CoverTemplateData {
   hostName: string;
   /** 主播立绘图片地址；没有立绘时为空字符串 */
   mascotUrl: string;
+  /** 头条关联公司/产品 Logo 图片地址；未命中时为空 */
+  brandLogoUrl?: string;
+  /** 头条关联公司/产品名称；未命中时为空 */
+  brandName?: string;
+  /** 刊次徽章（如“早报”“晚报”“重磅专场”） */
+  editionBadge?: string;
+  /** 封面视觉主题：常规盘点（digest）或单点重磅专场（spotlight） */
+  themeVariant?: 'digest' | 'spotlight';
 }

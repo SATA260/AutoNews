@@ -23,6 +23,7 @@ import { startTemplateHttpServer } from '../templates/server.js';
 import { emitRunEvent } from '../workflow/events.js';
 import { STAGE_CHECKPOINT_REL_PATH } from '../workflow/stages.js';
 import { closeBrowserSafely, resolveChromiumExecutablePath } from './browser.js';
+import { loadLogoCatalog, resolveCompanyIdentity, resolveLogoAssetsRoot } from './company-logos.js';
 import { renderCoverJpg } from './ffmpeg.js';
 
 /** 人工改过的封面文字在任务目录下的保存位置 */
@@ -156,6 +157,35 @@ export async function buildCoverTemplateData(
   const mascotFile = path.join(ctx.paths.rootDir, 'assets', 'mascots', `${hostId}.png`);
   const normalized = normalizeCoverText(text);
 
+  const pkgCheckpoint = await readJsonOrNullWithSchema(
+    path.join(ctx.paths.runDir(runId), STAGE_CHECKPOINT_REL_PATH.package),
+    PackageCheckpointSchema,
+    { fallbackNullOnInvalid: true },
+  );
+  const pkg = pkgCheckpoint?.packageData;
+  const themeVariant: 'digest' | 'spotlight' =
+    pkg?.issueMode === 'spotlight' ? 'spotlight' : 'digest';
+  const editionBadge =
+    themeVariant === 'spotlight' ? '重磅专场' : tzDate.getHours() < 14 ? '早报' : '晚报';
+
+  const headlineItem = pkg?.headlineItemId
+    ? ctx.repos.runItems.getById(pkg.headlineItemId)
+    : undefined;
+  const headlineEntity = headlineItem?.finalJson?.entity;
+  const templateDir = settings.template.cover
+    ? path.resolve(ctx.paths.rootDir, settings.template.cover.dir)
+    : undefined;
+  const logosDir = await resolveLogoAssetsRoot(ctx.paths.rootDir, templateDir);
+  const logoCatalog = logosDir ? await loadLogoCatalog(logosDir) : null;
+  const brandIdentity =
+    headlineEntity || pkg?.headline
+      ? resolveCompanyIdentity({
+          entity: headlineEntity,
+          fallbackText: pkg?.headline,
+          catalog: logoCatalog,
+        })
+      : null;
+
   return {
     title: normalized.title,
     subtitle: normalized.subtitle,
@@ -165,6 +195,10 @@ export async function buildCoverTemplateData(
     hostId,
     hostName: persona?.displayName ?? '',
     mascotUrl: fsSync.existsSync(mascotFile) ? `/__mascot_assets__/${hostId}.png` : '',
+    ...(brandIdentity?.logoUrl ? { brandLogoUrl: brandIdentity.logoUrl } : {}),
+    ...(brandIdentity?.isKnown ? { brandName: brandIdentity.displayName } : {}),
+    editionBadge,
+    themeVariant,
   };
 }
 
@@ -204,9 +238,11 @@ export async function renderCoverImage(opts: {
   const data = await buildCoverTemplateData(ctx, runId, settings, text);
   await fs.mkdir(path.dirname(outJpg), { recursive: true });
   const tmpPng = path.join(path.dirname(outJpg), `.cover-${crypto.randomUUID()}.png`);
+  const logosDir = await resolveLogoAssetsRoot(ctx.paths.rootDir, templateDir);
   const server = await startTemplateHttpServer({
     distDir: templateDir,
     mascotDir: path.join(ctx.paths.rootDir, 'assets', 'mascots'),
+    logosDir,
   });
   const browserToken = crypto.randomUUID();
   let browser: Awaited<ReturnType<typeof chromium.launch>> | null = null;

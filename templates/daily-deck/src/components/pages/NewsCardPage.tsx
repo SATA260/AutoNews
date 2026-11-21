@@ -298,6 +298,12 @@ export const NewsCardPage: React.FC<NewsCardPageProps> = ({
           lineHeight={1.2}
           className="news-editorial-title"
         />
+        {item.actionHint && (
+          <div className="news-action-hint" data-testid="news-action-hint">
+            <span className="news-action-hint-badge">实操检索</span>
+            <span className="news-action-hint-text">{item.actionHint}</span>
+          </div>
+        )}
       </header>
 
       {hasPrimaryImage && <div className="image-spotlight-scrim" aria-hidden="true" />}

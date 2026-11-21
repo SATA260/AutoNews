@@ -168,4 +168,19 @@ describe('整期编排预检中的封面文字', () => {
     expect(res.passed).toBe(true);
     expect(res.warnings.some((w) => w.includes('封面文字'))).toBe(false);
   });
+
+  it('spotlight 专场模式与常规 digest 模式均能通过整期编排预检', () => {
+    const spotlightPkg: IssuePackage = {
+      ...makePackage({ title: 'OpenAI *王炸*', subtitle: '单点专场深度拆解' }),
+      issueMode: 'spotlight',
+    };
+    const res = precheckIssuePackage({
+      pkg: spotlightPkg,
+      expectedItemIds: ['item-1'],
+      limits: LIMITS,
+      publishConfig: PUBLISH_CONFIG,
+      metaTextBlacklist: [],
+    });
+    expect(res.passed).toBe(true);
+  });
 });

@@ -533,4 +533,38 @@ describe('Layer 2-5: Editorial Deck, Segmented Chapter Bar, Virtual Clock & Erro
     expect(subEl).toHaveClass('is-multiline');
     expect(subEl.textContent).toBe('OpenAI发布GPT-6.2双模型Astra和Sol，\n输出字数更少，表现更强');
   });
+
+  it('sanitizes actionHint by stripping accidental URLs and renders the practical search capsule on NewsCardPage', async () => {
+    const sanitized = sanitizeDailyIssue({
+      items: [
+        {
+          title: '开源推理引擎发布新版本',
+          summary: '支持最新量化格式并降低显存占用。',
+          actionHint: 'GitHub 搜索 llama.cpp https://example.com/leak',
+        },
+      ],
+    });
+    expect(sanitized.issue.items[0]!.actionHint).toBe('GitHub 搜索 llama.cpp');
+
+    render(
+      <NewsDeck
+        initialData={{
+          items: [
+            {
+              title: '开源推理引擎发布新版本',
+              summary: '支持最新量化格式并降低显存占用。',
+              actionHint: 'GitHub 搜索 llama.cpp',
+            },
+          ],
+        }}
+      />,
+    );
+
+    await act(async () => {
+      await window.__NEWS_DECK__!.goToPage(1);
+    });
+    const hintEl = screen.getByTestId('news-action-hint');
+    expect(hintEl).toHaveTextContent('实操检索');
+    expect(hintEl).toHaveTextContent('GitHub 搜索 llama.cpp');
+  });
 });

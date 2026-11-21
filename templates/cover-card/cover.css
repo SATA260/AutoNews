@@ -264,3 +264,108 @@ body {
 .subtitle:empty {
   display: none;
 }
+
+/* ---------- 刊次徽章、头条品牌角标与重磅专场主题 ---------- */
+
+.edition-badge {
+  padding: 8px 20px 10px;
+  border-radius: 12px;
+  background: var(--accent);
+  color: #fff;
+  font-size: 34px;
+  font-weight: 800;
+  letter-spacing: 0.06em;
+}
+
+.edition-badge:empty {
+  display: none;
+}
+
+.brand-badge {
+  margin-top: 22px;
+  align-self: flex-start;
+  display: inline-flex;
+  align-items: center;
+  gap: 16px;
+  padding: 10px 24px 10px 16px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.94);
+  border: 3px solid var(--ink);
+  box-shadow: 6px 6px 0 var(--accent-soft);
+}
+
+.brand-badge.is-hidden {
+  display: none;
+}
+
+.brand-logo {
+  width: 48px;
+  height: 48px;
+  object-fit: contain;
+  display: block;
+}
+
+.brand-logo.is-missing {
+  display: none;
+}
+
+.brand-name {
+  font-size: 34px;
+  font-weight: 800;
+  color: var(--ink);
+  letter-spacing: 0.02em;
+}
+
+.brand-name:empty {
+  display: none;
+}
+
+/* 重磅单点专场模式（spotlight）：高对比深色底板 + 强高亮强调色，与常规盘点形成一眼区分 */
+.cover[data-variant="spotlight"] {
+  --paper: #12151f;
+  --ink: #f7f4ed;
+  --ink-muted: #b6b3aa;
+}
+
+.cover[data-variant="spotlight"] .bg-dots {
+  background-image: radial-gradient(rgba(255, 255, 255, 0.14) 2px, transparent 2.4px);
+}
+
+.cover[data-variant="spotlight"] .masthead-logo {
+  background: #fff;
+  color: #12151f;
+}
+
+.cover[data-variant="spotlight"] .brand-badge {
+  background: rgba(255, 255, 255, 0.96);
+  border-color: var(--accent);
+}
+
+.cover[data-variant="spotlight"] .brand-name {
+  color: #12151f;
+}
+
+.cover[data-variant="spotlight"] .title {
+  color: #fff;
+  -webkit-text-stroke: 0.055em #0b0d14;
+  text-shadow: 0.04em 0.04em 0 var(--accent-deep);
+}
+
+.cover[data-variant="spotlight"] .title .hl {
+  color: #ffd166;
+}
+
+.cover[data-variant="spotlight"] .subtitle {
+  background: #fff;
+  color: #12151f;
+  box-shadow: 10px 10px 0 var(--accent);
+}
+
+.cover[data-variant="spotlight"] .host-sticker {
+  border-color: var(--accent);
+  box-shadow: 8px 8px 0 var(--accent);
+}
+
+.cover[data-variant="spotlight"] .host-sticker-label {
+  color: #5c5851;
+}

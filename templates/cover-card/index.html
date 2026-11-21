@@ -7,7 +7,7 @@
     <link rel="stylesheet" href="./cover.css" />
   </head>
   <body>
-    <main id="cover" class="cover" data-host="gemini" aria-label="视频封面">
+    <main id="cover" class="cover" data-host="gemini" data-variant="digest" aria-label="视频封面">
       <!-- 背景层：纸张底色、点阵与主播主题色圆形色块 -->
       <div class="bg-dots" aria-hidden="true"></div>
       <div class="bg-orb" aria-hidden="true"></div>
@@ -27,9 +27,14 @@
       <section class="copy">
         <header class="masthead">
           <span id="masthead" class="masthead-logo">AI 每日报</span>
+          <span id="edition-badge" class="edition-badge"></span>
           <span id="date" class="masthead-date"></span>
           <span id="issue" class="masthead-issue"></span>
         </header>
+        <div id="brand-badge" class="brand-badge is-hidden">
+          <img id="brand-logo" class="brand-logo" alt="" />
+          <span id="brand-name" class="brand-name"></span>
+        </div>
         <div class="title-box">
           <h1 id="title" class="title"></h1>
         </div>

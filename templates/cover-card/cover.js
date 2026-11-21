@@ -43,8 +43,12 @@
   const el = {
     root: document.getElementById('cover'),
     masthead: document.getElementById('masthead'),
+    editionBadge: document.getElementById('edition-badge'),
     date: document.getElementById('date'),
     issue: document.getElementById('issue'),
+    brandBadge: document.getElementById('brand-badge'),
+    brandLogo: document.getElementById('brand-logo'),
+    brandName: document.getElementById('brand-name'),
     title: document.getElementById('title'),
     subtitle: document.getElementById('subtitle'),
     mascot: document.getElementById('mascot'),
@@ -54,6 +58,7 @@
 
   let warnings = [];
   let mascotPromise = Promise.resolve();
+  let brandLogoPromise = Promise.resolve();
   let layoutPromise = Promise.resolve();
 
   /** 把任意输入转成去掉首尾空白的字符串 */
@@ -198,14 +203,53 @@
     });
   }
 
+  /** 加载头条公司/产品 Logo 徽章；未命中或加载失败时优雅隐藏，不影响出图 */
+  function applyBrandBadge(logoUrl, brandName) {
+    if (!el.brandBadge || !el.brandLogo || !el.brandName) {
+      return Promise.resolve();
+    }
+    el.brandName.textContent = brandName;
+    el.brandLogo.classList.remove('is-missing');
+    if (!logoUrl && !brandName) {
+      el.brandLogo.removeAttribute('src');
+      el.brandBadge.classList.add('is-hidden');
+      return Promise.resolve();
+    }
+    el.brandBadge.classList.remove('is-hidden');
+    if (!logoUrl) {
+      el.brandLogo.removeAttribute('src');
+      el.brandLogo.classList.add('is-missing');
+      return Promise.resolve();
+    }
+    return new Promise((resolve) => {
+      el.brandLogo.onload = () => {
+        const decode = el.brandLogo.decode ? el.brandLogo.decode() : Promise.resolve();
+        decode.catch(() => undefined).then(resolve);
+      };
+      el.brandLogo.onerror = () => {
+        el.brandLogo.classList.add('is-missing');
+        if (!brandName) {
+          el.brandBadge.classList.add('is-hidden');
+        }
+        resolve();
+      };
+      el.brandLogo.src = logoUrl;
+    });
+  }
+
   /** 写入封面数据并重新排版 */
   function setData(input) {
     const data = input && typeof input === 'object' ? input : {};
     warnings = [];
     const hostId = str(data.hostId) in MASCOT_LAYOUT ? str(data.hostId) : 'gemini';
+    const variant = str(data.themeVariant) === 'spotlight' ? 'spotlight' : 'digest';
     el.root.dataset.host = hostId;
+    el.root.dataset.variant = variant;
 
     el.masthead.textContent = str(data.masthead) || 'AI 每日报';
+    if (el.editionBadge) {
+      el.editionBadge.textContent = str(data.editionBadge);
+    }
     el.date.textContent = str(data.date);
     el.issue.textContent = str(data.issueNumber);
 
@@ -219,6 +263,7 @@
     el.sticker.classList.toggle('is-hidden', !hostName);
 
     mascotPromise = applyMascot(hostId, str(data.mascotUrl));
+    brandLogoPromise = applyBrandBadge(str(data.brandLogoUrl), str(data.brandName));
     const fontsReady = document.fonts ? document.fonts.ready : Promise.resolve();
     layoutPromise = fontsReady.then(() => layout());
   }
@@ -230,9 +275,9 @@
     });
   }
 
-  /** 等待字体、立绘与排版全部完成 */
+  /** 等待字体、立绘、品牌Logo与排版全部完成 */
   async function waitUntilReady() {
-    await Promise.all([mascotPromise, layoutPromise]);
+    await Promise.all([mascotPromise, brandLogoPromise, layoutPromise]);
     await nextFrames();
     return { ok: !warnings.some((w) => w.startsWith('缺少')), warnings: warnings.slice() };
   }

@@ -537,6 +537,7 @@ export function createDailyDeckAdapter(): TemplateAdapter {
             progressLabel: item.progressLabel,
             title: item.title,
             summary: item.highlight ?? item.summary,
+            actionHint: item.actionHint ?? null,
             cards: buildAdapterCards(item),
             keyPoints: item.keyPoints.slice(0, 3),
             imageUrl: assetPath,

@@ -70,6 +70,7 @@ export interface NewsItemInput {
   progressLabel?: string;
   title: string;
   summary: string;
+  actionHint?: string | null;
   cards?: NewsCardInput[];
   keyPoints?: string[];
   imageUrl?: string | null;
@@ -147,6 +148,7 @@ export interface SanitizedNewsItem {
   progressLabel: string;
   title: string;
   summary: string;
+  actionHint: string;
   cards: SanitizedInfoCard[];
   keyPoints: string[];
   imageUrl: string | null;
@@ -232,6 +234,7 @@ export const HARD_LIMITS = {
   progressLabel: 12,
   title: 48,
   summary: 100,
+  actionHint: 30,
   cardsMaxCount: 8,
   /** 单页最多同时展示的卡片张数（多出的卡片保留在数据里，但不上屏） */
   cardsVisibleMax: 4,
@@ -763,6 +766,18 @@ function sanitizeSingleNewsItem(
     warnings,
     !rawSummary,
   );
+  const rawActionHint = normalizeText(obj.actionHint)
+    .replace(/https?:\/\/\S+/gi, '')
+    .trim();
+  const actionHint = rawActionHint
+    ? cleanAndTruncate(
+        rawActionHint,
+        HARD_LIMITS.actionHint,
+        '',
+        `${basePath}.actionHint`,
+        warnings,
+      )
+    : '';
 
   const rawKeyPoints = Array.isArray(obj.keyPoints) ? obj.keyPoints : [];
   if (rawKeyPoints.length > HARD_LIMITS.keyPointsCount) {
@@ -907,6 +922,7 @@ function sanitizeSingleNewsItem(
     progressLabel,
     title,
     summary,
+    actionHint,
     cards,
     keyPoints,
     imageUrl,
