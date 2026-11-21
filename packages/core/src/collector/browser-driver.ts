@@ -750,17 +750,17 @@ export function createPlaywrightCollectorDriver(): CollectorBrowserDriver {
     /** 打开目标原文页，清理 Cookie/订阅弹窗与悬浮遮罩后以 2x 分辨率截取干净的核心区域 */
     async captureCleanWebRegionPng(input, opts) {
       const scale = input.scale ?? 2;
-      await assertSafeFetchTarget(new URL(input.url), {
-        fetchImpl: globalThis.fetch,
-        allowedOrigins: input.allowedOrigins,
-      });
-      const browser = await getBrowser(opts?.signal);
-      const context = await browser.newContext({
-        userAgent: BROWSER_USER_AGENT,
-        viewport: { width: 1280, height: 900 },
-        deviceScaleFactor: scale,
-      });
       try {
+        await assertSafeFetchTarget(new URL(input.url), {
+          fetchImpl: globalThis.fetch,
+          allowedOrigins: input.allowedOrigins,
+        });
+        const browser = await getBrowser(opts?.signal);
+        const context = await browser.newContext({
+          userAgent: BROWSER_USER_AGENT,
+          viewport: { width: 1280, height: 900 },
+          deviceScaleFactor: scale,
+        });
         return await withAbortableContext(context, opts?.signal, async (ctx) => {
           await ctx.route('**/*', async (route) => {
             const reqUrl = route.request().url();

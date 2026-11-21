@@ -1224,11 +1224,17 @@ describe('Bilibili publishing, AI declaration, consumption, and uncertain recove
       await core.publish.approve(r1, { retryDelaysMs: [0] });
       expect(core.context.repos.runs.getById(r1)?.status).toBe('published');
 
+      core.context.db
+        .prepare("UPDATE articles SET status = 'new', reserved_by_run = NULL WHERE id = 'art-used'")
+        .run();
       const r2 = createRun(core.context, { itemCount: 1, trigger: 'manual-cli' });
       await seedCompletedRunReadyForReview(core, r2);
       await core.publish.approve(r2, { retryDelaysMs: [0] });
       expect(core.context.repos.runs.getById(r2)?.status).toBe('published');
 
+      core.context.db
+        .prepare("UPDATE articles SET status = 'new', reserved_by_run = NULL WHERE id = 'art-used'")
+        .run();
       const r3 = createRun(core.context, { itemCount: 1, trigger: 'manual-cli' });
       await seedCompletedRunReadyForReview(core, r3);
       await expect(core.publish.approve(r3, { retryDelaysMs: [0] })).rejects.toThrow(/已发布 2 期/);

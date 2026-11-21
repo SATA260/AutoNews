@@ -182,12 +182,9 @@ describe('主播配置、情绪推导、口型包络提取与帧时间轴量化'
     expect(polishPrompt).not.toContain('我们团队这波直接');
     expect(polishPrompt).not.toContain('哈哈，我Gemini又站起来了');
     expect(polishPrompt).not.toContain('不愧是你啊，Anthropic');
-    expect(polishPrompt).toContain('严禁代表任何公司发言');
-    expect(polishPrompt).toContain('客观、合理、正义');
-    expect(polishPrompt).toContain('严禁照抄任何示例原句');
-    expect(polishPrompt).toContain('❌ 错误一');
-    expect(polishPrompt).toContain('❌ 错误三');
-    expect(polishPrompt).toContain('✅ 正确改写');
+    expect(polishPrompt).toContain('不是任何公司的员工或官方发言人');
+    expect(polishPrompt).toContain('严禁照抄示例原句');
+    expect(polishPrompt).toContain('actionHint');
     expect(polishPrompt).toContain('roastStyle');
 
     const revisePrompt = await renderPromptTemplate('s4-revise.md', {
@@ -431,18 +428,22 @@ describe('主播配置、情绪推导、口型包络提取与帧时间轴量化'
       hostSelfName: gemini?.selfName,
     };
 
-    const missingSelfIntro = precheckIssuePackage({
+    const missingOutroSelfName = precheckIssuePackage({
       pkg: {
         ...compactBasePkg,
         intro: {
-          narration: ['大家好，欢迎收看今天的AI每日报，接下来请看详细报道。'],
+          narration: ['谷歌刚把多模态新能力放出来了，咱们直接看今天重点。'],
           hostComment: '直接进入今天的内容。',
+        },
+        outro: {
+          ...compactBasePkg.outro,
+          narration: ['今天的资讯播送完了，明天见。'],
         },
       },
       ...commonCompactOpts,
     });
-    expect(missingSelfIntro.passed).toBe(false);
-    expect(missingSelfIntro.errors.some((e) => e.includes('自我介绍'))).toBe(true);
+    expect(missingOutroSelfName.passed).toBe(false);
+    expect(missingOutroSelfName.errors.some((e) => e.includes('结尾口播'))).toBe(true);
 
     const companyMentionIntro = precheckIssuePackage({
       pkg: {
@@ -461,10 +462,7 @@ describe('主播配置、情绪推导、口型包络提取与帧时间轴量化'
       pkg: {
         ...compactBasePkg,
         intro: {
-          narration: [
-            '大家好，我是哈基米，欢迎收看今天的AI每日报。',
-            '屏幕上是今天的主要内容，接下来请看详细报道。',
-          ],
+          narration: ['谷歌刚把多模态新能力放出来了，咱们直接看今天重点。'],
           hostComment: '直接进入今天的内容。',
         },
       },

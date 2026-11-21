@@ -194,7 +194,6 @@ if (stage === 'polish') {
 
   const paddedLabel =
     rawTitle.length >= 4 ? rawTitle.slice(0, 9) : `${rawTitle}动态速递`.slice(0, 9);
-  const compactMode = /总字数40～140字/.test(prompt);
   const defaultCards = [
     {
       icon: 'rocket',
@@ -225,18 +224,17 @@ if (stage === 'polish') {
     category: '大模型',
     entity: 'OpenAI',
     summary: '主流机构推出新一轮人工智能更新，当前用户已可使用。',
-    ...(compactMode ? { highlight: '人工智能技术获得更新', preferArticleImage: false } : {}),
+    highlight: '人工智能技术获得更新',
+    preferArticleImage: false,
     cards: defaultCards,
     keyPoints: ['新功能已正式推出', '面向普通用户开放体验'],
     detail: '本次发布重点围绕实用性优化，降低了普通人的使用门槛。',
     hostComment: '这项更新对日常工作很有帮助。',
-    narration: compactMode
-      ? [
-          '主流研发团队正式发布新一代人工智能工具更新。',
-          '新版本围绕高频场景优化响应效率，目前已向常规用户陆续开放。',
-          '具体功能边界以官方说明为准，整体改动相当实在。',
-        ]
-      : ['今天来看一条新动态。', '新功能已经面向大众用户正式推出。'],
+    narration: [
+      '主流研发团队正式发布新一代人工智能工具更新。',
+      '新版本围绕高频场景优化响应效率，目前已向常规用户陆续开放。',
+      '具体功能边界以官方说明为准，整体改动相当实在。',
+    ],
     evidence: draft.evidence,
   });
 }
@@ -278,7 +276,10 @@ if (stage === 'revise') {
     progressLabel: prevLabel.length >= 4 ? prevLabel.slice(0, 9) : '修正核心进展',
     summary: '经过核对修正，该功能目前在测试范围外暂未全部开放。',
     cards: prevCards,
-    narration: ['经过仔细核对原文信息。', '该新能力目前仅在局部范围内开放测试。'],
+    narration: [
+      '对照官方原文核对后确认，这项新能力目前仅在局部范围内开放测试。',
+      '后续全量开放节奏以官方正式公告为准。',
+    ],
     evidence:
       Array.isArray(prev.evidence) && prev.evidence.length > 0
         ? prev.evidence
@@ -312,12 +313,7 @@ if (stage === 'package') {
     headline: '今日头条看点：大模型应用再迎实用升级',
     leadSummary: '今天重点为你盘点几条贴近日常工作的人工智能新动向。',
     intro: {
-      narration: selfName
-        ? [
-            `大家好，我是${selfName}，欢迎收看今天的AI每日报。`,
-            '屏幕上是今天的主要内容，接下来请看详细报道。',
-          ]
-        : ['大家好，欢迎收看今天的 AI 每日报。', '屏幕上是今天的主要内容，接下来请看详细报道。'],
+      narration: ['主流研发团队刚发布新一代工具更新，咱们直接看今天重点。'],
       hostComment: '直接看今天重点。',
     },
     outro: {

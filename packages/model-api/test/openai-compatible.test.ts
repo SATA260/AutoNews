@@ -208,6 +208,8 @@ describe('OpenAI 兼容模型 API', () => {
           entity: polished.entity,
           summary: polished.summary,
           highlight: null,
+          actionHint: null,
+          isHeadlineTier: null,
           preferArticleImage: null,
           primaryMediaId: null,
           secondaryMediaId: null,
@@ -237,7 +239,16 @@ describe('OpenAI 兼容模型 API', () => {
           revisionNotes: [],
         },
       },
-      { schema: IssuePackageSchema, wire: pack, output: pack },
+      {
+        schema: IssuePackageSchema,
+        wire: {
+          ...pack,
+          publish: { ...pack.publish, titleCandidates: null },
+          issueMode: null,
+          guestReactions: null,
+        },
+        output: pack,
+      },
     ];
     const mock = vi.fn<typeof fetch>();
     const { api } = setup(mock);

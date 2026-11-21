@@ -77,6 +77,7 @@ async function setupRenderWorkspace(templateName: 'solid-color' | 'daily-deck') 
     doc.setIn(['issue', 'allowPartial'], false);
     doc.setIn(['editorial', 'compactStyle'], false);
     doc.setIn(['editorial', 'requireImageOptIn'], false);
+    doc.setIn(['render', 'deviceScaleFactor'], 1);
   });
   await updateSettingsFile(settingsFile, {
     clis: {

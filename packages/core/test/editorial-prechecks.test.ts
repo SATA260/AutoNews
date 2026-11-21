@@ -181,7 +181,7 @@ describe('editorial foundation: prompts, similarity, and deterministic prechecks
     expect(packagePrompt).toContain('直给干货的钩子开场');
     expect(packagePrompt).toContain('把“我是谁”放在结尾');
     expect(packagePrompt).toContain('AI圈大地震！上期示例标题');
-    expect(packagePrompt).toContain('黑鸦标题生成 Skill');
+    expect(packagePrompt).toContain('黑鸦爆款标题 Skill');
   });
 
   it('passes precheck for valid quotes (including 90% LCS) and normalized comma/full-width numbers', () => {
@@ -964,7 +964,7 @@ describe('editorial foundation: prompts, similarity, and deterministic prechecks
       hostSelfName: '聪明的大肥鱼',
     });
     expect(missingOutroSelfName.passed).toBe(false);
-    expect(missingOutroSelfName.errors.some((e) => e.includes('outro.narration'))).toBe(true);
+    expect(missingOutroSelfName.errors.some((e) => e.includes('结尾口播'))).toBe(true);
 
     const badCandidate = precheckIssuePackage({
       pkg: {
