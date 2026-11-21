@@ -6,7 +6,6 @@ import {
   extractArabicNumbers,
   isDuplicateOfHistory,
   isExactTitleMatch,
-  loadPromptSkill,
   longestCommonSubstringLength,
   normalizeTitleForExactMatch,
   precheckIssuePackage,
@@ -170,7 +169,6 @@ describe('editorial foundation: prompts, similarity, and deterministic prechecks
     expect(selectPrompt).toContain('Gemini 4 Neon');
     expect(selectPrompt).toContain('同一具体事件');
 
-    const titleSkillRules = await loadPromptSkill('skills/heiya-title.md');
     const packagePrompt = await renderPromptTemplate('s6-package.md', {
       personaJson: '无特定角色',
       date: '2026-11-19',
@@ -179,7 +177,6 @@ describe('editorial foundation: prompts, similarity, and deterministic prechecks
       issueMode: 'digest',
       passedItemsJson: '[]',
       recentTitles: '- AI圈大地震！上期示例标题',
-      titleSkillRules,
       contentLimitsJson: '{}',
       publishLimitsJson: '{}',
       coverTitleMax: '14',
@@ -190,7 +187,11 @@ describe('editorial foundation: prompts, similarity, and deterministic prechecks
     expect(packagePrompt).toContain('干脆利落的性格收尾');
     expect(packagePrompt).toContain('本期看点');
     expect(packagePrompt).toContain('AI圈大地震！上期示例标题');
-    expect(packagePrompt).toContain('黑鸦爆款标题 Skill');
+    expect(packagePrompt).toContain('AI圈大地震！');
+    expect(packagePrompt).toContain('炸裂！');
+    expect(packagePrompt).toContain('三档差异化候选策略');
+    expect(packagePrompt).not.toContain('{{titleSkillRules}}');
+    expect(packagePrompt).not.toContain('严禁反复套用');
   });
 
   it('passes precheck for valid quotes (including 90% LCS) and normalized comma/full-width numbers', () => {

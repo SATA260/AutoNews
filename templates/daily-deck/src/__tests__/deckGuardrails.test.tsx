@@ -606,7 +606,8 @@ describe('Layer 2-5: Editorial Deck, Segmented Chapter Bar, Virtual Clock & Erro
     });
     const bubble = screen.getByTestId('guest-reaction-bubble');
     expect(bubble).toHaveAttribute('data-guest-host', 'claude');
-    expect(bubble).toHaveTextContent('小克 插嘴');
+    expect(bubble.querySelector('.guest-reaction-name')).toHaveTextContent('小克');
+    expect(bubble).not.toHaveTextContent('插嘴');
     expect(bubble).toHaveTextContent('额度给得挺大方，高峰期别掉链子就行。');
   });
 });

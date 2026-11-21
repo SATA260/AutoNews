@@ -273,7 +273,7 @@ export const IssuePackageSchema = z.object({
   }),
   publish: z.object({
     title: z.string().min(1),
-    /** 供审阅台一键切换的多档候选标题（由黑鸦标题 Skill 生成） */
+    /** 供审阅台一键切换的多档候选标题 */
     titleCandidates: z.array(z.string().min(1)).max(5).optional(),
     descriptionIntro: z.string().min(1),
     tags: z.array(z.string().min(1)),

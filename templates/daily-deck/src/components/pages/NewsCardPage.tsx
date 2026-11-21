@@ -399,7 +399,7 @@ export const NewsCardPage: React.FC<NewsCardPageProps> = ({
             className="guest-reaction-bubble"
             data-testid="guest-reaction-bubble"
             data-guest-host={item.guestReaction.hostId}
-            aria-label="跨阵营嘉宾插嘴"
+            aria-label={item.guestReaction.hostName}
           >
             {item.guestReaction.hostId !== 'none' && (
               <img
@@ -409,7 +409,7 @@ export const NewsCardPage: React.FC<NewsCardPageProps> = ({
               />
             )}
             <div className="guest-reaction-body">
-              <span className="guest-reaction-name">{item.guestReaction.hostName} 插嘴</span>
+              <span className="guest-reaction-name">{item.guestReaction.hostName}</span>
               <p className="guest-reaction-line">{item.guestReaction.line}</p>
             </div>
           </aside>

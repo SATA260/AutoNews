@@ -38,7 +38,6 @@ editorial:
   historyDedupDays: 14
   compactStyle: true # 启用紧凑型口播与要点约束
   requireImageOptIn: true # 仅在高价值素材或人工指定时配备新闻插图
-  titleSkillFile: skills/heiya-title.md # 黑鸦爆款标题 Skill
   spotlightScoreThreshold: 9.2 # 达到该分值自动将当档早/晚报升级为大事件主推专场
   headlineNarrationMaxChars: 180 # 常规档头条口播总字数上限
   briefNarrationMaxChars: 95 # 次要短讯口播总字数上限

@@ -235,7 +235,7 @@ const SettingsFieldsSchema = z.object({
     compactStyle: z.boolean().default(false),
     /** 是否仅在高价值或显式指定配图时展示文章插图，默认关闭 */
     requireImageOptIn: z.boolean().default(false),
-    /** 标题生成 Skill 相对 prompts 目录的路径（未填时默认 skills/heiya-title.md） */
+    /** 兼容旧配置快照保留的可选字段，当前投稿标题规范已直接内置于整期编排提示词 */
     titleSkillFile: z.string().optional(),
     /** 触发大事件主推（spotlight）模式的头条分值阈值（未填时默认 9.2） */
     spotlightScoreThreshold: z.number().min(1).max(10).optional(),

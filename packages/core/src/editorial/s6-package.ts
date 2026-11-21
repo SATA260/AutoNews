@@ -25,7 +25,7 @@ import { writeFileAtomic } from '../storage/files.js';
 import { invokeStageLlm } from './llm.js';
 import { formatPersonaForPrompt, getRunPersona } from './personas.js';
 import { precheckIssuePackage } from './prechecks.js';
-import { loadPromptSkill, renderPromptTemplate } from './prompts.js';
+import { renderPromptTemplate } from './prompts.js';
 import { resolveContentLimits } from './s4-polish.js';
 
 const MAX_PACKAGE_PRECHECK_RETRIES = 2;
@@ -120,9 +120,6 @@ export async function runPackageStage(
     topScore >= (settings.editorial.spotlightScoreThreshold ?? 9.2) && itemsPayload.length <= 3
       ? 'spotlight'
       : 'digest';
-  const titleSkillRules = await loadPromptSkill(
-    settings.editorial.titleSkillFile ?? 'skills/heiya-title.md',
-  );
   const recentTitles = ctx.repos.publish.listRecentTitles(runId, 10);
   const recentTitlesText =
     recentTitles.length > 0
@@ -134,7 +131,6 @@ export async function runPackageStage(
     dateDisplay,
     issueNumber,
     issueMode,
-    titleSkillRules,
     passedItemsJson: JSON.stringify(itemsPayload, null, 2),
     recentTitles: recentTitlesText,
     contentLimitsJson: JSON.stringify(limits, null, 2),
